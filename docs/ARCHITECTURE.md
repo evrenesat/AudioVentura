@@ -1,5 +1,35 @@
 # Architecture
 
+## Checkpoint 8 private web UI
+
+The main controller app is created by `ace_service.app.create_app` and binds
+only to the configured loopback host. It disables API documentation, requires
+constant-time HTTP Basic authentication on controller routes, and bootstraps
+an HttpOnly same-site CSRF cookie for unsafe browser form posts. A middleware
+adds a restrictive CSP, no-sniff, no-referrer, frame-deny, and no-store headers
+to authenticated HTML, JSON, and media responses.
+
+`/create` and `/cover` validate the existing original/cover request models,
+persist jobs before enqueueing them on the single controller worker, and do not
+block original requests on home-ingest readiness. `/jobs` and the dashboard
+show durable progress and recent history. `/jobs/{id}/status` is a bounded
+JSON polling surface used by the mobile-friendly detail page.
+
+Playback and downloads resolve an output by database ID, enforce controlled
+audio MIME types, reject traversal and every symlink component, and verify the
+recorded size and SHA-256 before returning a `FileResponse`. The public
+transfer app is still a distinct FastAPI instance and has no UI, health, or
+media routes.
+
+`/healthz` checks the process, SQLite, and writable data layout. `/readyz`
+reports controller/database, Runpod, home-ingest, and public-transfer
+components separately; a home outage degrades readiness without preventing
+original-song submission. The home service exposes an authenticated `/healthz`
+probe for this status display. Each external readiness probe has a separate
+five-second application deadline, so an accepted but unresponsive service is
+reported as unavailable without inheriting the long timeout used by cover
+preparation or generation.
+
 ## Checkpoint 7 cover workflow
 
 `CoverRequest` validates one approved single-video YouTube URL, required rights

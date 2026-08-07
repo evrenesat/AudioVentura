@@ -1,3 +1,19 @@
+# ACE Service
+
+The controller is a private FastAPI web app for original-song and YouTube-cover
+jobs. It binds to `127.0.0.1:8000`, uses HTTP Basic plus same-site CSRF for the
+browser UI, persists jobs in SQLite, and serves completed audio only through
+authenticated controller routes. The separate transfer app remains the only
+publicly proxied surface and binds to `127.0.0.1:8001`.
+
+Run the controller locally with configured credentials using:
+
+```text
+uv run python -m ace_service
+```
+
+The detailed deployment and distributed-runtime handoff follows below.
+
 # aflow Handoff Plan: Hetzner + Home Ingest + Runpod Flex ACE-Step Service
 
 Build the first usable release of a private music-generation service with a deliberately split runtime:

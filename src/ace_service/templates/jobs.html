@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Job history · ACE Service{% endblock %}
+{% block content %}
+<section class="section-heading"><div><p class="eyebrow">History</p><h1>Your jobs</h1></div><a class="button" href="/create">New original</a></section>
+{% if jobs %}<div class="job-list">{% for job in jobs %}<a class="job-card" href="/jobs/{{ job.job_id }}"><div class="job-card-top"><span class="tag">{{ job.job_type_label }}</span><span class="status status-{{ job.status }}">{{ job.status_label }}</span></div><h3>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h3><p>{{ job.created_at }} · {{ job.completed_variations }}/{{ job.variation_count }} variations · {{ job.output_format|upper }}</p></a>{% endfor %}</div>{% else %}<div class="empty"><p>No jobs yet.</p></div>{% endif %}
+{% endblock %}

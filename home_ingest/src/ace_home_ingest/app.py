@@ -147,6 +147,12 @@ def create_app(
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service = service
 
+    @app.get("/healthz")
+    async def healthz(authorization: str | None = Header(default=None)) -> dict[str, str]:
+        if not _valid_bearer(authorization, resolved_settings.token):
+            raise HTTPException(status_code=401, detail="authentication required")
+        return {"status": "ok"}
+
     @app.post(
         "/v1/prepare-youtube-cover",
         response_model=PrepareCoverResponse,

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · ACE Service{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">Private music generation</p>
+    <h1>Make something worth replaying.</h1>
+    <p class="lede">Create an original song or reinterpret one public YouTube video.</p>
+  </div>
+  <div class="actions">
+    <a class="button" href="/create">New original</a>
+    <a class="button secondary" href="/cover">New cover</a>
+  </div>
+</section>
+
+{% if not readiness.components.runpod_api.ok %}
+<div class="banner warning" role="status">Runpod is unavailable. New jobs will remain safely queued or fail with a clear status.</div>
+{% endif %}
+{% if not readiness.components.home_ingest.ok %}
+<div class="banner warning" role="status">Home ingest is unavailable. Original songs remain available; cover preparation will wait or fail safely.</div>
+{% endif %}
+
+<section class="section-heading">
+  <h2>Recent jobs</h2>
+  <a href="/jobs">View all</a>
+</section>
+{% if jobs %}
+<div class="job-list">
+  {% for job in jobs %}
+  <a class="job-card" href="/jobs/{{ job.job_id }}">
+    <div class="job-card-top"><span class="tag">{{ job.job_type_label }}</span><span class="status status-{{ job.status }}">{{ job.status_label }}</span></div>
+    <h3>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h3>
+    <p>{{ job.created_at }} · {{ job.completed_variations }}/{{ job.variation_count }} variations · {{ job.output_format|upper }}</p>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty"><p>No jobs yet.</p><a href="/create">Create your first song</a></div>
+{% endif %}
+{% endblock %}

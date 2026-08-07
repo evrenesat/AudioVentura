@@ -14,3 +14,8 @@
 - Connected cover jobs to home-ingest, verified SFTP source finalization,
   signed Runpod source/output capabilities, cover payload mapping, restart
   polling, and non-retained source cleanup.
+- Added the authenticated mobile-friendly controller UI with Basic auth,
+  same-site CSRF, job forms/history/status polling, readiness banners,
+  authenticated playback/download routes, and media containment/checksum
+  validation. Kept the UI app separate from the public transfer app and added
+  an authenticated home-ingest health probe.

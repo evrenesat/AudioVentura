@@ -1,0 +1,536 @@
+"""Authenticated HTML, JSON status, readiness, and media routes."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import inspect
+import os
+import tempfile
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
+from sqlalchemy import select, text
+
+from ace_service.auth import (
+    attach_csrf_cookie,
+    csrf_token,
+    parse_form,
+    require_basic_auth,
+    require_csrf,
+)
+from ace_service.config import ServiceSettings
+from ace_service.models import (
+    Job,
+    JobStatus,
+    JobType,
+    Output,
+    OutputFormat,
+    VariationAttempt,
+    utc_now,
+)
+from ace_service.repository import create_cover_job, create_original_job, get_job, get_output
+from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
+
+_TEMPLATES = Path(__file__).with_name("templates")
+_STATIC = Path(__file__).with_name("static")
+_MIME_TYPES = {"audio/mpeg", "audio/flac", "audio/wav"}
+_READINESS_PROBE_TIMEOUT_SECONDS = 5.0
+_FORMAT_MIME = {
+    OutputFormat.MP3: "audio/mpeg",
+    OutputFormat.FLAC: "audio/flac",
+    OutputFormat.WAV: "audio/wav",
+}
+_STATUS_LABELS = {
+    JobStatus.QUEUED: "Queued",
+    JobStatus.INGESTING: "Preparing source at home",
+    JobStatus.STAGING: "Staging source",
+    JobStatus.CLOUD_QUEUED: "Waiting for cloud GPU",
+    JobStatus.GENERATING: "Generating",
+    JobStatus.COMPLETED: "Completed",
+    JobStatus.FAILED: "Failed",
+}
+
+
+def register_web_routes(app: FastAPI) -> None:
+    """Mount only private controller routes on the main app."""
+
+    templates = Jinja2Templates(directory=str(_TEMPLATES))
+    app.mount("/static", _static_app(_STATIC), name="static")
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next: Any) -> Response:
+        response = cast(Response, await call_next(request))
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+            "form-action 'self'; media-src 'self'; object-src 'none'; "
+            "script-src 'self'; style-src 'self'",
+        )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        if request.url.path.startswith("/static/"):
+            response.headers.setdefault("Cache-Control", "public, max-age=3600")
+        else:
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
+
+    async def authenticated(request: Request) -> None:
+        settings: ServiceSettings = app.state.settings
+        require_basic_auth(request, settings.service_username, settings.service_password)
+
+    def render(
+        request: Request,
+        name: str,
+        context: Mapping[str, Any],
+        *,
+        response_status: int = status.HTTP_200_OK,
+    ) -> Response:
+        token = csrf_token(request)
+        response = templates.TemplateResponse(
+            request=request,
+            name=name,
+            context={**context, "csrf_token": token},
+            status_code=response_status,
+        )
+        attach_csrf_cookie(request, response, token)
+        return response
+
+    @app.get("/", dependencies=[Depends(authenticated)])
+    async def dashboard(request: Request) -> Response:
+        with app.state.session_factory() as session:
+            jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(20)))
+            job_views = [_job_view(job) for job in jobs]
+        readiness = await _readiness(app)
+        return render(request, "dashboard.html", {"jobs": job_views, "readiness": readiness})
+
+    @app.get("/create", dependencies=[Depends(authenticated)])
+    async def create_form(request: Request) -> Response:
+        return render(request, "original_form.html", {"form": {}, "errors": []})
+
+    @app.post("/create", dependencies=[Depends(authenticated)])
+    async def create_original(request: Request) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        form = dict(fields)
+        try:
+            job_request = OriginalSongRequest(**_original_form_values(fields))
+        except ValidationError as exc:
+            errors = _validation_errors(exc)
+            return render(
+                request,
+                "original_form.html",
+                {"form": form, "errors": errors},
+                response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        with app.state.session_factory() as session:
+            job = create_original_job(session, job_request)
+            session.commit()
+            job_id = job.id
+        _enqueue(app, job_id)
+        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.get("/cover", dependencies=[Depends(authenticated)])
+    async def cover_form(request: Request) -> Response:
+        readiness = await _readiness(app, only={"home_ingest"})
+        return render(
+            request,
+            "cover_form.html",
+            {"form": {}, "errors": [], "readiness": readiness},
+        )
+
+    @app.post("/cover", dependencies=[Depends(authenticated)])
+    async def create_cover(request: Request) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        form = dict(fields)
+        try:
+            cover_request = CoverRequest(**_cover_form_values(fields))
+        except ValidationError as exc:
+            errors = _validation_errors(exc)
+            return render(
+                request,
+                "cover_form.html",
+                {
+                    "form": form,
+                    "errors": errors,
+                    "readiness": await _readiness(app, only={"home_ingest"}),
+                },
+                response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        with app.state.session_factory() as session:
+            job = create_cover_job(session, cover_request)
+            session.commit()
+            job_id = job.id
+        _enqueue(app, job_id)
+        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.get("/jobs", dependencies=[Depends(authenticated)])
+    async def jobs(request: Request) -> Response:
+        with app.state.session_factory() as session:
+            job_views = [
+                _job_view(job)
+                for job in session.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))
+            ]
+        return render(request, "jobs.html", {"jobs": job_views})
+
+    @app.get("/jobs/{job_id}", dependencies=[Depends(authenticated)])
+    async def job_detail(request: Request, job_id: str) -> Response:
+        with app.state.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+            view = _job_view(job)
+        return render(request, "job_detail.html", {"job": view})
+
+    @app.get("/jobs/{job_id}/status", dependencies=[Depends(authenticated)])
+    async def job_status(job_id: str) -> JSONResponse:
+        with app.state.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+            return JSONResponse(_job_view(job), headers={"Cache-Control": "no-store"})
+
+    @app.get("/media/{output_id}", dependencies=[Depends(authenticated)])
+    async def media(output_id: int) -> FileResponse:
+        output = _verified_output(app.state.settings, app.state.session_factory, output_id)
+        return FileResponse(
+            output[0],
+            media_type=output[1].mime_type,
+            filename=f"ace-output-{output_id}{output[0].suffix.lower()}",
+            content_disposition_type="inline",
+        )
+
+    @app.get("/files/{output_id}/download", dependencies=[Depends(authenticated)])
+    async def download(output_id: int) -> FileResponse:
+        path, record = _verified_output(app.state.settings, app.state.session_factory, output_id)
+        return FileResponse(
+            path,
+            media_type=record.mime_type,
+            filename=f"ace-output-{output_id}{path.suffix.lower()}",
+            content_disposition_type="attachment",
+        )
+
+    @app.get("/healthz", dependencies=[Depends(authenticated)])
+    async def healthz() -> JSONResponse:
+        checks: dict[str, bool] = {"process": True, "database": False, "data_directories": False}
+        try:
+            with app.state.session_factory() as session:
+                session.execute(text("SELECT 1"))
+            checks["database"] = True
+        except Exception:
+            pass
+        checks["data_directories"] = _writable_data_layout(app.state.settings)
+        healthy = all(checks.values())
+        return JSONResponse(
+            {"status": "ok" if healthy else "error", "checks": checks},
+            status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    @app.get("/readyz", dependencies=[Depends(authenticated)])
+    async def readyz() -> JSONResponse:
+        readiness = await _readiness(app)
+        required_ok = all(
+            readiness["components"][key]["ok"]
+            for key in ("controller_database", "runpod_api", "public_transfer")
+        )
+        return JSONResponse(
+            readiness,
+            status_code=status.HTTP_200_OK if required_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+
+def _static_app(directory: Path) -> Any:
+    from starlette.staticfiles import StaticFiles
+
+    return StaticFiles(directory=str(directory), check_dir=True)
+
+
+def _enqueue(app: FastAPI, job_id: str) -> None:
+    worker = app.state.worker
+    try:
+        worker.enqueue(job_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="controller worker is unavailable",
+        ) from exc
+
+
+def _original_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
+    return {
+        "description": fields.get("description", ""),
+        "lyrics": fields.get("lyrics") or None,
+        "instrumental": fields.get("instrumental") in {"1", "true", "on", "yes"},
+        "vocal_language": fields.get("vocal_language", "en"),
+        "duration": _optional_number(fields.get("duration")),
+        "bpm": _optional_int(fields.get("bpm")),
+        "key_scale": fields.get("key_scale") or None,
+        "time_signature": _optional_int(fields.get("time_signature")),
+        "seed": _optional_int(fields.get("seed")),
+        "variation_count": _required_int(fields.get("variation_count", "1")),
+        "output_format": fields.get("output_format", OutputFormat.MP3.value),
+    }
+
+
+def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
+    return {
+        "youtube_url": fields.get("youtube_url", ""),
+        "target_style": fields.get("target_style", ""),
+        "remix_guidance": fields.get("remix_guidance") or None,
+        "lyrics": fields.get("lyrics") or None,
+        "cover_strength": _optional_number(fields.get("cover_strength"), default=0.65),
+        "output_format": fields.get("output_format", OutputFormat.MP3.value),
+        "rights_confirmation": fields.get("rights_confirmation") in {"1", "true", "on", "yes"},
+    }
+
+
+def _optional_number(value: str | None, *, default: float | None = None) -> float | None:
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return value  # type: ignore[return-value]
+
+
+def _optional_int(value: str | None) -> int | str | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _required_int(value: str) -> int | str:
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _validation_errors(exc: ValidationError) -> list[str]:
+    errors: list[str] = []
+    for item in exc.errors():
+        location = ".".join(str(part) for part in item.get("loc", ())) or "form"
+        message = str(item.get("msg", "invalid value"))
+        errors.append(f"{location}: {message}")
+    return errors or ["Please correct the highlighted fields."]
+
+
+def _job_view(job: Job) -> dict[str, Any]:
+    attempts = sorted(job.variation_attempts, key=lambda item: item.variation_index)
+    outputs = sorted(job.outputs, key=lambda item: (item.variation_index, item.result_index))
+    completed_variations = sum(item.status is JobStatus.COMPLETED for item in attempts)
+    return {
+        "job_id": job.id,
+        "job_type": job.job_type.value,
+        "job_type_label": "Cover" if job.job_type is JobType.COVER else "Original song",
+        "status": job.status.value,
+        "status_label": _STATUS_LABELS[job.status],
+        "source_title": job.sanitized_source_title,
+        "source_url": job.source_url,
+        "prompt": job.prompt,
+        "lyrics": job.lyrics,
+        "cover_strength": job.cover_strength,
+        "output_format": job.output_format.value,
+        "variation_count": job.variation_count,
+        "current_variation": job.current_variation,
+        "completed_variations": completed_variations,
+        "error": job.user_facing_error if job.status is JobStatus.FAILED else None,
+        "error_code": job.error_code if job.status is JobStatus.FAILED else None,
+        "created_at": _iso(job.created_at),
+        "started_at": _iso(job.started_at),
+        "completed_at": _iso(job.completed_at),
+        "elapsed_seconds": _elapsed(job),
+        "attempts": [_attempt_view(item) for item in attempts],
+        "outputs": [_output_view(item) for item in outputs],
+    }
+
+
+def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
+    result = attempt.runpod_result_json or {}
+    return {
+        "variation_index": attempt.variation_index,
+        "status": attempt.status.value,
+        "status_label": _STATUS_LABELS[attempt.status],
+        "queue_delay_ms": result.get("runpod_queue_delay_ms"),
+        "execution_ms": result.get("runpod_execution_ms"),
+    }
+
+
+def _output_view(output: Output) -> dict[str, Any]:
+    return {
+        "id": output.id,
+        "variation_index": output.variation_index,
+        "result_index": output.result_index,
+        "mime_type": output.mime_type,
+        "byte_size": output.byte_size,
+        "size_label": _size_label(output.byte_size),
+        "media_url": f"/media/{output.id}",
+        "download_url": f"/files/{output.id}/download",
+        "created_at": _iso(output.created_at),
+    }
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.astimezone(UTC).isoformat() if value is not None else None
+
+
+def _elapsed(job: Job) -> float | None:
+    start = job.started_at or job.created_at
+    end = job.completed_at or utc_now()
+    return max(0.0, round((end - start).total_seconds(), 2))
+
+
+def _size_label(value: int) -> str:
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KiB"
+    return f"{value / (1024 * 1024):.1f} MiB"
+
+
+async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str, Any]:
+    components: dict[str, dict[str, Any]] = {
+        "controller_database": {"ok": False, "message": "unavailable"},
+        "runpod_api": {"ok": False, "message": "unavailable"},
+        "home_ingest": {"ok": False, "message": "unavailable"},
+        "public_transfer": {"ok": False, "message": "unavailable"},
+    }
+    if only is None or "controller_database" in only:
+        try:
+            with app.state.session_factory() as session:
+                session.execute(text("SELECT 1"))
+            components["controller_database"] = {"ok": True, "message": "ready"}
+        except Exception:
+            components["controller_database"] = {"ok": False, "message": "database unavailable"}
+
+    settings: ServiceSettings = app.state.settings
+    if only is None or "public_transfer" in only:
+        parsed = settings.transfer_public_base_url
+        components["public_transfer"] = {
+            "ok": parsed.startswith("https://"),
+            "message": "configured" if parsed.startswith("https://") else "HTTPS required",
+        }
+
+    async def probe(name: str, client: Any, method_name: str) -> None:
+        if only is not None and name not in only:
+            return
+        method = getattr(client, method_name, None)
+        if method is None:
+            components[name] = {"ok": False, "message": "health probe unavailable"}
+            return
+        try:
+            result = method()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=_READINESS_PROBE_TIMEOUT_SECONDS)
+            components[name] = {"ok": True, "message": "ready"}
+        except Exception:
+            components[name] = {"ok": False, "message": "unreachable"}
+
+    await asyncio.gather(
+        probe("runpod_api", app.state.runpod_client, "health"),
+        probe("home_ingest", app.state.home_ingest_client, "health"),
+    )
+    required_ok = all(
+        components[key]["ok"] for key in ("controller_database", "runpod_api", "public_transfer")
+    )
+    return {
+        "status": "ok" if required_ok and components["home_ingest"]["ok"] else "degraded",
+        "components": components,
+    }
+
+
+def _writable_data_layout(settings: ServiceSettings) -> bool:
+    try:
+        settings.ensure_data_layout()
+        for directory in settings.paths.all_directories:
+            if not os.access(directory, os.W_OK):
+                return False
+            with tempfile.NamedTemporaryFile(dir=directory, prefix=".healthz-", delete=True):
+                pass
+        return True
+    except OSError:
+        return False
+
+
+def _verified_output(
+    settings: ServiceSettings, session_factory: Any, output_id: int
+) -> tuple[Path, Output]:
+    with session_factory() as session:
+        output = get_output(session, output_id)
+        if output is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="output not found")
+        record = Output(
+            id=output.id,
+            job_id=output.job_id,
+            variation_index=output.variation_index,
+            result_index=output.result_index,
+            runpod_job_id=output.runpod_job_id,
+            relative_path=output.relative_path,
+            mime_type=output.mime_type,
+            byte_size=output.byte_size,
+            sha256=output.sha256,
+            seed_metadata_json=output.seed_metadata_json,
+            generation_metadata_json=output.generation_metadata_json,
+            created_at=output.created_at,
+        )
+    if record.mime_type not in _MIME_TYPES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="output not available")
+    expected_mime = (
+        _FORMAT_MIME.get(OutputFormat(Path(record.relative_path).suffix.lstrip(".").lower()))
+        if Path(record.relative_path).suffix.lstrip(".").lower()
+        in {item.value for item in OutputFormat}
+        else None
+    )
+    if expected_mime != record.mime_type:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="output not available")
+    raw_path = settings.paths.outputs / record.relative_path
+    try:
+        path = resolve_relative_path(settings.paths.outputs, record.relative_path)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="output not available"
+        ) from exc
+    root = settings.paths.outputs.resolve()
+    if not path.is_relative_to(root) or _has_symlink_component(settings.paths.outputs, raw_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="output not available")
+    try:
+        file_stat = raw_path.lstat()
+        if not raw_path.is_file() or raw_path.is_symlink() or file_stat.st_size != record.byte_size:
+            raise OSError("output file does not match its record")
+        if _file_sha256(path) != record.sha256:
+            raise OSError("output checksum does not match its record")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="output not available"
+        ) from exc
+    return path, record
+
+
+def _has_symlink_component(root: Path, candidate: Path) -> bool:
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}New original · ACE Service{% endblock %}
+{% block content %}
+<section class="form-header"><p class="eyebrow">Original song</p><h1>Start with a feeling.</h1><p>Describe the sound, then let ACE-Step take it from there.</p></section>
+{% if errors %}<div class="banner error"><strong>Check your request:</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
+<form method="post" action="/create" class="form-card">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="description">Description <span class="required">required</span></label>
+  <textarea id="description" name="description" required maxlength="4000" rows="5">{{ form.get('description', '') }}</textarea>
+  <label for="lyrics">Lyrics <span class="hint">optional</span></label>
+  <textarea id="lyrics" name="lyrics" maxlength="20000" rows="7">{{ form.get('lyrics', '') }}</textarea>
+  <label class="check"><input type="checkbox" name="instrumental" value="true"{% if form.get('instrumental') in ['true', 'on', '1'] %} checked{% endif %}> Instrumental</label>
+  <div class="grid two">
+    <div><label for="vocal_language">Vocal language</label><input id="vocal_language" name="vocal_language" value="{{ form.get('vocal_language', 'en') }}" maxlength="32"></div>
+    <div><label for="duration">Duration, seconds</label><input id="duration" name="duration" inputmode="decimal" value="{{ form.get('duration', '') }}" placeholder="180"></div>
+    <div><label for="bpm">BPM</label><input id="bpm" name="bpm" inputmode="numeric" value="{{ form.get('bpm', '') }}"></div>
+    <div><label for="key_scale">Key / scale</label><input id="key_scale" name="key_scale" value="{{ form.get('key_scale', '') }}" placeholder="C major"></div>
+    <div><label for="time_signature">Time signature</label><input id="time_signature" name="time_signature" inputmode="numeric" value="{{ form.get('time_signature', '') }}" placeholder="4"></div>
+    <div><label for="seed">Seed</label><input id="seed" name="seed" inputmode="numeric" value="{{ form.get('seed', '') }}"></div>
+  </div>
+  <div class="grid two">
+    <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+    <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', 'mp3') == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
+  </div>
+  <button class="button" type="submit">Create original</button>
+</form>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ job.job_type_label }} · ACE Service{% endblock %}
+{% block content %}
+<article class="job-detail" data-status-url="/jobs/{{ job.job_id }}/status">
+  <p class="eyebrow">{{ job.job_type_label }}</p>
+  <h1>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h1>
+  <div class="detail-status"><span id="job-status" class="status status-{{ job.status }}">{{ job.status_label }}</span><span id="job-progress">{{ job.completed_variations }}/{{ job.variation_count }} variations</span></div>
+  {% if job.error %}<div class="banner error" id="job-error">{{ job.error }}</div>{% endif %}
+  <section class="detail-grid">
+    <div><h2>Request</h2><dl><dt>Prompt / style</dt><dd>{{ job.prompt or '—' }}</dd>{% if job.lyrics %}<dt>Lyrics</dt><dd class="preformatted">{{ job.lyrics }}</dd>{% endif %}{% if job.cover_strength is not none %}<dt>Cover strength</dt><dd>{{ job.cover_strength }}</dd>{% endif %}<dt>Output</dt><dd>{{ job.output_format|upper }}</dd><dt>Created</dt><dd>{{ job.created_at }}</dd><dt>Elapsed</dt><dd>{{ job.elapsed_seconds }} seconds</dd></dl></div>
+    <div><h2>Outputs</h2><div id="outputs">{% if job.outputs %}{% for output in job.outputs %}<div class="output-card"><div><strong>Variation {{ output.variation_index }}</strong><span>{{ output.size_label }} · {{ output.mime_type }}</span></div><audio controls preload="metadata" src="{{ output.media_url }}">Your browser cannot play this audio.</audio><a href="{{ output.download_url }}">Download</a></div>{% endfor %}{% else %}<p class="muted">Outputs will appear here when generation completes.</p>{% endif %}</div></div>
+  </section>
+  <section><h2>Timing</h2><p class="muted">Started: {{ job.started_at or '—' }} · Completed: {{ job.completed_at or 'in progress' }}</p></section>
+</article>
+<script src="{{ url_for('static', path='status.js') }}" defer></script>
+{% endblock %}

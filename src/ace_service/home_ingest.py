@@ -145,6 +145,18 @@ class HomeIngestClient:
         if self._owns_client:
             await self._client.aclose()
 
+    async def health(self) -> None:
+        """Verify that the private home service is reachable and responsive."""
+
+        try:
+            response = await self._client.get("healthz")
+        except httpx.HTTPError as exc:
+            raise HomeIngestError(
+                "home_ingest_unavailable", "the home ingest service could not be reached"
+            ) from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            raise HomeIngestError("home_ingest_unavailable", "the home ingest service is not ready")
+
     async def prepare(
         self,
         *,

@@ -12,6 +12,18 @@ Every other path must return a proxy-level 404 or 403 without reaching the
 private controller or UI. The transfer FastAPI app disables its documentation
 and OpenAPI routes and mounts no controller routes.
 
+The private controller UI is a separate loopback app on port 8000. It requires
+HTTP Basic credentials, uses constant-time credential comparison, and requires
+a same-site CSRF token on every unsafe form post. It is intended to be exposed
+through Tailscale Serve only; it is not a target for the public transfer proxy.
+Authenticated HTML, status, and media responses are marked `no-store` and
+include CSP, no-sniff, no-referrer, and frame-deny headers.
+
+User media routes accept only database output IDs. They verify the stored
+relative path, reject traversal and symlink components, restrict MIME types to
+the supported audio formats, and check recorded size and SHA-256 before
+streaming a file.
+
 ## Capabilities
 
 Capabilities use random 256-bit URL-safe tokens. The plaintext token exists
