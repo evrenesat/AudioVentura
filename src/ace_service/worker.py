@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
@@ -42,6 +44,8 @@ from ace_service.runpod_client import RunpodState, RunpodStatusResult
 from ace_service.schemas import normalize_extension, resolve_relative_path, validate_sha256
 from ace_service.state import ControllerLock
 from ace_service.transfers import issue_transfer_url
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RunpodWorkerClient(Protocol):
@@ -110,6 +114,10 @@ class ControllerWorker:
             self._recover_on_startup()
             self._accepting = True
             self._task = asyncio.create_task(self._run(), name="ace-controller-worker")
+            LOGGER.info(
+                "stage=start component=controller",
+                extra={"component": "controller"},
+            )
         except BaseException:
             self._accepting = False
             lock.release()
@@ -188,6 +196,15 @@ class ControllerWorker:
                 return
             status = job.status
             variation_index = job.current_variation or 1
+            job_type = job.job_type.value
+        LOGGER.info(
+            "job=%s stage=%s component=controller job_type=%s variation=%d",
+            job_id,
+            status.value,
+            job_type,
+            variation_index,
+            extra={"component": "controller"},
+        )
 
         if status is JobStatus.QUEUED:
             if job.job_type is JobType.COVER:
@@ -217,6 +234,7 @@ class ControllerWorker:
             await self._poll_variation(job_id, variation_index)
 
     async def _submit_variation(self, job_id: str, variation_index: int) -> None:
+        started = time.monotonic()
         with self.session_factory() as session:
             job, attempt, nonce = prepare_variation_submission(session, job_id, variation_index)
             payload = dict(self.payload_builder(job, attempt))
@@ -272,6 +290,14 @@ class ControllerWorker:
                 submission_nonce=nonce,
             )
             session.commit()
+        LOGGER.info(
+            "job=%s stage=submit component=controller variation=%d runpod_job_id=%s elapsed_ms=%d",
+            job_id,
+            variation_index,
+            runpod_job_id,
+            int((time.monotonic() - started) * 1000),
+            extra={"component": "controller"},
+        )
 
     async def _poll_variation(self, job_id: str, variation_index: int) -> None:
         with self.session_factory() as session:
@@ -285,6 +311,7 @@ class ControllerWorker:
                     raise ValueError("uncertain cloud submission has no Runpod job ID")
                 raise ValueError("active job is missing its Runpod job ID")
 
+        started = time.monotonic()
         try:
             result = await self.runpod_client.status(runpod_job_id)
         except asyncio.CancelledError:
@@ -307,6 +334,17 @@ class ControllerWorker:
                         remove_cover_source(self.settings, job_id)
                     return
             raise
+
+        LOGGER.info(
+            "job=%s stage=poll component=controller variation=%d runpod_job_id=%s "
+            "status=%s elapsed_ms=%d",
+            job_id,
+            variation_index,
+            runpod_job_id,
+            result.raw_status,
+            int((time.monotonic() - started) * 1000),
+            extra={"component": "controller"},
+        )
 
         with self.session_factory() as session:
             attempt = get_variation_attempt(session, job_id, variation_index)
@@ -359,6 +397,12 @@ class ControllerWorker:
     async def _prepare_cover(self, job_id: str) -> None:
         """Run home preparation, verify SFTP output, then submit the cover."""
 
+        started = time.monotonic()
+        LOGGER.info(
+            "job=%s stage=ingest component=controller",
+            job_id,
+            extra={"component": "controller"},
+        )
         with self.session_factory() as session:
             job = get_job(session, job_id)
             if job is None or job.job_type is not JobType.COVER:
@@ -396,6 +440,12 @@ class ControllerWorker:
             transition_job(session, job.id, JobStatus.STAGING)
             session.commit()
         await self._submit_variation(job_id, 1)
+        LOGGER.info(
+            "job=%s stage=staging component=controller elapsed_ms=%d",
+            job_id,
+            int((time.monotonic() - started) * 1000),
+            extra={"component": "controller"},
+        )
 
     def _recover_on_startup(self) -> None:
         with self.session_factory() as session:
@@ -522,6 +572,13 @@ class ControllerWorker:
         stable_code = getattr(exc, "code", None)
         stable_message = getattr(exc, "message", None)
         code = stable_code if isinstance(stable_code, str) else "controller_task_error"
+        LOGGER.error(
+            "job=%s stage=worker error_code=%s exception_class=%s",
+            job_id,
+            code,
+            type(exc).__name__,
+            extra={"component": "controller"},
+        )
         message = (
             stable_message
             if isinstance(stable_message, str) and stable_message

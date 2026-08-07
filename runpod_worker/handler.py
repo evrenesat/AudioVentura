@@ -6,6 +6,7 @@ import inspect
 import logging
 import os
 import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -31,15 +32,27 @@ def configure_runtime(runtime: WorkerRuntime) -> None:
 def handler(event: Mapping[str, Any]) -> dict[str, Any]:
     """Validate, generate, upload, and return bounded metadata only."""
 
+    started = time.monotonic()
     runtime = _RUNTIME
     if runtime is None:
         raise RuntimeError("worker runtime has not been initialized")
-    allowed_host = _configured_transfer_host()
-    request = WorkerRequest.from_event(event, allowed_transfer_host=allowed_host)
-    return _handle_request(request, runtime)
+    request: WorkerRequest | None = None
+    try:
+        allowed_host = _configured_transfer_host()
+        request = WorkerRequest.from_event(event, allowed_transfer_host=allowed_host)
+        return _handle_request(request, runtime)
+    except Exception as exc:
+        LOGGER.error(
+            "job=%s stage=worker error_code=worker_request_failed exception_class=%s elapsed_ms=%d",
+            request.job_id if request is not None else "unknown",
+            type(exc).__name__,
+            int((time.monotonic() - started) * 1000),
+        )
+        raise
 
 
 def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str, Any]:
+    started = time.monotonic()
     transfer_client = runtime.transfer_client_factory()
     with tempfile.TemporaryDirectory(prefix="ace-step-") as temporary_root:
         temporary_path = Path(temporary_root)
@@ -67,10 +80,11 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
         uploaded = transfer_client.upload_output(request.result_upload, output_path)
         metadata = _small_result_metadata(request, runtime, audio, uploaded)
         LOGGER.info(
-            "completed job=%s variation=%d bytes=%d",
+            "completed job=%s stage=worker variation=%d bytes=%d elapsed_ms=%d",
             request.job_id,
             request.variation_index,
             uploaded.bytes,
+            int((time.monotonic() - started) * 1000),
         )
         return metadata
 

@@ -1,5 +1,19 @@
 # Architecture
 
+## Checkpoint 9 operations
+
+The controller and home agent configure UTC rotating file logs below their
+private data roots. A handler-level redaction filter removes credentials,
+authorization values, capability URLs, and prompt/lyrics fields before a
+record reaches disk. Operational records use bounded job/stage/component,
+stable error-code, exception-class, byte-count, and elapsed-time fields.
+
+Controller cleanup runs once before the worker accepts jobs and periodically
+thereafter. It removes stale `.part` files, expires and prunes old capability
+records, revokes capabilities for terminal jobs, and removes non-retained
+terminal cover sources. Home cleanup removes orphan temporary job directories.
+Neither cleanup path deletes completed outputs.
+
 ## Checkpoint 8 private web UI
 
 The main controller app is created by `ace_service.app.create_app` and binds

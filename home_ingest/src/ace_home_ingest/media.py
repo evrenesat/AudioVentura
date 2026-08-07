@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +25,7 @@ PLAYLIST_QUERY_KEYS = frozenset({"list", "index", "start_radio", "playlist", "pp
 ALLOWED_WATCH_QUERY_KEYS = frozenset({"v", "t", "start"})
 DURATION_TOLERANCE_MAX_SECONDS = 5.0
 CHUNK_SIZE = 1024 * 1024
+LOGGER = logging.getLogger(__name__)
 
 
 class IngestError(RuntimeError):
@@ -313,10 +315,27 @@ async def _run_media_command(
     except TimeoutError as exc:
         process.kill()
         await process.wait()
+        LOGGER.warning(
+            "stage=media error_code=%s exception_class=%s",
+            error_code,
+            type(exc).__name__,
+            extra={"component": "home_ingest"},
+        )
         raise IngestError(error_code, "the media command exceeded its time limit") from exc
     except OSError as exc:
+        LOGGER.warning(
+            "stage=media error_code=%s exception_class=%s",
+            error_code,
+            type(exc).__name__,
+            extra={"component": "home_ingest"},
+        )
         raise IngestError(error_code, "the media command could not be started") from exc
     if process.returncode != 0:
+        LOGGER.warning(
+            "stage=media error_code=%s exception_class=CalledProcessError",
+            error_code,
+            extra={"component": "home_ingest"},
+        )
         raise IngestError(error_code, "the media command rejected the source")
     return stdout, stderr
 

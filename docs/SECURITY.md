@@ -64,3 +64,42 @@ existing cloud ID resumes polling. This prevents a crash window from creating
 a duplicate paid job.
 
 No live Runpod transfer acceptance test is claimed by this local checkpoint.
+
+## Secrets, logs, and retention
+
+Controller and home deployment-only `.env` files contain the only long-lived
+service credentials; the restricted SFTP private key stays on the home host.
+The worker receives no controller, home, SFTP, SSH, Tailscale, or
+Runpod submission credentials. Capability URLs are short-lived per-job
+bearers; only their SHA-256 hashes are stored in SQLite. Terminal jobs revoke
+any still-issued capabilities, and cleanup expires and prunes old capability
+records. A non-retained cover source is removed after terminal completion or
+failure; generated outputs are retained until an explicit operator retention
+policy is introduced.
+
+Controller and home logs use UTC rotating files with private permissions. The
+redaction filter removes configured credentials, bearer/authorization values,
+capability URLs, prompt/lyrics fields, and other token-shaped field values.
+Normal records contain only bounded operational metadata such as job ID,
+stage, component, stable error code, safe Runpod ID, elapsed time, byte count,
+and exception class. The Uvicorn access logger for the public transfer process
+is disabled, and the upstream public proxy must disable access logging for
+`/transfer/v1/*` or redact the final path segment before persistence. Neither
+layer may persist capability-bearing request paths or a shortened or hashed
+token prefix. Do not pass raw request payloads or exception strings containing
+credentials to the logger.
+
+Startup and periodic cleanup remove stale `.part` files and orphan home temp
+directories older than one day by default. Cleanup never follows a symlink
+outside the configured data root and never deletes completed outputs.
+
+The trust boundaries are deliberate: browser traffic reaches the UI through
+the tailnet, the controller reaches only the authenticated private home API,
+the home host performs all YouTube/`yt-dlp`/`ffprobe`/`ffmpeg` work, and Runpod
+receives only bounded generation metadata plus per-job HTTPS capabilities. The
+home SFTP identity is restricted to the incoming root and is not provided to
+Runpod. YouTube cookies/login, playlists, generic media URLs, and the deferred
+Mac inference path are first-release limitations. The configured data root is
+the containment boundary for incoming sources, generated outputs, temporary
+files, and logs; path and symlink checks fail closed at each media/transfer
+route.

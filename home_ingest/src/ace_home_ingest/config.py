@@ -96,6 +96,31 @@ class HomeIngestSettings(BaseSettings):
         gt=0,
         le=86_400,
     )
+    log_level: str = Field(
+        default="INFO",
+        validation_alias=AliasChoices("ACE_LOG_LEVEL", "log_level"),
+        min_length=1,
+    )
+    log_max_bytes: int = Field(
+        default=10_485_760,
+        validation_alias=AliasChoices("ACE_LOG_MAX_BYTES", "log_max_bytes"),
+        gt=0,
+    )
+    log_backup_count: int = Field(
+        default=5,
+        validation_alias=AliasChoices("ACE_LOG_BACKUP_COUNT", "log_backup_count"),
+        ge=1,
+    )
+    cleanup_interval_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices("ACE_CLEANUP_INTERVAL_SECONDS", "cleanup_interval_seconds"),
+        gt=0,
+    )
+    orphan_age_seconds: int = Field(
+        default=86_400,
+        validation_alias=AliasChoices("ACE_ORPHAN_AGE_SECONDS", "orphan_age_seconds"),
+        gt=0,
+    )
     sftp_host: str = Field(
         default="",
         validation_alias=AliasChoices("ACE_SFTP_HOST", "sftp_host"),
@@ -136,6 +161,14 @@ class HomeIngestSettings(BaseSettings):
         if not value:
             raise ValueError("home ingest host must not be empty")
         return value
+
+    @field_validator("log_level")
+    @classmethod
+    def normalize_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            raise ValueError("log level must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG")
+        return normalized
 
     @field_validator("sftp_remote_root")
     @classmethod

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import shutil
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -15,9 +17,13 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from .cleanup import prune_orphan_job_directories
 from .config import HomeIngestSettings
+from .logging_config import configure_logging
 from .media import IngestError, PreparedSource, cleanup_job_directory, prepare_source
 from .uploader import SFTPUploader
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PrepareCoverRequest(BaseModel):
@@ -68,6 +74,12 @@ class HomeIngestService:
         job_directory = self.settings.paths.job_temporary(job_id)
         self.settings.ensure_data_layout()
         prune_expired_debug_artifacts(self.settings)
+        started = time.monotonic()
+        LOGGER.info(
+            "job=%s stage=prepare component=home_ingest",
+            job_id,
+            extra={"component": "home_ingest"},
+        )
         try:
             prepared = await self.prepare_source_fn(
                 request.url,
@@ -81,7 +93,7 @@ class HomeIngestService:
                     "prepared_source_invalid", "the source preparation result was invalid"
                 )
             await asyncio.to_thread(self.uploader.upload, prepared.path, job_id)
-            return PrepareCoverResponse(
+            response = PrepareCoverResponse(
                 job_id=request.job_id,
                 video_id=prepared.metadata.video_id,
                 title=prepared.metadata.title,
@@ -90,9 +102,36 @@ class HomeIngestService:
                 prepared_bytes=prepared.byte_size,
                 prepared_sha256=prepared.sha256,
             )
-        except IngestError:
+            LOGGER.info(
+                "job=%s video_id=%s stage=upload completed bytes=%d duration_seconds=%.3f "
+                "elapsed_ms=%d",
+                job_id,
+                prepared.metadata.video_id,
+                prepared.byte_size,
+                prepared.metadata.duration_seconds,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "home_ingest"},
+            )
+            return response
+        except IngestError as exc:
+            LOGGER.warning(
+                "job=%s stage=prepare error_code=%s exception_class=%s elapsed_ms=%d",
+                job_id,
+                exc.code,
+                type(exc).__name__,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "home_ingest"},
+            )
             raise
         except Exception as exc:
+            LOGGER.warning(
+                "job=%s stage=upload error_code=sftp_upload_failed exception_class=%s "
+                "elapsed_ms=%d",
+                job_id,
+                type(exc).__name__,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "home_ingest"},
+            )
             raise IngestError(
                 "sftp_upload_failed", "the prepared source could not be uploaded"
             ) from exc
@@ -115,6 +154,44 @@ def prune_expired_debug_artifacts(settings: HomeIngestSettings) -> None:
                 shutil.rmtree(entry)
         except OSError:
             continue
+
+
+async def _periodic_cleanup(app: FastAPI) -> None:
+    settings: HomeIngestSettings = app.state.settings
+    while True:
+        await asyncio.sleep(settings.cleanup_interval_seconds)
+        try:
+            await asyncio.to_thread(prune_orphan_job_directories, settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.error(
+                "periodic cleanup failed stage=cleanup exception_class=%s",
+                type(exc).__name__,
+                extra={"component": "home_ingest"},
+            )
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings: HomeIngestSettings = app.state.settings
+    configure_logging(settings)
+    try:
+        await asyncio.to_thread(prune_orphan_job_directories, settings)
+    except Exception as exc:
+        LOGGER.error(
+            "startup cleanup failed stage=cleanup exception_class=%s",
+            type(exc).__name__,
+            extra={"component": "home_ingest"},
+        )
+    task = asyncio.create_task(_periodic_cleanup(app), name="ace-home-ingest-cleanup")
+    app.state.cleanup_task = task
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def _http_status(code: str) -> int:
@@ -144,7 +221,9 @@ def create_app(
     resolved_settings = settings or HomeIngestSettings()
     resolved_settings.ensure_data_layout()
     service = HomeIngestService(resolved_settings, uploader or SFTPUploader(resolved_settings))
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
+    app.state.settings = resolved_settings
+    app.state.cleanup_task = None
     app.state.service = service
 
     @app.get("/healthz")

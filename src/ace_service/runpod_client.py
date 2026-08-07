@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,6 +27,7 @@ _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _RUNPOD_STATES = frozenset(
     {"IN_QUEUE", "IN_PROGRESS", "RUNNING", "COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"}
 )
+LOGGER = logging.getLogger(__name__)
 
 
 class RunpodError(RuntimeError):
@@ -236,20 +239,51 @@ class RunpodClient:
         operation: str,
         json_body: Mapping[str, Any] | None = None,
     ) -> Any:
+        started = time.monotonic()
         try:
             response = await self._client.request(method, path, json=json_body)
         except httpx.HTTPError as exc:
+            LOGGER.warning(
+                "stage=runpod operation=%s error_code=runpod_request_failed "
+                "exception_class=%s elapsed_ms=%d",
+                operation,
+                type(exc).__name__,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "controller"},
+            )
             raise RunpodAPIError(f"Runpod {operation} request failed") from exc
         if response.status_code < 200 or response.status_code >= 300:
+            LOGGER.warning(
+                "stage=runpod operation=%s error_code=runpod_http_error status=%d elapsed_ms=%d",
+                operation,
+                response.status_code,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "controller"},
+            )
             raise RunpodAPIError(
                 f"Runpod {operation} request failed with HTTP {response.status_code}"
             )
         if len(response.content) > _MAX_RESPONSE_BYTES:
             raise RunpodResponseError(f"Runpod {operation} response is too large")
         try:
-            return response.json()
+            body = response.json()
         except (json.JSONDecodeError, ValueError) as exc:
+            LOGGER.warning(
+                "stage=runpod operation=%s error_code=runpod_invalid_json "
+                "exception_class=%s elapsed_ms=%d",
+                operation,
+                type(exc).__name__,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "controller"},
+            )
             raise RunpodResponseError(f"Runpod {operation} response is not valid JSON") from exc
+        LOGGER.info(
+            "stage=runpod operation=%s elapsed_ms=%d",
+            operation,
+            int((time.monotonic() - started) * 1000),
+            extra={"component": "controller"},
+        )
+        return body
 
 
 class RunpodSubmissionCoordinator:

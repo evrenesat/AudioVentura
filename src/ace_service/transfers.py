@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ _PART_SUFFIX = ".part"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _OUTPUT_INDEX_RE = re.compile(r"(?:variation|cover)[-_](\d+)", re.IGNORECASE)
 _MIME_TYPES = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav"}
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +96,9 @@ def create_transfer_app(
     """Create an app with exactly the two public transfer route shapes."""
 
     settings.ensure_data_layout()
+    from ace_service.logging_config import configure_logging
+
+    configure_logging(settings, component="transfer")
     engine = None
     if session_factory is None:
         engine = initialize_database_for_settings(settings)
@@ -124,6 +129,12 @@ def create_transfer_app(
                 max_bytes=min(capability.max_bytes, settings.transfer_max_source_bytes),
             )
             session.commit()
+        LOGGER.info(
+            "job=%s stage=source_download bytes=%d",
+            capability.job_id,
+            candidate.stat().st_size,
+            extra={"component": "transfer"},
+        )
         return FileResponse(candidate, media_type="audio/mpeg", filename=candidate.name)
 
     @app.put("/transfer/v1/output/{token}", include_in_schema=False)
@@ -421,6 +432,13 @@ def _finalize_output(
             )
             consume_transfer(session, capability.id)
             session.commit()
+            LOGGER.info(
+                "job=%s stage=output_upload bytes=%d sha256=%s",
+                capability.job_id,
+                byte_count,
+                sha256,
+                extra={"component": "transfer"},
+            )
         except HTTPException:
             session.rollback()
             if moved:

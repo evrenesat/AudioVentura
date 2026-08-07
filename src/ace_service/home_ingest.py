@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -12,6 +14,7 @@ import httpx
 from ace_service.config import ServiceSettings
 
 _MAX_RESPONSE_BYTES = 64 * 1024
+LOGGER = logging.getLogger(__name__)
 
 
 class HomeIngestError(RuntimeError):
@@ -148,14 +151,32 @@ class HomeIngestClient:
     async def health(self) -> None:
         """Verify that the private home service is reachable and responsive."""
 
+        started = time.monotonic()
         try:
             response = await self._client.get("healthz")
         except httpx.HTTPError as exc:
+            LOGGER.warning(
+                "stage=health error_code=home_ingest_unavailable exception_class=%s elapsed_ms=%d",
+                type(exc).__name__,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "controller"},
+            )
             raise HomeIngestError(
                 "home_ingest_unavailable", "the home ingest service could not be reached"
             ) from exc
         if response.status_code < 200 or response.status_code >= 300:
+            LOGGER.warning(
+                "stage=health error_code=home_ingest_unavailable status=%d elapsed_ms=%d",
+                response.status_code,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "controller"},
+            )
             raise HomeIngestError("home_ingest_unavailable", "the home ingest service is not ready")
+        LOGGER.info(
+            "stage=health component=controller elapsed_ms=%d",
+            int((time.monotonic() - started) * 1000),
+            extra={"component": "controller"},
+        )
 
     async def prepare(
         self,
@@ -165,6 +186,7 @@ class HomeIngestClient:
         max_duration_seconds: int,
         max_source_bytes: int,
     ) -> PreparedCoverSource:
+        started = time.monotonic()
         payload = {
             "job_id": job_id,
             "url": url,
@@ -174,6 +196,14 @@ class HomeIngestClient:
         try:
             response = await self._client.post("v1/prepare-youtube-cover", json=payload)
         except httpx.HTTPError as exc:
+            LOGGER.warning(
+                "job=%s stage=prepare error_code=home_ingest_unavailable exception_class=%s "
+                "elapsed_ms=%d",
+                job_id,
+                type(exc).__name__,
+                int((time.monotonic() - started) * 1000),
+                extra={"component": "controller"},
+            )
             raise HomeIngestError(
                 "home_ingest_unavailable", "the home ingest service could not be reached"
             ) from exc
@@ -194,6 +224,14 @@ class HomeIngestClient:
             raise HomeIngestError(
                 "home_ingest_invalid_response", "home returned metadata for another job"
             )
+        LOGGER.info(
+            "job=%s stage=prepare component=controller video_id=%s bytes=%d elapsed_ms=%d",
+            job_id,
+            result.video_id,
+            result.prepared_bytes,
+            int((time.monotonic() - started) * 1000),
+            extra={"component": "controller"},
+        )
         return result
 
 

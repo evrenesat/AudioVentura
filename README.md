@@ -12,6 +12,9 @@ Run the controller locally with configured credentials using:
 uv run python -m ace_service
 ```
 
+Operational deployment, Tailscale/proxy policy, cleanup, backups, and live
+acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 The detailed deployment and distributed-runtime handoff follows below.
 
 # aflow Handoff Plan: Hetzner + Home Ingest + Runpod Flex ACE-Step Service

@@ -19,3 +19,7 @@
   authenticated playback/download routes, and media containment/checksum
   validation. Kept the UI app separate from the public transfer app and added
   an authenticated home-ingest health probe.
+- Added Checkpoint 9 operational hardening: private UTC rotating logs with
+  credential/capability/prompt redaction, startup and periodic controller and
+  home cleanup, terminal capability revocation, bounded source retention, and
+  deployment/acceptance runbooks.
