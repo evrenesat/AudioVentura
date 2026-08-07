@@ -25,6 +25,7 @@ from ace_service.models import (
     utc_now,
 )
 from ace_service.schemas import (
+    CoverRequest,
     OriginalSongRequest,
     normalize_extension,
     normalize_relative_path,
@@ -113,6 +114,32 @@ def create_original_job(
         lyrics=request.lyrics,
         output_format=request.output_format,
         variation_count=request.variation_count,
+        normalized_request_json=request.to_normalized_request_json(),
+        job_id=job_id,
+    )
+
+
+def create_cover_job(
+    session: Session,
+    request: CoverRequest,
+    *,
+    rights_confirmation_at: datetime | None = None,
+    job_id: str | UUID | None = None,
+) -> Job:
+    """Persist one validated cover request before home ingestion is queued."""
+
+    confirmation_at = (
+        _utc_timestamp(rights_confirmation_at) if rights_confirmation_at is not None else utc_now()
+    )
+    return create_job(
+        session,
+        job_type=JobType.COVER,
+        source_url=request.youtube_url,
+        prompt=request.effective_prompt,
+        lyrics=request.lyrics,
+        rights_confirmation_at=confirmation_at,
+        cover_strength=request.cover_strength,
+        output_format=request.output_format,
         normalized_request_json=request.to_normalized_request_json(),
         job_id=job_id,
     )
@@ -660,6 +687,27 @@ def revoke_transfer(
     capability.revoked_at = now or utc_now()
     session.flush()
     return capability
+
+
+def revoke_active_transfers(
+    session: Session, job_id: str | UUID, *, now: datetime | None = None
+) -> list[TransferCapability]:
+    """Revoke every still-usable capability for one terminal job."""
+
+    timestamp = _utc_timestamp(now)
+    capabilities = list(
+        session.scalars(
+            select(TransferCapability).where(
+                TransferCapability.job_id == str(job_id),
+                TransferCapability.status == TransferStatus.ISSUED,
+            )
+        )
+    )
+    for capability in capabilities:
+        capability.status = TransferStatus.REVOKED
+        capability.revoked_at = timestamp
+    session.flush()
+    return capabilities
 
 
 def _utc_timestamp(value: datetime | None) -> datetime:

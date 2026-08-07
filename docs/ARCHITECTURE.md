@@ -1,5 +1,29 @@
 # Architecture
 
+## Checkpoint 7 cover workflow
+
+`CoverRequest` validates one approved single-video YouTube URL, required rights
+confirmation, bounded style/guidance text, optional replacement lyrics, and
+cover strength before `create_cover_job` persists the metadata-only request.
+The serialized controller worker changes a queued cover to `ingesting`, calls
+the bearer-authenticated home-ingest endpoint over the configured private
+network, and waits for the metadata response after SFTP has uploaded
+`incoming/<job-id>/source.mp3.part`.
+
+Hetzner verifies the home-reported positive byte size and SHA-256 against the
+`.part` file, atomically renames it to `source.mp3`, and persists the returned
+title, canonical URL, duration, checksum, and size. Only then does the worker
+issue one source-download capability and one output-upload capability and
+submit the cover payload to Runpod. The payload contains the composed style
+caption, optional exact lyrics, cover strength, source checksum/size, and
+signed URLs; it contains no audio bytes or YouTube credentials.
+
+After a valid output is accepted, or after a terminal cover failure, issued
+capabilities are revoked. Non-retained source files are removed from Hetzner
+after the terminal state is durable. Startup recovery can advance only a
+final source whose persisted size and checksum still match the file; it polls
+a persisted Runpod ID without resubmitting it.
+
 ## Checkpoint 6 home-server ingest
 
 `home_ingest/` is a separately deployed Python service for the home server.

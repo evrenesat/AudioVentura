@@ -12,7 +12,9 @@ from typing import Any, Protocol
 from sqlalchemy import select
 
 from ace_service.config import ServiceSettings
+from ace_service.cover import CoverSourceError, finalize_cover_source, remove_cover_source
 from ace_service.db import SessionFactory
+from ace_service.home_ingest import HomeIngestError, HomeIngestService
 from ace_service.models import (
     Job,
     JobStatus,
@@ -31,6 +33,7 @@ from ace_service.repository import (
     prepare_variation_submission,
     recover_uncertain_submissions,
     recover_uncertain_variation_submissions,
+    revoke_active_transfers,
     set_variation_runpod_result,
     transition_job,
     transition_variation_attempt,
@@ -62,12 +65,14 @@ class ControllerWorker:
         runpod_client: RunpodWorkerClient,
         *,
         payload_builder: PayloadBuilder | None = None,
+        home_ingest_client: HomeIngestService | None = None,
         poll_interval_seconds: float | None = None,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
         self.runpod_client = runpod_client
         self.payload_builder = payload_builder or self._default_payload
+        self.home_ingest_client = home_ingest_client
         self.poll_interval_seconds = (
             poll_interval_seconds
             if poll_interval_seconds is not None
@@ -186,9 +191,7 @@ class ControllerWorker:
 
         if status is JobStatus.QUEUED:
             if job.job_type is JobType.COVER:
-                with self.session_factory() as session:
-                    transition_job(session, job_id, JobStatus.INGESTING)
-                    session.commit()
+                await self._prepare_cover(job_id)
                 return
             await self._submit_variation(job_id, variation_index)
             return
@@ -217,20 +220,39 @@ class ControllerWorker:
         with self.session_factory() as session:
             job, attempt, nonce = prepare_variation_submission(session, job_id, variation_index)
             payload = dict(self.payload_builder(job, attempt))
-            if job.job_type is JobType.ORIGINAL:
-                output_path = self._output_relative_path(job, attempt.variation_index)
-                issued = issue_transfer_url(
+            output_path = self._output_relative_path(job, attempt.variation_index)
+            output_issued = issue_transfer_url(
+                session,
+                self.settings,
+                job_id=job.id,
+                direction=TransferDirection.OUTPUT_UPLOAD,
+                expected_relative_path=output_path,
+                expected_extension=job.output_format.value,
+                max_bytes=self.settings.transfer_max_output_bytes,
+            )
+            payload["result_upload"] = {
+                "url": output_issued.url,
+                "max_bytes": output_issued.capability.max_bytes,
+            }
+            if job.job_type is JobType.COVER:
+                if not job.source_sha256 or not job.source_byte_size:
+                    raise CoverSourceError(
+                        "prepared_source_invalid", "cover source metadata is incomplete"
+                    )
+                source_issued = issue_transfer_url(
                     session,
                     self.settings,
                     job_id=job.id,
-                    direction=TransferDirection.OUTPUT_UPLOAD,
-                    expected_relative_path=output_path,
-                    expected_extension=job.output_format.value,
-                    max_bytes=self.settings.transfer_max_output_bytes,
+                    direction=TransferDirection.SOURCE_DOWNLOAD,
+                    expected_relative_path=f"{job.id}/source.mp3",
+                    expected_extension=".mp3",
+                    max_bytes=job.source_byte_size,
                 )
-                payload["result_upload"] = {
-                    "url": issued.url,
-                    "max_bytes": issued.capability.max_bytes,
+                payload["source"] = {
+                    "url": source_issued.url,
+                    "sha256": job.source_sha256,
+                    "bytes": job.source_byte_size,
+                    "format": "mp3",
                 }
             payload["submission_nonce"] = nonce
             session.commit()
@@ -273,12 +295,16 @@ class ControllerWorker:
             # independently verified.
             with self.session_factory() as session:
                 if self._valid_output(session, job_id, variation_index):
-                    complete_variation_attempt(
+                    completed_job, _, parent_completed = complete_variation_attempt(
                         session,
                         attempt.id,
                         note="runpod_status_unavailable_after_output",
                     )
+                    if parent_completed and completed_job.job_type is JobType.COVER:
+                        revoke_active_transfers(session, completed_job.id)
                     session.commit()
+                    if parent_completed:
+                        remove_cover_source(self.settings, job_id)
                     return
             raise
 
@@ -297,13 +323,17 @@ class ControllerWorker:
                 session.commit()
                 return
             if result.category is RunpodState.FAILED:
-                fail_variation_attempt(
+                failed_job = fail_variation_attempt(
                     session,
                     attempt.id,
                     error_code="runpod_generation_failed",
                     user_facing_error="Runpod did not complete this generation.",
                 )
+                if failed_job.job_type is JobType.COVER:
+                    revoke_active_transfers(session, failed_job.id)
                 session.commit()
+                if failed_job.job_type is JobType.COVER:
+                    remove_cover_source(self.settings, failed_job.id)
                 return
 
             set_variation_runpod_result(session, attempt.id, _runpod_result_metadata(result))
@@ -319,8 +349,53 @@ class ControllerWorker:
                         transition_job(session, job.id, JobStatus.GENERATING)
                 session.commit()
                 return
-            complete_variation_attempt(session, attempt.id)
+            completed_job, _, parent_completed = complete_variation_attempt(session, attempt.id)
+            if parent_completed and completed_job.job_type is JobType.COVER:
+                revoke_active_transfers(session, completed_job.id)
             session.commit()
+            if parent_completed:
+                remove_cover_source(self.settings, job_id)
+
+    async def _prepare_cover(self, job_id: str) -> None:
+        """Run home preparation, verify SFTP output, then submit the cover."""
+
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None or job.job_type is not JobType.COVER:
+                raise ValueError("cover job is missing")
+            if job.status is JobStatus.QUEUED:
+                transition_job(session, job.id, JobStatus.INGESTING)
+            source_url = job.source_url
+            session.commit()
+        if not source_url:
+            raise HomeIngestError("youtube_url_rejected", "cover job has no YouTube URL")
+        if self.home_ingest_client is None:
+            raise HomeIngestError(
+                "home_ingest_unavailable", "the home ingest service is not configured"
+            )
+        prepared = await self.home_ingest_client.prepare(
+            job_id=job_id,
+            url=source_url,
+            max_duration_seconds=self.settings.max_source_duration_seconds,
+            max_source_bytes=self.settings.transfer_max_source_bytes,
+        )
+        if prepared.job_id != job_id:
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned metadata for another job"
+            )
+        finalize_cover_source(self.settings, job_id, prepared)
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None or job.status is not JobStatus.INGESTING:
+                raise ValueError("cover job is not awaiting source staging")
+            job.source_url = prepared.canonical_url
+            job.sanitized_source_title = prepared.title
+            job.source_duration = prepared.duration_seconds
+            job.source_sha256 = prepared.prepared_sha256
+            job.source_byte_size = prepared.prepared_bytes
+            transition_job(session, job.id, JobStatus.STAGING)
+            session.commit()
+        await self._submit_variation(job_id, 1)
 
     def _recover_on_startup(self) -> None:
         with self.session_factory() as session:
@@ -330,8 +405,12 @@ class ControllerWorker:
 
         with self.session_factory() as session:
             jobs = list(session.scalars(select(Job).order_by(Job.created_at, Job.id)))
+            terminal_cover_ids: list[str] = []
             for job in jobs:
                 if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                    if job.job_type is JobType.COVER:
+                        revoke_active_transfers(session, job.id)
+                        terminal_cover_ids.append(job.id)
                     continue
                 if job.status is JobStatus.QUEUED:
                     self._enqueue_recovered(job.id)
@@ -380,7 +459,20 @@ class ControllerWorker:
                             "missing_runpod_job_id",
                             "Controller state is missing its Runpod job ID.",
                         )
+            terminal_cover_ids = list(
+                dict.fromkeys(
+                    terminal_cover_ids
+                    + [
+                        job.id
+                        for job in jobs
+                        if job.job_type is JobType.COVER
+                        and job.status in {JobStatus.COMPLETED, JobStatus.FAILED}
+                    ]
+                )
+            )
             session.commit()
+        for job_id in terminal_cover_ids:
+            remove_cover_source(self.settings, job_id)
 
     def _enqueue_recovered(self, job_id: str) -> None:
         if job_id in self._enqueued:
@@ -423,9 +515,18 @@ class ControllerWorker:
                 error_code=error_code,
                 user_facing_error=user_facing_error,
             )
+        if job.job_type is JobType.COVER:
+            revoke_active_transfers(session, job.id)
 
     def _persist_task_failure(self, job_id: str, exc: Exception) -> None:
-        del exc
+        stable_code = getattr(exc, "code", None)
+        stable_message = getattr(exc, "message", None)
+        code = stable_code if isinstance(stable_code, str) else "controller_task_error"
+        message = (
+            stable_message
+            if isinstance(stable_message, str) and stable_message
+            else "Controller could not complete this generation."
+        )
         with self.session_factory() as session:
             job = get_job(session, job_id)
             if job is None or job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
@@ -436,12 +537,11 @@ class ControllerWorker:
                 (attempt is not None and attempt.submission_nonce and not attempt.runpod_job_id)
                 or (job.current_submission_nonce and not job.current_runpod_job_id)
             )
-            code = "uncertain_cloud_submission" if uncertain else "controller_task_error"
-            message = (
-                "Cloud submission outcome is uncertain; automatic resubmission was prevented."
-                if uncertain
-                else "Controller could not complete this generation."
-            )
+            if uncertain:
+                code = "uncertain_cloud_submission"
+                message = (
+                    "Cloud submission outcome is uncertain; automatic resubmission was prevented."
+                )
             if attempt is not None and attempt.status not in {
                 JobStatus.COMPLETED,
                 JobStatus.FAILED,
@@ -460,7 +560,12 @@ class ControllerWorker:
                     error_code=code,
                     user_facing_error=message,
                 )
+            if job.job_type is JobType.COVER:
+                revoke_active_transfers(session, job.id)
             session.commit()
+            is_cover = job.job_type is JobType.COVER
+        if is_cover:
+            remove_cover_source(self.settings, job_id)
 
     def _job_needs_poll(self, job_id: str) -> bool:
         with self.session_factory() as session:

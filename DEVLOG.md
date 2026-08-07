@@ -11,3 +11,6 @@
 - Added the isolated home-ingest agent with strict YouTube URL validation,
   bounded yt-dlp download, local ffprobe/ffmpeg canonicalization, restricted
   SFTP `.part` upload, checksum metadata, and failure cleanup.
+- Connected cover jobs to home-ingest, verified SFTP source finalization,
+  signed Runpod source/output capabilities, cover payload mapping, restart
+  polling, and non-retained source cleanup.

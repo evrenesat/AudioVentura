@@ -6,6 +6,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import (
     BaseModel,
@@ -21,6 +22,12 @@ from ace_service.models import JobType, OutputFormat, TransferDirection
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,12}$")
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_YOUTUBE_HOSTS = frozenset(
+    {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com", "youtu.be"}
+)
+_YOUTUBE_PLAYLIST_KEYS = frozenset({"list", "index", "start_radio", "playlist", "pp"})
+_YOUTUBE_WATCH_KEYS = frozenset({"v", "t", "start"})
 WORKER_SCHEMA_VERSION = 1
 
 
@@ -73,6 +80,54 @@ def require_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamps must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def validate_youtube_url(value: str) -> str:
+    """Accept one public YouTube video and reject playlists or redirectors."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 2048
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ValueError("youtube_url must be one approved single-video URL")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname.lower() if parsed.hostname else None
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("youtube_url must be one approved single-video URL") from exc
+    if (
+        parsed.scheme != "https"
+        or hostname not in _YOUTUBE_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.fragment
+    ):
+        raise ValueError("youtube_url must be one approved single-video URL")
+
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if _YOUTUBE_PLAYLIST_KEYS.intersection(query):
+        raise ValueError("youtube_url must be one approved single-video URL")
+
+    video_id: str | None = None
+    if hostname == "youtu.be":
+        parts = parsed.path.split("/")
+        if len(parts) == 2 and parts[1] and not set(query) - {"t", "start"}:
+            video_id = parts[1]
+    elif parsed.path == "/watch":
+        if not set(query) - _YOUTUBE_WATCH_KEYS and len(query.get("v", [])) == 1:
+            video_id = query["v"][0]
+    else:
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) == 2 and parts[0] in {"shorts", "embed"} and not query:
+            video_id = parts[1]
+    if video_id is None or not _YOUTUBE_VIDEO_ID_RE.fullmatch(video_id):
+        raise ValueError("youtube_url must be one approved single-video URL")
+    return value
 
 
 class JobCreateRequest(BaseModel):
@@ -182,6 +237,95 @@ class OriginalSongRequest(BaseModel):
             generation["time_signature"] = self.time_signature
         if self.seed is not None:
             generation["seed"] = self.seed
+        return {
+            "schema_version": WORKER_SCHEMA_VERSION,
+            "generation": generation,
+            "source": None,
+        }
+
+
+class CoverRequest(BaseModel):
+    """Validated metadata for one home-ingested ACE-Step cover job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    youtube_url: str = Field(min_length=1, max_length=2048)
+    target_style: str = Field(min_length=3, max_length=4000)
+    remix_guidance: str | None = Field(default=None, max_length=4000)
+    lyrics: str | None = Field(default=None, max_length=20_000)
+    cover_strength: float = Field(default=0.65, ge=0, le=1)
+    output_format: OutputFormat = OutputFormat.MP3
+    rights_confirmation: StrictBool
+
+    @field_validator("youtube_url")
+    @classmethod
+    def youtube_url_is_approved(cls, value: str) -> str:
+        return validate_youtube_url(value)
+
+    @field_validator("target_style", mode="before")
+    @classmethod
+    def target_style_is_trimmed(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("target_style must be text")
+        normalized = value.strip()
+        if not 3 <= len(normalized) <= 4000:
+            raise ValueError("target_style must contain 3-4000 characters")
+        return normalized
+
+    @field_validator("remix_guidance", mode="before")
+    @classmethod
+    def remix_guidance_is_trimmed(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("remix_guidance must be text")
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("lyrics", mode="before")
+    @classmethod
+    def empty_lyrics_are_omitted(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("lyrics must be text")
+        return None if not value.strip() else value
+
+    @field_validator("rights_confirmation")
+    @classmethod
+    def rights_must_be_confirmed(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("rights_confirmation must be true")
+        return value
+
+    @model_validator(mode="after")
+    def effective_prompt_is_bounded(self) -> CoverRequest:
+        if len(self.effective_prompt) > 4000:
+            raise ValueError("target_style and remix_guidance together must fit 4000 characters")
+        return self
+
+    @property
+    def effective_prompt(self) -> str:
+        """Compose style and optional guidance without rewriting either value."""
+
+        return (
+            self.target_style
+            if self.remix_guidance is None
+            else (f"{self.target_style}\n\n{self.remix_guidance}")
+        )
+
+    def to_normalized_request_json(self) -> dict[str, Any]:
+        """Return the metadata-only cover shape accepted by the Runpod worker."""
+
+        generation: dict[str, Any] = {
+            "prompt": self.effective_prompt,
+            "instrumental": False,
+            "vocal_language": "en",
+            "cover_strength": self.cover_strength,
+            "output_format": self.output_format.value,
+        }
+        if self.lyrics is not None:
+            generation["lyrics"] = self.lyrics
         return {
             "schema_version": WORKER_SCHEMA_VERSION,
             "generation": generation,
