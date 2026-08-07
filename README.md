@@ -22,7 +22,7 @@ The detailed deployment and distributed-runtime handoff follows below.
 Build the first usable release of a private music-generation service with a deliberately split runtime:
 
 1. **Hetzner VM is the permanent control plane and web application.**
-2. **Home server is the YouTube/media-ingest node.** Every `yt-dlp`, `ffprobe`, and `ffmpeg` operation runs there so YouTube requests originate from the residential/home connection.
+2. **Home server is the YouTube/media-ingest node.** Every `yt-dlp`, `ffprobe`, and `ffmpeg` operation runs there so YouTube requests originate from the residential/home connection. Runpod encodes generated MP3 output in-process with LAME; Hetzner performs no media processing.
 3. **Runpod Serverless Flex is the only ACE-Step inference backend in v1.** The MacBook/MLX path is deferred.
 4. **Runpod never receives YouTube credentials, SSH keys, SFTP credentials, or direct access to the home network.**
 5. **Large audio never travels inside the Runpod `/run` JSON payload.** Hetzner exposes narrowly scoped, short-lived HTTPS capability URLs for source download and result upload.
@@ -90,6 +90,6 @@ Trusted browser / phone
 
 - Hetzner is lightweight enough for the control plane. It does no ML inference and no audio transcoding.
 - YouTube access stays on the home connection. Cloud/datacenter IP reputation cannot break the main controller or force media download from Hetzner.
-- Every `ffmpeg` and `ffprobe` invocation stays on the home server by design.
+- Home is the only runtime that invokes `ffmpeg` or `ffprobe`; Runpod's generated-output MP3 path uses in-process LAME and the Hetzner control plane performs no media processing.
 - Runpod receives only clean generation parameters and, for covers, a temporary HTTPS URL to a prepared source file.
 - The MacBook and home server are absent from original-song generation. A home-server outage disables only new YouTube cover ingestion.

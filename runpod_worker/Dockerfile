@@ -21,7 +21,6 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         build-essential \
         ca-certificates \
-        ffmpeg \
         git \
         libsndfile1 \
         software-properties-common \
@@ -41,7 +40,7 @@ RUN git clone --quiet --depth 1 --branch "${ACE_STEP_TAG}" "${ACE_STEP_REPOSITOR
     && python -m pip install --extra-index-url https://download.pytorch.org/whl/cu128 \
         /opt/ace-step/acestep/third_parts/nano-vllm \
         /opt/ace-step \
-    && python -m pip install "runpod==1.7.9"
+    && python -m pip install "lameenc==1.8.4" "runpod==1.7.9"
 
 WORKDIR /opt
 COPY runpod_worker /opt/runpod_worker

@@ -98,6 +98,12 @@ controller's subsequent Hetzner-side finalization. Raw and canonical home
 files are removed on success and failure by default; explicit debug retention
 is bounded by a configured expiry and pruned on later requests.
 
+Runpod does not process source media and contains no `ffmpeg` or `ffprobe`
+runtime dependency. For a requested MP3, ACE-Step writes a temporary 48 kHz
+PCM WAV and the worker encodes that file to the requested MP3 in-process with
+the pinned LAME encoder. Requested WAV and FLAC outputs retain their native
+ACE-Step save formats. Hetzner performs no media processing.
+
 ## Checkpoint 5 original-song workflow
 
 Original-song requests are validated at the controller boundary and persisted

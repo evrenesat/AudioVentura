@@ -76,6 +76,13 @@ result contains only identifiers, output size/checksum/format, controlled
 seed/sample-rate metadata, and non-secret worker GPU metadata; it never
 contains audio bytes, base64 audio, a local path, or a permanent media URL.
 
+The worker accepts `mp3`, `flac`, and `wav` output requests. WAV and FLAC use
+the corresponding ACE-Step save format. For MP3, ACE-Step saves a temporary
+48 kHz PCM WAV and the worker uses the pinned `lameenc==1.8.4` library to
+encode 192 kbps MP3 in-process before upload. The image contains no `ffmpeg`
+or `ffprobe` executable; source-media `yt-dlp`/`ffprobe`/`ffmpeg` work remains
+exclusive to home-ingest, and Hetzner performs no media processing.
+
 ## Local verification
 
 The mocked contract suite runs without CUDA or ACE-Step weights:

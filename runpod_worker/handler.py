@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .audio_output import finalize_generated_output, internal_audio_format
 from .runtime import WorkerRuntime, initialize_runtime
 from .schemas import WorkerRequest
 
@@ -73,8 +74,14 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
             save_dir=str(output_directory),
         )
         audio = _one_audio(result)
-        output_path = _safe_generated_path(audio.get("path"), output_directory)
         output_format = request.generation.output_format
+        internal_format = internal_audio_format(output_format)
+        output_path = _safe_generated_path(audio.get("path"), output_directory, internal_format)
+        output_path = finalize_generated_output(
+            output_path,
+            requested_format=output_format,
+            temporary_root=temporary_path,
+        )
         if output_path.suffix.lower().lstrip(".") != output_format:
             raise GenerationError("ACE-Step returned an unexpected output format")
         uploaded = transfer_client.upload_output(request.result_upload, output_path)
@@ -119,12 +126,13 @@ def _build_generation_params(
 
 def _build_generation_config(runtime: WorkerRuntime, request: WorkerRequest) -> Any:
     seed = request.generation.seed
+    internal_format = internal_audio_format(request.generation.output_format)
     values: dict[str, Any] = {
         "batch_size": 1,
         "allow_lm_batch": False,
         "use_random_seed": seed is None,
         "seeds": [seed] if seed is not None else None,
-        "audio_format": request.generation.output_format,
+        "audio_format": internal_format,
         "mp3_bitrate": "192k",
         "mp3_sample_rate": 48_000,
     }
@@ -155,7 +163,7 @@ def _one_audio(result: Any) -> Mapping[str, Any]:
     return audios[0]
 
 
-def _safe_generated_path(value: Any, output_directory: Path) -> Path:
+def _safe_generated_path(value: Any, output_directory: Path, expected_format: str) -> Path:
     if not isinstance(value, str) or not value:
         raise GenerationError("ACE-Step returned no output path")
     candidate = Path(value)
@@ -165,6 +173,7 @@ def _safe_generated_path(value: Any, output_directory: Path) -> Path:
         not resolved_candidate.is_relative_to(resolved_directory)
         or candidate.is_symlink()
         or not candidate.is_file()
+        or candidate.suffix.lower().lstrip(".") != expected_format
     ):
         raise GenerationError("ACE-Step output path escaped its temporary directory")
     return candidate

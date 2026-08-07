@@ -2,6 +2,10 @@
 
 ## 2026-08-07
 
+- Repaired the Runpod output boundary: removed the worker image's `ffmpeg`
+  package, pinned `lameenc==1.8.4`, and changed MP3 generation to encode a
+  temporary PCM WAV in-process while preserving requested output metadata and
+  cleanup guarantees.
 - Started the Hetzner controller foundation with typed settings, SQLite
   persistence, path-safe records, and baseline tests.
 - Corrected configuration validation to require HTTPS for public transfers and

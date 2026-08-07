@@ -96,10 +96,11 @@ outside the configured data root and never deletes completed outputs.
 The trust boundaries are deliberate: browser traffic reaches the UI through
 the tailnet, the controller reaches only the authenticated private home API,
 the home host performs all YouTube/`yt-dlp`/`ffprobe`/`ffmpeg` work, and Runpod
-receives only bounded generation metadata plus per-job HTTPS capabilities. The
-home SFTP identity is restricted to the incoming root and is not provided to
-Runpod. YouTube cookies/login, playlists, generic media URLs, and the deferred
-Mac inference path are first-release limitations. The configured data root is
-the containment boundary for incoming sources, generated outputs, temporary
-files, and logs; path and symlink checks fail closed at each media/transfer
-route.
+receives only bounded generation metadata plus per-job HTTPS capabilities.
+Runpod encodes generated MP3 output with in-process LAME and performs no
+source-media processing; Hetzner performs no media processing. The home SFTP
+identity is restricted to the incoming root and is not provided to Runpod.
+YouTube cookies/login, playlists, generic media URLs, and the deferred Mac
+inference path are first-release limitations. The configured data root is the
+containment boundary for incoming sources, generated outputs, temporary files,
+and logs; path and symlink checks fail closed at each media/transfer route.
