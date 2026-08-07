@@ -25,6 +25,7 @@ from ace_service.models import (
     utc_now,
 )
 from ace_service.schemas import (
+    OriginalSongRequest,
     normalize_extension,
     normalize_relative_path,
     validate_sha256,
@@ -95,6 +96,26 @@ def create_job(
     session.add(job)
     session.flush()
     return job
+
+
+def create_original_job(
+    session: Session,
+    request: OriginalSongRequest,
+    *,
+    job_id: str | UUID | None = None,
+) -> Job:
+    """Persist one validated original-song request before it is enqueued."""
+
+    return create_job(
+        session,
+        job_type=JobType.ORIGINAL,
+        prompt=request.description,
+        lyrics=request.lyrics,
+        output_format=request.output_format,
+        variation_count=request.variation_count,
+        normalized_request_json=request.to_normalized_request_json(),
+        job_id=job_id,
+    )
 
 
 def get_job(session: Session, job_id: str | UUID) -> Job | None:

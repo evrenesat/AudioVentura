@@ -13,7 +13,14 @@ from sqlalchemy import select
 
 from ace_service.config import ServiceSettings
 from ace_service.db import SessionFactory
-from ace_service.models import Job, JobStatus, JobType, Output, VariationAttempt
+from ace_service.models import (
+    Job,
+    JobStatus,
+    JobType,
+    Output,
+    TransferDirection,
+    VariationAttempt,
+)
 from ace_service.repository import (
     complete_variation_attempt,
     create_variation_attempt,
@@ -31,6 +38,7 @@ from ace_service.repository import (
 from ace_service.runpod_client import RunpodState, RunpodStatusResult
 from ace_service.schemas import normalize_extension, resolve_relative_path, validate_sha256
 from ace_service.state import ControllerLock
+from ace_service.transfers import issue_transfer_url
 
 
 class RunpodWorkerClient(Protocol):
@@ -209,6 +217,21 @@ class ControllerWorker:
         with self.session_factory() as session:
             job, attempt, nonce = prepare_variation_submission(session, job_id, variation_index)
             payload = dict(self.payload_builder(job, attempt))
+            if job.job_type is JobType.ORIGINAL:
+                output_path = self._output_relative_path(job, attempt.variation_index)
+                issued = issue_transfer_url(
+                    session,
+                    self.settings,
+                    job_id=job.id,
+                    direction=TransferDirection.OUTPUT_UPLOAD,
+                    expected_relative_path=output_path,
+                    expected_extension=job.output_format.value,
+                    max_bytes=self.settings.transfer_max_output_bytes,
+                )
+                payload["result_upload"] = {
+                    "url": issued.url,
+                    "max_bytes": issued.capability.max_bytes,
+                }
             payload["submission_nonce"] = nonce
             session.commit()
 
@@ -283,7 +306,7 @@ class ControllerWorker:
                 session.commit()
                 return
 
-            set_variation_runpod_result(session, attempt.id, result.result)
+            set_variation_runpod_result(session, attempt.id, _runpod_result_metadata(result))
             if result.result is not None:
                 attempt = get_variation_attempt(session, job_id, variation_index)
                 assert attempt is not None
@@ -525,15 +548,30 @@ class ControllerWorker:
     @staticmethod
     def _default_payload(job: Job, attempt: VariationAttempt) -> Mapping[str, Any]:
         payload = dict(job.normalized_request_json or {})
+        generation = payload.get("generation")
+        if isinstance(generation, Mapping):
+            generation_payload = dict(generation)
+            seed = generation_payload.get("seed")
+            if seed is not None:
+                if isinstance(seed, bool) or not isinstance(seed, int):
+                    raise ValueError("generation seed must be an integer")
+                progressed_seed = seed + attempt.variation_index - 1
+                if not 0 <= progressed_seed <= 2_147_483_647:
+                    raise ValueError("generation seed progression is out of range")
+                generation_payload["seed"] = progressed_seed
+            payload["generation"] = generation_payload
         payload.update(
             {
                 "job_id": job.id,
                 "task_type": job.job_type.value,
                 "variation_index": attempt.variation_index,
-                "variation_count": job.variation_count,
             }
         )
         return payload
+
+    @staticmethod
+    def _output_relative_path(job: Job, variation_index: int) -> str:
+        return f"{job.id}/variation-{variation_index:02d}.{job.output_format.value}"
 
 
 def _file_sha256(path: Path) -> str:
@@ -542,6 +580,15 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _runpod_result_metadata(result: RunpodStatusResult) -> dict[str, Any] | None:
+    metadata = dict(result.result or {})
+    if result.delay_ms is not None:
+        metadata["runpod_queue_delay_ms"] = result.delay_ms
+    if result.execution_ms is not None:
+        metadata["runpod_execution_ms"] = result.execution_ms
+    return metadata or None
 
 
 def _has_symlink_component(root: Path, candidate: Path) -> bool:

@@ -1,5 +1,24 @@
 # Architecture
 
+## Checkpoint 5 original-song workflow
+
+Original-song requests are validated at the controller boundary and persisted
+as a normalized, metadata-only Runpod request before the job is enqueued. The
+description is trimmed, creative lyrics are preserved, optional generation
+fields are omitted when absent, and instrumental requests cannot carry
+non-empty lyrics. A supplied seed advances by one per serialized variation;
+each variation remains an independent Runpod job.
+
+Before each original variation crosses the cloud submission boundary, the
+controller issues a new short-lived output-upload capability bound to
+`<job-id>/variation-XX.<format>`. The worker payload contains only bounded
+generation metadata, the current variation seed, the nonce, and that capability
+URL; it contains no audio bytes and no `variation_count` field. Output records
+retain deterministic paths and checksums, while the variation attempt stores
+the bounded worker result and any Runpod queue-delay/execution timing returned
+by the API. The existing single controller queue submits variations serially,
+so a later failure leaves earlier durable outputs available.
+
 ## Checkpoint 4 controller orchestration
 
 The controller owns one POSIX advisory lock per configured data root and one

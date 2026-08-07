@@ -7,12 +7,21 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from ace_service.models import JobType, OutputFormat, TransferDirection
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,12}$")
+WORKER_SCHEMA_VERSION = 1
 
 
 def normalize_relative_path(value: str) -> str:
@@ -83,6 +92,101 @@ class JobCreateRequest(BaseModel):
     @classmethod
     def rights_timestamp_is_utc(cls, value: datetime | None) -> datetime | None:
         return None if value is None else require_utc(value)
+
+
+class OriginalSongRequest(BaseModel):
+    """Validated creative request persisted before an original job is queued."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = Field(min_length=3, max_length=4000)
+    lyrics: str | None = Field(default=None, max_length=20_000)
+    instrumental: StrictBool = False
+    vocal_language: str = Field(default="en", min_length=1, max_length=32)
+    duration: float | None = Field(default=None, ge=10, le=600)
+    bpm: StrictInt | None = Field(default=None, ge=30, le=300)
+    key_scale: str | None = Field(default=None, max_length=64)
+    time_signature: StrictInt | None = Field(default=None)
+    seed: StrictInt | None = Field(default=None, ge=0, le=2_147_483_647)
+    variation_count: StrictInt = Field(default=1, ge=1, le=4)
+    output_format: OutputFormat = OutputFormat.MP3
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def description_is_trimmed_and_bounded(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("description must be text")
+        normalized = value.strip()
+        if not 3 <= len(normalized) <= 4000:
+            raise ValueError("description must contain 3-4000 characters")
+        return normalized
+
+    @field_validator("vocal_language")
+    @classmethod
+    def vocal_language_is_trimmed(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("vocal_language must not be empty")
+        return normalized
+
+    @field_validator("key_scale")
+    @classmethod
+    def key_scale_is_non_empty_when_present(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("key_scale must not be empty when supplied")
+        return normalized
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def duration_must_not_be_boolean(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("duration must be a number")
+        return value
+
+    @field_validator("time_signature")
+    @classmethod
+    def time_signature_is_supported(cls, value: int | None) -> int | None:
+        if value is not None and value not in {2, 3, 4, 6}:
+            raise ValueError("time_signature must be 2, 3, 4, or 6")
+        return value
+
+    @model_validator(mode="after")
+    def validate_cross_field_rules(self) -> OriginalSongRequest:
+        if self.instrumental and self.lyrics is not None and self.lyrics.strip():
+            raise ValueError("instrumental jobs must not include lyrics")
+        if self.seed is not None and self.seed + self.variation_count - 1 > 2_147_483_647:
+            raise ValueError("seed progression exceeds the supported integer range")
+        return self
+
+    def to_normalized_request_json(self) -> dict[str, Any]:
+        """Return the exact metadata-only shape accepted by the Runpod worker."""
+
+        generation: dict[str, Any] = {
+            "prompt": self.description,
+            "instrumental": self.instrumental,
+            "vocal_language": self.vocal_language,
+            "output_format": self.output_format.value,
+        }
+        if self.lyrics is not None:
+            generation["lyrics"] = self.lyrics
+        if self.duration is not None:
+            generation["duration"] = self.duration
+        if self.bpm is not None:
+            generation["bpm"] = self.bpm
+        if self.key_scale is not None:
+            generation["key_scale"] = self.key_scale
+        if self.time_signature is not None:
+            generation["time_signature"] = self.time_signature
+        if self.seed is not None:
+            generation["seed"] = self.seed
+        return {
+            "schema_version": WORKER_SCHEMA_VERSION,
+            "generation": generation,
+            "source": None,
+        }
 
 
 class OutputCreateRequest(BaseModel):
