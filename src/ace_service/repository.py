@@ -21,6 +21,7 @@ from ace_service.models import (
     TransferCapability,
     TransferDirection,
     TransferStatus,
+    VariationAttempt,
     utc_now,
 )
 from ace_service.schemas import (
@@ -28,6 +29,7 @@ from ace_service.schemas import (
     normalize_relative_path,
     validate_sha256,
 )
+from ace_service.state import validate_job_transition, validate_variation_transition
 
 
 def _id_string(value: str | UUID | None) -> str:
@@ -97,6 +99,312 @@ def create_job(
 
 def get_job(session: Session, job_id: str | UUID) -> Job | None:
     return session.get(Job, str(job_id))
+
+
+def transition_job(
+    session: Session,
+    job_id: str | UUID,
+    status: JobStatus,
+    *,
+    now: datetime | None = None,
+    error_code: str | None = None,
+    user_facing_error: str | None = None,
+) -> Job:
+    """Apply one validated parent-job lifecycle transition."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    validate_job_transition(job.status, status)
+    timestamp = _utc_timestamp(now)
+    if job.status is not status:
+        job.status = status
+    if status in {JobStatus.CLOUD_QUEUED, JobStatus.GENERATING} and job.started_at is None:
+        job.started_at = timestamp
+    if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        job.completed_at = timestamp
+    if error_code is not None:
+        job.error_code = error_code
+    if user_facing_error is not None:
+        job.user_facing_error = user_facing_error
+    job.updated_at = timestamp
+    session.flush()
+    return job
+
+
+def get_variation_attempt(
+    session: Session, job_id: str | UUID, variation_index: int
+) -> VariationAttempt | None:
+    return session.scalar(
+        select(VariationAttempt).where(
+            VariationAttempt.job_id == str(job_id),
+            VariationAttempt.variation_index == variation_index,
+        )
+    )
+
+
+def list_variation_attempts(session: Session, job_id: str | UUID) -> list[VariationAttempt]:
+    return list(
+        session.scalars(
+            select(VariationAttempt)
+            .where(VariationAttempt.job_id == str(job_id))
+            .order_by(VariationAttempt.variation_index)
+        )
+    )
+
+
+def create_variation_attempt(
+    session: Session,
+    *,
+    job_id: str | UUID,
+    variation_index: int,
+) -> VariationAttempt:
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if variation_index < 1 or variation_index > job.variation_count:
+        raise ValueError("variation index is outside the job variation count")
+    existing = get_variation_attempt(session, job.id, variation_index)
+    if existing is not None:
+        return existing
+    attempt = VariationAttempt(job_id=job.id, variation_index=variation_index)
+    session.add(attempt)
+    session.flush()
+    return attempt
+
+
+def transition_variation_attempt(
+    session: Session,
+    attempt_id: int,
+    status: JobStatus,
+    *,
+    now: datetime | None = None,
+    error_code: str | None = None,
+    user_facing_error: str | None = None,
+) -> VariationAttempt:
+    """Apply one validated individual variation transition."""
+
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    validate_variation_transition(attempt.status, status)
+    timestamp = _utc_timestamp(now)
+    attempt.status = status
+    if status in {JobStatus.CLOUD_QUEUED, JobStatus.GENERATING} and attempt.started_at is None:
+        attempt.started_at = timestamp
+    if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        attempt.completed_at = timestamp
+    if error_code is not None:
+        attempt.error_code = error_code
+    if user_facing_error is not None:
+        attempt.user_facing_error = user_facing_error
+    attempt.updated_at = timestamp
+    session.flush()
+    return attempt
+
+
+def prepare_variation_submission(
+    session: Session,
+    job_id: str | UUID,
+    variation_index: int,
+    *,
+    submission_nonce: str | UUID | None = None,
+    now: datetime | None = None,
+) -> tuple[Job, VariationAttempt, str]:
+    """Commit the variation's nonce before the external Runpod request."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    attempt = create_variation_attempt(session, job_id=job.id, variation_index=variation_index)
+    if attempt.runpod_job_id:
+        raise ValueError("variation already has a Runpod job ID")
+    if attempt.submission_nonce:
+        raise ValueError("variation submission outcome is uncertain")
+    if attempt.status is not JobStatus.QUEUED:
+        raise ValueError(f"variation is not queued: {attempt.status.value}")
+    nonce = str(submission_nonce or uuid4())
+    if not nonce:
+        raise ValueError("submission nonce must not be empty")
+    timestamp = _utc_timestamp(now)
+    transition_variation_attempt(session, attempt.id, JobStatus.CLOUD_QUEUED, now=timestamp)
+    if job.status in {JobStatus.QUEUED, JobStatus.STAGING}:
+        transition_job(session, job.id, JobStatus.CLOUD_QUEUED, now=timestamp)
+    elif job.status is not JobStatus.GENERATING and job.status is not JobStatus.CLOUD_QUEUED:
+        raise ValueError(f"job is not ready for cloud submission: {job.status.value}")
+    job.current_variation = variation_index
+    job.current_submission_nonce = nonce
+    job.current_runpod_job_id = None
+    job.updated_at = timestamp
+    attempt.submission_nonce = nonce
+    attempt.updated_at = timestamp
+    session.flush()
+    return job, attempt, nonce
+
+
+def persist_variation_runpod_job_id(
+    session: Session,
+    attempt_id: int,
+    runpod_job_id: str,
+    *,
+    submission_nonce: str,
+    now: datetime | None = None,
+) -> VariationAttempt:
+    """Persist a Runpod ID immediately after an accepted variation submission."""
+
+    if not runpod_job_id or len(runpod_job_id) > 128:
+        raise ValueError("Runpod job ID is invalid")
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    if attempt.submission_nonce != submission_nonce:
+        raise ValueError("submission nonce does not match the pending variation")
+    if attempt.runpod_job_id and attempt.runpod_job_id != runpod_job_id:
+        raise ValueError("variation already has a different Runpod job ID")
+    attempt.runpod_job_id = runpod_job_id
+    job = get_job(session, attempt.job_id)
+    if job is not None:
+        job.current_runpod_job_id = runpod_job_id
+        job.updated_at = _utc_timestamp(now)
+    attempt.updated_at = _utc_timestamp(now)
+    session.flush()
+    return attempt
+
+
+def recover_uncertain_variation_submissions(
+    session: Session, *, now: datetime | None = None
+) -> list[VariationAttempt]:
+    """Fail nonce-only variation attempts without resubmitting them."""
+
+    timestamp = _utc_timestamp(now)
+    attempts = list(
+        session.scalars(
+            select(VariationAttempt).where(
+                VariationAttempt.submission_nonce.is_not(None),
+                VariationAttempt.runpod_job_id.is_(None),
+                VariationAttempt.status == JobStatus.CLOUD_QUEUED,
+            )
+        )
+    )
+    for attempt in attempts:
+        transition_variation_attempt(
+            session,
+            attempt.id,
+            JobStatus.FAILED,
+            now=timestamp,
+            error_code="uncertain_cloud_submission",
+            user_facing_error=(
+                "Cloud submission outcome is uncertain; automatic resubmission was prevented."
+            ),
+        )
+        job = get_job(session, attempt.job_id)
+        if job is not None and job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            transition_job(
+                session,
+                job.id,
+                JobStatus.FAILED,
+                now=timestamp,
+                error_code="uncertain_cloud_submission",
+                user_facing_error=attempt.user_facing_error,
+            )
+    session.flush()
+    return attempts
+
+
+def set_variation_runpod_result(
+    session: Session,
+    attempt_id: int,
+    result: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> VariationAttempt:
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    attempt.runpod_result_json = result
+    attempt.updated_at = _utc_timestamp(now)
+    session.flush()
+    return attempt
+
+
+def complete_variation_attempt(
+    session: Session,
+    attempt_id: int,
+    *,
+    now: datetime | None = None,
+    note: str | None = None,
+) -> tuple[Job, VariationAttempt, bool]:
+    """Complete one variation and report whether it completed the parent job."""
+
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    job = get_job(session, attempt.job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {attempt.job_id}")
+    timestamp = _utc_timestamp(now)
+    if note:
+        result = dict(attempt.runpod_result_json or {})
+        result["recovery_note"] = note
+        attempt.runpod_result_json = result
+    if attempt.status is not JobStatus.COMPLETED:
+        transition_variation_attempt(session, attempt.id, JobStatus.COMPLETED, now=timestamp)
+    attempt = session.get(VariationAttempt, attempt.id)
+    assert attempt is not None
+    if attempt.variation_index >= job.variation_count:
+        job.current_runpod_job_id = None
+        job.current_submission_nonce = None
+        transition_job(session, job.id, JobStatus.COMPLETED, now=timestamp)
+        return job, attempt, True
+    next_index = attempt.variation_index + 1
+    create_variation_attempt(session, job_id=job.id, variation_index=next_index)
+    if job.status is JobStatus.CLOUD_QUEUED:
+        transition_job(session, job.id, JobStatus.GENERATING, now=timestamp)
+    job.current_variation = next_index
+    job.current_runpod_job_id = None
+    job.current_submission_nonce = None
+    job.updated_at = timestamp
+    session.flush()
+    return job, attempt, False
+
+
+def fail_variation_attempt(
+    session: Session,
+    attempt_id: int,
+    *,
+    error_code: str,
+    user_facing_error: str,
+    now: datetime | None = None,
+) -> Job:
+    """Persist a variation failure and make its parent terminal."""
+
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    timestamp = _utc_timestamp(now)
+    if attempt.status is not JobStatus.FAILED:
+        transition_variation_attempt(
+            session,
+            attempt.id,
+            JobStatus.FAILED,
+            now=timestamp,
+            error_code=error_code,
+            user_facing_error=user_facing_error,
+        )
+    job = get_job(session, attempt.job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {attempt.job_id}")
+    if job.status is not JobStatus.FAILED:
+        transition_job(
+            session,
+            job.id,
+            JobStatus.FAILED,
+            now=timestamp,
+            error_code=error_code,
+            user_facing_error=user_facing_error,
+        )
+    session.flush()
+    return job
 
 
 def update_job(session: Session, job_id: str | UUID, **changes: Any) -> Job:

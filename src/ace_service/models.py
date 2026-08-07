@@ -164,6 +164,9 @@ class Job(Base):
     outputs: Mapped[list[Output]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
+    variation_attempts: Mapped[list[VariationAttempt]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", passive_deletes=True
+    )
     transfers: Mapped[list[TransferCapability]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -189,6 +192,35 @@ class Output(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
 
     job: Mapped[Job] = relationship(back_populates="outputs")
+
+
+class VariationAttempt(Base):
+    """Durable state for one serialized Runpod variation attempt."""
+
+    __tablename__ = "variation_attempts"
+    __table_args__ = (UniqueConstraint("job_id", "variation_index"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    variation_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        _enum_type(JobStatus), nullable=False, default=JobStatus.QUEUED
+    )
+    runpod_job_id: Mapped[str | None] = mapped_column(String(128))
+    submission_nonce: Mapped[str | None] = mapped_column(String(128))
+    runpod_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    user_facing_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    job: Mapped[Job] = relationship(back_populates="variation_attempts")
 
 
 class TransferCapability(Base):

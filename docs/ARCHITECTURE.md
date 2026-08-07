@@ -1,5 +1,30 @@
 # Architecture
 
+## Checkpoint 4 controller orchestration
+
+The controller owns one POSIX advisory lock per configured data root and one
+`asyncio.Queue[str]` serviced by one coroutine. Enqueue deduplication is
+in-process; the lock prevents a second controller process from polling or
+submitting the same SQLite-backed jobs. Runpod submission is serialized across
+all jobs and variations.
+
+Parent jobs use the lifecycle transitions defined by the handoff plan. An
+original job's `variation_attempts` rows hold the individual variation status,
+submission nonce, Runpod ID, result metadata, and terminal error. This keeps a
+multi-variation parent active while each variation is submitted and polled in
+order. A nonce is committed before `/run`; a returned Runpod ID is committed
+immediately after acceptance. Nonce-only attempts are failed as uncertain on
+restart and are never submitted again.
+
+Startup recovery runs while the singleton lock is held and before the worker
+accepts new enqueues. Queued jobs are enqueued, interrupted ingestion is
+advanced only when its canonical source is fully verified, and persisted
+Runpod IDs are polled without resubmission. Missing IDs and uncertain
+submissions become stable terminal errors. Completed Runpod status is accepted
+only after a deterministic output file and matching durable output record pass
+size, path, and SHA-256 validation; a valid consumed output can recover a job
+when Runpod status retention has expired.
+
 ## Checkpoint 3 boundary
 
 The controller's Runpod adapter is an asynchronous metadata-only client for
