@@ -8,3 +8,6 @@
   reject credential placeholders without a runtime bypass.
 - Added durable variation attempts, explicit controller transitions, singleton
   data-root locking, serialized Runpod orchestration, and restart recovery.
+- Added the isolated home-ingest agent with strict YouTube URL validation,
+  bounded yt-dlp download, local ffprobe/ffmpeg canonicalization, restricted
+  SFTP `.part` upload, checksum metadata, and failure cleanup.

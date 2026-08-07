@@ -1,5 +1,35 @@
 # Architecture
 
+## Checkpoint 6 home-server ingest
+
+`home_ingest/` is a separately deployed Python service for the home server.
+It binds to localhost, authenticates the private
+`POST /v1/prepare-youtube-cover` route with the shared home-ingest bearer
+token, and exposes no documentation or catch-all routes. It is the only
+runtime allowed to contact YouTube or invoke `yt-dlp`, `ffprobe`, and
+`ffmpeg`.
+
+The agent validates one HTTPS YouTube video URL, performs a metadata-only
+yt-dlp inspection before an audio-only download, and writes only
+`download.<ext>` below a UUID job directory. A progress hook and final stat
+enforce the source byte limit. ffprobe requires finite duration and an audio
+stream before ffmpeg normalizes the source to a 48 kHz stereo, 192 kbps CBR
+MP3. The resulting `source.mp3.part` is atomically renamed locally, probed
+again, compared with the metadata duration using a bounded tolerance, and
+hashed before upload.
+
+SFTP uses a dedicated key and a deterministic destination under the configured
+incoming root:
+
+    incoming/<job-id>/source.mp3.part
+
+The job ID is parsed as a UUID and no title or prompt reaches either local or
+remote filenames. The response is emitted only after SFTP reports a matching
+remote byte size and contains metadata, byte size, and SHA-256 for the
+controller's subsequent Hetzner-side finalization. Raw and canonical home
+files are removed on success and failure by default; explicit debug retention
+is bounded by a configured expiry and pruned on later requests.
+
 ## Checkpoint 5 original-song workflow
 
 Original-song requests are validated at the controller boundary and persisted
