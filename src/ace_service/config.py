@@ -176,6 +176,30 @@ class ServiceSettings(BaseSettings):
         validation_alias=AliasChoices("RUNPOD_JOB_TTL_MS", "runpod_job_ttl_ms"),
         gt=0,
     )
+    runpod_connect_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "RUNPOD_CONNECT_TIMEOUT_SECONDS", "runpod_connect_timeout_seconds"
+        ),
+        gt=0,
+    )
+    runpod_read_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("RUNPOD_READ_TIMEOUT_SECONDS", "runpod_read_timeout_seconds"),
+        gt=0,
+    )
+    runpod_write_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "RUNPOD_WRITE_TIMEOUT_SECONDS", "runpod_write_timeout_seconds"
+        ),
+        gt=0,
+    )
+    runpod_pool_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices("RUNPOD_POOL_TIMEOUT_SECONDS", "runpod_pool_timeout_seconds"),
+        gt=0,
+    )
     acestep_model: str = Field(
         default="acestep-v15-xl-turbo",
         validation_alias=AliasChoices("ACESTEP_MODEL", "acestep_model"),

@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from ace_service.models import (
@@ -38,6 +38,12 @@ def _token_sha256(token: str) -> str:
     if not token:
         raise ValueError("transfer token must not be empty")
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_transfer_token(token: str) -> str:
+    """Hash a capability token without ever returning or storing its plaintext."""
+
+    return _token_sha256(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +112,90 @@ def update_job(session: Session, job_id: str | UUID, **changes: Any) -> Job:
     return job
 
 
+def prepare_runpod_submission(
+    session: Session,
+    job_id: str | UUID,
+    *,
+    submission_nonce: str | UUID | None = None,
+    now: datetime | None = None,
+) -> tuple[Job, str]:
+    """Durably mark a job as ready to submit before calling Runpod.
+
+    A nonce without a persisted Runpod ID is intentionally recoverable as an
+    uncertain cloud submission.  The caller must commit this change before
+    making the external request.
+    """
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if job.current_runpod_job_id:
+        raise ValueError("job already has a Runpod job ID")
+    if job.current_submission_nonce:
+        raise ValueError("submission outcome is uncertain; automatic resubmission is disabled")
+    nonce = str(submission_nonce or uuid4())
+    if not nonce:
+        raise ValueError("submission nonce must not be empty")
+    timestamp = _utc_timestamp(now)
+    job.current_submission_nonce = nonce
+    job.current_runpod_job_id = None
+    job.status = JobStatus.CLOUD_QUEUED
+    job.updated_at = timestamp
+    session.flush()
+    return job, nonce
+
+
+def persist_runpod_job_id(
+    session: Session,
+    job_id: str | UUID,
+    runpod_job_id: str,
+    *,
+    submission_nonce: str,
+    now: datetime | None = None,
+) -> Job:
+    """Persist the accepted cloud ID immediately after `/run` returns."""
+
+    if not runpod_job_id or len(runpod_job_id) > 128:
+        raise ValueError("Runpod job ID is invalid")
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if job.current_submission_nonce != submission_nonce:
+        raise ValueError("submission nonce does not match the pending attempt")
+    if job.current_runpod_job_id and job.current_runpod_job_id != runpod_job_id:
+        raise ValueError("job already has a different Runpod job ID")
+    job.current_runpod_job_id = runpod_job_id
+    job.updated_at = _utc_timestamp(now)
+    session.flush()
+    return job
+
+
+def recover_uncertain_submissions(session: Session, *, now: datetime | None = None) -> list[Job]:
+    """Fail pending nonce-only attempts without submitting them again."""
+
+    timestamp = _utc_timestamp(now)
+    jobs = list(
+        session.scalars(
+            select(Job).where(
+                and_(
+                    Job.current_submission_nonce.is_not(None),
+                    Job.current_runpod_job_id.is_(None),
+                    Job.status == JobStatus.CLOUD_QUEUED,
+                )
+            )
+        )
+    )
+    for job in jobs:
+        job.status = JobStatus.FAILED
+        job.error_code = "uncertain_cloud_submission"
+        job.user_facing_error = (
+            "Cloud submission outcome is uncertain; automatic resubmission was prevented."
+        )
+        job.updated_at = timestamp
+    session.flush()
+    return jobs
+
+
 def create_output(
     session: Session,
     *,
@@ -141,6 +231,19 @@ def create_output(
 
 def get_output(session: Session, output_id: int) -> Output | None:
     return session.get(Output, output_id)
+
+
+def get_output_by_path(
+    session: Session, *, job_id: str | UUID, relative_path: str
+) -> Output | None:
+    """Find the durable output associated with one deterministic path."""
+
+    return session.scalar(
+        select(Output).where(
+            Output.job_id == str(job_id),
+            Output.relative_path == normalize_relative_path(relative_path),
+        )
+    )
 
 
 def issue_transfer_capability(
@@ -228,3 +331,10 @@ def revoke_transfer(
     capability.revoked_at = now or utc_now()
     session.flush()
     return capability
+
+
+def _utc_timestamp(value: datetime | None) -> datetime:
+    timestamp = value or utc_now()
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("timestamps must be timezone-aware")
+    return timestamp.astimezone(UTC)
