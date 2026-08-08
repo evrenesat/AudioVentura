@@ -32,6 +32,30 @@ The first release supports two workflows:
 1. Generate an original song from creative instructions, optional lyrics, optional musical metadata, and one to four sequential variations.
 2. Generate a cover or stylistic reinterpretation from a single public YouTube video after the home server downloads and prepares the source audio.
 
+New jobs use a strict version-2 worker payload. Original requests choose
+`direct`, `enhance`, or `auto-compose` prompting and either model-selected
+duration (`auto`, sent as `-1.0`) or an explicit 10-600 second custom value.
+The final caption and lyrics are bounded at 511 and 4095 characters. Cover
+requests expose ACE-Step's independent `audio_cover_strength` and
+`cover_noise_strength` controls, retain the probed source duration, and stage
+for browser confirmation before any Runpod submission. The staged cover page
+can confirm or cancel preparation, and asynchronous status polling reloads it
+once when confirmation becomes available. Two to four cover variations run
+sequentially; a supplied seed advances deterministically. Duration prose is
+accepted only when bounded numeric seconds/minutes match an explicit custom
+duration; it never changes the structured value.
+
+Immediately before starting a schema-v1 controller rollback, run the local
+read-only gate against the configured database:
+
+```text
+ACE_SERVICE_DATA_ROOT=/srv/ace-service/data uv run python -m ace_service.rollback_readiness
+```
+
+The command exits zero only when no nonterminal or malformed schema-v2 state
+or unconfirmed cover staging is present. A nonzero or indeterminate result
+means the v2-capable controller and worker must remain active.
+
 ### Runtime Architecture
 
 ```text

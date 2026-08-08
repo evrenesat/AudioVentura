@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 
@@ -29,6 +30,7 @@ from ace_service.repository import (
     complete_variation_attempt,
     create_variation_attempt,
     fail_variation_attempt,
+    finalize_cover_job_duration,
     get_job,
     get_variation_attempt,
     persist_variation_runpod_job_id,
@@ -41,7 +43,14 @@ from ace_service.repository import (
     transition_variation_attempt,
 )
 from ace_service.runpod_client import RunpodState, RunpodStatusResult
-from ace_service.schemas import normalize_extension, resolve_relative_path, validate_sha256
+from ace_service.schemas import (
+    LEGACY_WORKER_SCHEMA_VERSION,
+    WORKER_SCHEMA_VERSION,
+    normalize_extension,
+    resolve_relative_path,
+    validate_sha256,
+    validate_worker_result_metadata,
+)
 from ace_service.state import ControllerLock
 from ace_service.transfers import issue_transfer_url
 
@@ -221,6 +230,8 @@ class ControllerWorker:
         if status is JobStatus.STAGING:
             if not self._incoming_source_is_valid(job_id):
                 raise ValueError("staged cover source is missing or invalid")
+            if job.job_type is JobType.COVER and not self._cover_is_confirmed(job):
+                return
             await self._submit_variation(job_id, variation_index)
             return
 
@@ -316,12 +327,38 @@ class ControllerWorker:
             result = await self.runpod_client.status(runpod_job_id)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as status_error:
             # A durable output is stronger evidence than expired Runpod status
             # after controller downtime, but only when every local invariant is
             # independently verified.
             with self.session_factory() as session:
-                if self._valid_output(session, job_id, variation_index):
+                attempt = get_variation_attempt(session, job_id, variation_index)
+                job = get_job(session, job_id)
+                output = (
+                    self._validated_output(session, job, variation_index)
+                    if job is not None
+                    else None
+                )
+                v2_metadata = None
+                if attempt is not None and job is not None:
+                    if _stored_schema_version(job) == WORKER_SCHEMA_VERSION:
+                        v2_metadata = _validated_v2_completion_metadata(attempt, job, output)
+                        completion_evidence_is_valid = v2_metadata is not None
+                    else:
+                        completion_evidence_is_valid = True
+                else:
+                    completion_evidence_is_valid = False
+                if (
+                    attempt is not None
+                    and job is not None
+                    and output is not None
+                    and completion_evidence_is_valid
+                ):
+                    if v2_metadata is not None:
+                        # The output may have been finalized after the worker
+                        # result was persisted. Reapply the same bounded
+                        # completion projection before completing the attempt.
+                        set_variation_runpod_result(session, attempt.id, v2_metadata)
                     completed_job, _, parent_completed = complete_variation_attempt(
                         session,
                         attempt.id,
@@ -333,6 +370,10 @@ class ControllerWorker:
                     if parent_completed:
                         remove_cover_source(self.settings, job_id)
                     return
+                if job is not None and _stored_schema_version(job) == WORKER_SCHEMA_VERSION:
+                    raise ValueError(
+                        "schema-v2 status is unavailable without validated completion metadata"
+                    ) from status_error
             raise
 
         LOGGER.info(
@@ -374,11 +415,27 @@ class ControllerWorker:
                     remove_cover_source(self.settings, failed_job.id)
                 return
 
-            set_variation_runpod_result(session, attempt.id, _runpod_result_metadata(result))
+            expected_schema_version = _stored_schema_version(job)
+            metadata = _runpod_result_metadata(
+                result, expected_schema_version=expected_schema_version
+            )
+            if expected_schema_version == WORKER_SCHEMA_VERSION:
+                if metadata is None:
+                    raise ValueError("schema-v2 worker completion is missing result metadata")
+            output = self._validated_output(session, job, variation_index)
+            if expected_schema_version == WORKER_SCHEMA_VERSION:
+                assert metadata is not None
+                _validate_completion_metadata(metadata, job, attempt, output)
+            set_variation_runpod_result(
+                session,
+                attempt.id,
+                metadata,
+                project_to_output=output is not None,
+            )
             if result.result is not None:
                 attempt = get_variation_attempt(session, job_id, variation_index)
                 assert attempt is not None
-            if not self._valid_output(session, job_id, variation_index):
+            if output is None:
                 # Keep the attempt active. The output capability may be
                 # consumed just before or just after this status observation.
                 if attempt.status is JobStatus.CLOUD_QUEUED:
@@ -434,12 +491,23 @@ class ControllerWorker:
                 raise ValueError("cover job is not awaiting source staging")
             job.source_url = prepared.canonical_url
             job.sanitized_source_title = prepared.title
-            job.source_duration = prepared.duration_seconds
             job.source_sha256 = prepared.prepared_sha256
             job.source_byte_size = prepared.prepared_bytes
+            normalized = job.normalized_request_json
+            is_v2 = (
+                isinstance(normalized, Mapping)
+                and normalized.get("schema_version") == WORKER_SCHEMA_VERSION
+            )
+            if is_v2:
+                finalize_cover_job_duration(session, job.id, prepared.duration_seconds)
+            else:
+                # Legacy rows retain their schema and their submitted-era
+                # behavior; only the relational source duration is updated.
+                job.source_duration = prepared.duration_seconds
             transition_job(session, job.id, JobStatus.STAGING)
             session.commit()
-        await self._submit_variation(job_id, 1)
+        if not is_v2:
+            await self._submit_variation(job_id, 1)
         LOGGER.info(
             "job=%s stage=staging component=controller elapsed_ms=%d",
             job_id,
@@ -479,7 +547,8 @@ class ControllerWorker:
                         )
                     continue
                 if job.status is JobStatus.STAGING:
-                    self._enqueue_recovered(job.id)
+                    if self._cover_is_confirmed(job):
+                        self._enqueue_recovered(job.id)
                     continue
                 if job.status in {JobStatus.CLOUD_QUEUED, JobStatus.GENERATING}:
                     attempt = get_variation_attempt(session, job.id, job.current_variation or 1)
@@ -529,6 +598,19 @@ class ControllerWorker:
             return
         self._enqueued.add(job_id)
         self._queue.put_nowait(job_id)
+
+    @staticmethod
+    def _cover_is_confirmed(job: Job) -> bool:
+        """Treat legacy staged rows as submitted-era state, but gate v2 rows."""
+
+        normalized = job.normalized_request_json
+        if (
+            not isinstance(normalized, Mapping)
+            or normalized.get("schema_version") != WORKER_SCHEMA_VERSION
+        ):
+            return True
+        staging = normalized.get("cover_staging")
+        return isinstance(staging, Mapping) and staging.get("status") == "confirmed"
 
     def _materialize_legacy_attempt(self, session: Any, job: Job) -> VariationAttempt:
         attempt = create_variation_attempt(
@@ -667,25 +749,26 @@ class ControllerWorker:
             except (OSError, ValueError):
                 return False
 
-    def _valid_output(self, session: Any, job_id: str, variation_index: int) -> bool:
-        job = get_job(session, job_id)
+    def _validated_output(
+        self, session: Any, job: Job | None, variation_index: int
+    ) -> Output | None:
         if job is None:
-            return False
+            return None
         output = session.scalar(
             select(Output).where(
-                Output.job_id == job_id,
+                Output.job_id == job.id,
                 Output.variation_index == variation_index,
                 Output.result_index == 0,
             )
         )
-        if output is None or output.byte_size <= 0:
-            return False
+        if output is None or not isinstance(output, Output) or output.byte_size <= 0:
+            return None
         try:
             expected_relative_path = (
                 f"{job.id}/variation-{variation_index:02d}.{job.output_format.value}"
             )
             if output.relative_path != expected_relative_path:
-                return False
+                return None
             raw_candidate = self.settings.paths.outputs / output.relative_path
             candidate = resolve_relative_path(self.settings.paths.outputs, output.relative_path)
             root = self.settings.paths.outputs.resolve()
@@ -694,18 +777,20 @@ class ControllerWorker:
                 or _has_symlink_component(self.settings.paths.outputs, raw_candidate)
                 or not candidate.is_file()
             ):
-                return False
+                return None
             if candidate.suffix.lower() != normalize_extension(job.output_format.value):
-                return False
+                return None
             stat = candidate.stat()
             if (
                 stat.st_size != output.byte_size
                 or stat.st_size > self.settings.transfer_max_output_bytes
             ):
-                return False
-            return _file_sha256(candidate) == str(output.sha256)
+                return None
+            if _file_sha256(candidate) != str(output.sha256):
+                return None
+            return cast(Output, output)
         except (OSError, ValueError):
-            return False
+            return None
 
     @staticmethod
     def _default_payload(job: Job, attempt: VariationAttempt) -> Mapping[str, Any]:
@@ -722,6 +807,18 @@ class ControllerWorker:
                     raise ValueError("generation seed progression is out of range")
                 generation_payload["seed"] = progressed_seed
             payload["generation"] = generation_payload
+        resolved = payload.get("resolved_parameters")
+        if isinstance(resolved, Mapping):
+            resolved_payload = dict(resolved)
+            seed = resolved_payload.get("seed")
+            if seed is not None:
+                if isinstance(seed, bool) or not isinstance(seed, int):
+                    raise ValueError("resolved seed must be an integer")
+                progressed_seed = seed + attempt.variation_index - 1
+                if not 0 <= progressed_seed <= 2_147_483_647:
+                    raise ValueError("resolved seed progression is out of range")
+                resolved_payload["seed"] = progressed_seed
+            payload["resolved_parameters"] = resolved_payload
         payload.update(
             {
                 "job_id": job.id,
@@ -744,13 +841,158 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _runpod_result_metadata(result: RunpodStatusResult) -> dict[str, Any] | None:
+def _runpod_result_metadata(
+    result: RunpodStatusResult, *, expected_schema_version: int | None = None
+) -> dict[str, Any] | None:
     metadata = dict(result.result or {})
     if result.delay_ms is not None:
         metadata["runpod_queue_delay_ms"] = result.delay_ms
     if result.execution_ms is not None:
         metadata["runpod_execution_ms"] = result.execution_ms
-    return metadata or None
+    if not metadata:
+        return None
+    if "schema_version" not in metadata:
+        if expected_schema_version == LEGACY_WORKER_SCHEMA_VERSION:
+            legacy_metadata = validate_worker_result_metadata(
+                {"schema_version": LEGACY_WORKER_SCHEMA_VERSION, **metadata},
+                expected_schema_version=LEGACY_WORKER_SCHEMA_VERSION,
+            )
+            legacy_metadata.pop("schema_version", None)
+            return legacy_metadata
+        if expected_schema_version is None:
+            return metadata
+    return validate_worker_result_metadata(
+        metadata, expected_schema_version=expected_schema_version
+    )
+
+
+def _stored_schema_version(job: Job) -> int | None:
+    normalized = job.normalized_request_json
+    if not isinstance(normalized, Mapping):
+        return None
+    value = normalized.get("schema_version")
+    if isinstance(value, bool):
+        return None
+    return value if value in {LEGACY_WORKER_SCHEMA_VERSION, WORKER_SCHEMA_VERSION} else None
+
+
+def _validated_v2_completion_metadata(
+    attempt: VariationAttempt, job: Job, output: Output | None
+) -> dict[str, Any] | None:
+    """Return persisted v2 completion evidence only when it still validates."""
+
+    raw_metadata = attempt.runpod_result_json
+    if not isinstance(raw_metadata, dict):
+        return None
+    try:
+        metadata = validate_worker_result_metadata(
+            raw_metadata, expected_schema_version=WORKER_SCHEMA_VERSION
+        )
+        _validate_completion_metadata(metadata, job, attempt, output)
+    except ValueError:
+        return None
+    return metadata
+
+
+def _validate_completion_metadata(
+    metadata: Mapping[str, Any],
+    job: Job,
+    attempt: VariationAttempt,
+    output_record: Output | None = None,
+) -> None:
+    if metadata.get("job_id") != job.id:
+        raise ValueError("worker completion job identity does not match the active job")
+    submission_nonce = metadata.get("submission_nonce")
+    if (
+        not isinstance(submission_nonce, str)
+        or not submission_nonce
+        or attempt.submission_nonce is None
+        or submission_nonce != attempt.submission_nonce
+    ):
+        raise ValueError("worker completion submission nonce does not match the active attempt")
+    variation_index = metadata.get("variation_index")
+    if (
+        isinstance(variation_index, bool)
+        or not isinstance(variation_index, int)
+        or variation_index != attempt.variation_index
+    ):
+        raise ValueError("worker completion variation does not match the active attempt")
+    if metadata.get("status") != "uploaded":
+        raise ValueError("worker completion is missing upload evidence")
+    output = metadata.get("output")
+    if not isinstance(output, Mapping):
+        raise ValueError("worker completion is missing output metadata")
+    effective_seed = output.get("effective_seed", output.get("seed"))
+    if (
+        isinstance(effective_seed, bool)
+        or not isinstance(effective_seed, int)
+        or effective_seed < 0
+    ):
+        raise ValueError("worker completion is missing an effective integer seed")
+    byte_size = output.get("bytes")
+    if isinstance(byte_size, bool) or not isinstance(byte_size, int) or byte_size <= 0:
+        raise ValueError("worker completion is missing output byte evidence")
+    raw_output_sha256 = output.get("sha256")
+    if not isinstance(raw_output_sha256, str):
+        raise ValueError("worker completion is missing output checksum evidence")
+    try:
+        output_sha256 = validate_sha256(raw_output_sha256)
+    except ValueError as exc:
+        raise ValueError("worker completion is missing output checksum evidence") from exc
+    if output_record is not None:
+        if byte_size != output_record.byte_size:
+            raise ValueError("worker output byte evidence does not match the durable output")
+        try:
+            durable_sha256 = validate_sha256(output_record.sha256)
+        except ValueError as exc:
+            raise ValueError("durable output checksum evidence is malformed") from exc
+        if output_sha256 != durable_sha256:
+            raise ValueError("worker output checksum does not match the durable output")
+    worker = metadata.get("worker")
+    if not isinstance(worker, Mapping):
+        raise ValueError("worker completion is missing worker identity")
+    for field_name in ("ace_tag", "dit_model", "lm_model", "image_digest", "gpu"):
+        value = worker.get(field_name)
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise ValueError(f"worker completion is missing worker {field_name}")
+    actual = output.get("duration_seconds")
+    target = output.get("target_duration_seconds")
+    if target is None:
+        resolved = metadata.get("resolved_parameters")
+        if isinstance(resolved, Mapping):
+            target = resolved.get("target_duration_seconds")
+            if target is None:
+                target = resolved.get("duration")
+            if (
+                isinstance(target, bool)
+                or not isinstance(target, (int, float))
+                or float(target) <= 0
+            ):
+                target = None
+    if target is None:
+        return
+    if (
+        isinstance(actual, bool)
+        or not isinstance(actual, (int, float))
+        or not isinstance(target, (int, float))
+        or not math.isfinite(float(actual))
+        or not math.isfinite(float(target))
+        or float(target) <= 0
+    ):
+        raise ValueError("worker completion has malformed duration evidence")
+    tolerance = output.get("duration_tolerance_seconds")
+    expected_tolerance = max(2.0, abs(float(target)) * 0.02)
+    if tolerance is None or (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(float(tolerance))
+        or abs(float(tolerance) - expected_tolerance) > 1e-6
+    ):
+        raise ValueError("worker completion has malformed duration tolerance")
+    if abs(float(actual) - float(target)) > expected_tolerance:
+        raise ValueError("worker output duration is outside the accepted tolerance")
+    if output.get("duration_within_tolerance") is not True:
+        raise ValueError("worker completion did not confirm duration tolerance")
 
 
 def _has_symlink_component(root: Path, candidate: Path) -> bool:

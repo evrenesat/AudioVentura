@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import re
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
 from pydantic import (
@@ -19,6 +21,22 @@ from pydantic import (
 )
 
 from ace_service.models import JobType, OutputFormat, TransferDirection
+from ace_service.quality_profiles import (
+    FAST_PROFILE_ID,
+    MAX_CAPTION_LENGTH,
+    MAX_LYRICS_LENGTH,
+    MAX_SEED,
+    compose_cover_prompt,
+    contains_duration_language,
+    explicit_duration_seconds,
+    has_vague_duration_language,
+    resolve_parameters,
+    resolve_profile,
+    resolve_prompt_mode,
+    validate_caption,
+    validate_duration,
+    validate_lyrics,
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,12}$")
@@ -28,7 +46,8 @@ _YOUTUBE_HOSTS = frozenset(
 )
 _YOUTUBE_PLAYLIST_KEYS = frozenset({"list", "index", "start_radio", "playlist", "pp"})
 _YOUTUBE_WATCH_KEYS = frozenset({"v", "t", "start"})
-WORKER_SCHEMA_VERSION = 1
+LEGACY_WORKER_SCHEMA_VERSION = 1
+WORKER_SCHEMA_VERSION = 2
 
 
 def normalize_relative_path(value: str) -> str:
@@ -138,7 +157,8 @@ class JobCreateRequest(BaseModel):
     prompt: str | None = None
     lyrics: str | None = None
     rights_confirmation_at: datetime | None = None
-    cover_strength: float | None = Field(default=None, ge=0, le=1)
+    audio_cover_strength: float | None = Field(default=None, ge=0, le=1)
+    cover_noise_strength: float | None = Field(default=None, ge=0, le=1)
     output_format: OutputFormat = OutputFormat.MP3
     variation_count: int = Field(default=1, ge=1, le=4)
     normalized_request_json: dict[str, Any] | None = None
@@ -158,12 +178,15 @@ class OriginalSongRequest(BaseModel):
     lyrics: str | None = Field(default=None, max_length=20_000)
     instrumental: StrictBool = False
     vocal_language: str = Field(default="en", min_length=1, max_length=32)
-    duration: float | None = Field(default=None, ge=10, le=600)
+    prompt_mode: Literal["direct", "enhance", "auto-compose"] = "direct"
+    duration_mode: Literal["auto", "custom"] = "auto"
+    duration_seconds: float | None = None
     bpm: StrictInt | None = Field(default=None, ge=30, le=300)
     key_scale: str | None = Field(default=None, max_length=64)
     time_signature: StrictInt | None = Field(default=None)
-    seed: StrictInt | None = Field(default=None, ge=0, le=2_147_483_647)
+    seed: StrictInt | None = Field(default=None, ge=0, le=MAX_SEED)
     variation_count: StrictInt = Field(default=1, ge=1, le=4)
+    profile_id: str = FAST_PROFILE_ID
     output_format: OutputFormat = OutputFormat.MP3
 
     @field_validator("description", mode="before")
@@ -194,11 +217,13 @@ class OriginalSongRequest(BaseModel):
             raise ValueError("key_scale must not be empty when supplied")
         return normalized
 
-    @field_validator("duration", mode="before")
+    @field_validator("duration_seconds", mode="before")
     @classmethod
-    def duration_must_not_be_boolean(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("duration must be a number")
+    def duration_must_be_finite_number(cls, value: Any) -> Any:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("duration_seconds must be a finite number")
+        if value is not None and not math.isfinite(float(value)):
+            raise ValueError("duration_seconds must be a finite number")
         return value
 
     @field_validator("time_signature")
@@ -214,31 +239,70 @@ class OriginalSongRequest(BaseModel):
             raise ValueError("instrumental jobs must not include lyrics")
         if self.seed is not None and self.seed + self.variation_count - 1 > 2_147_483_647:
             raise ValueError("seed progression exceeds the supported integer range")
+        try:
+            resolve_profile(self.profile_id)
+            resolve_prompt_mode(self.prompt_mode)
+            validate_caption(self.description)
+            validate_lyrics(self.lyrics)
+            validate_duration(self.duration_mode, self.duration_seconds)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if contains_duration_language(self.description):
+            explicit_durations = explicit_duration_seconds(self.description)
+            if (
+                self.duration_mode != "custom"
+                or self.duration_seconds is None
+                or not explicit_durations
+                or has_vague_duration_language(self.description)
+                or any(
+                    not math.isclose(
+                        duration,
+                        self.duration_seconds,
+                        rel_tol=0.0,
+                        abs_tol=1e-6,
+                    )
+                    for duration in explicit_durations
+                )
+            ):
+                raise ValueError(
+                    "duration-like language must match the selected Custom duration in seconds"
+                )
         return self
 
     def to_normalized_request_json(self) -> dict[str, Any]:
         """Return the exact metadata-only shape accepted by the Runpod worker."""
 
+        ace_duration = validate_duration(self.duration_mode, self.duration_seconds)
+        resolved_parameters = resolve_parameters(
+            self.profile_id,
+            task_type="original",
+            prompt_mode=self.prompt_mode,
+            duration_mode=self.duration_mode,
+            duration=ace_duration,
+            caption=self.description,
+            lyrics=self.lyrics,
+            seed=self.seed,
+        )
         generation: dict[str, Any] = {
             "prompt": self.description,
+            "lyrics": self.lyrics or "",
             "instrumental": self.instrumental,
             "vocal_language": self.vocal_language,
+            "prompt_mode": self.prompt_mode,
+            "duration_mode": self.duration_mode,
+            "duration_seconds": self.duration_seconds,
+            "duration": ace_duration,
+            "bpm": self.bpm,
+            "key_scale": self.key_scale,
+            "time_signature": self.time_signature,
+            "seed": self.seed,
             "output_format": self.output_format.value,
         }
-        if self.lyrics is not None:
-            generation["lyrics"] = self.lyrics
-        if self.duration is not None:
-            generation["duration"] = self.duration
-        if self.bpm is not None:
-            generation["bpm"] = self.bpm
-        if self.key_scale is not None:
-            generation["key_scale"] = self.key_scale
-        if self.time_signature is not None:
-            generation["time_signature"] = self.time_signature
-        if self.seed is not None:
-            generation["seed"] = self.seed
         return {
             "schema_version": WORKER_SCHEMA_VERSION,
+            "task_type": "original",
+            "profile_id": self.profile_id,
+            "resolved_parameters": resolved_parameters,
             "generation": generation,
             "source": None,
         }
@@ -253,7 +317,11 @@ class CoverRequest(BaseModel):
     target_style: str = Field(min_length=3, max_length=4000)
     remix_guidance: str | None = Field(default=None, max_length=4000)
     lyrics: str | None = Field(default=None, max_length=20_000)
-    cover_strength: float = Field(default=0.65, ge=0, le=1)
+    audio_cover_strength: float | None = None
+    cover_noise_strength: float | None = None
+    variation_count: StrictInt = Field(default=2, ge=2, le=4)
+    seed: StrictInt | None = Field(default=None, ge=0, le=MAX_SEED)
+    profile_id: str = FAST_PROFILE_ID
     output_format: OutputFormat = OutputFormat.MP3
     rights_confirmation: StrictBool
 
@@ -300,37 +368,216 @@ class CoverRequest(BaseModel):
 
     @model_validator(mode="after")
     def effective_prompt_is_bounded(self) -> CoverRequest:
-        if len(self.effective_prompt) > 4000:
-            raise ValueError("target_style and remix_guidance together must fit 4000 characters")
+        try:
+            resolve_profile(self.profile_id)
+            effective_prompt = self.effective_prompt
+            validate_lyrics(self.lyrics)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if contains_duration_language(effective_prompt):
+            raise ValueError(
+                "custom cover duration is deferred; remove duration-changing language "
+                "from the cover guidance"
+            )
+        if self.seed is not None and self.seed + self.variation_count - 1 > MAX_SEED:
+            raise ValueError("seed progression exceeds the supported integer range")
         return self
+
+    @field_validator("audio_cover_strength", "cover_noise_strength", mode="before")
+    @classmethod
+    def cover_strengths_must_be_finite_numbers(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("cover controls must be numbers between 0 and 1")
+        if not math.isfinite(float(value)) or not 0 <= float(value) <= 1:
+            raise ValueError("cover controls must be numbers between 0 and 1")
+        return value
 
     @property
     def effective_prompt(self) -> str:
         """Compose style and optional guidance without rewriting either value."""
 
-        return (
-            self.target_style
-            if self.remix_guidance is None
-            else (f"{self.target_style}\n\n{self.remix_guidance}")
-        )
+        return compose_cover_prompt(self.target_style, self.remix_guidance)
 
-    def to_normalized_request_json(self) -> dict[str, Any]:
+    @property
+    def effective_audio_cover_strength(self) -> float:
+        if self.audio_cover_strength is not None:
+            return self.audio_cover_strength
+        return float(resolve_profile(self.profile_id)["audio_cover_strength"])
+
+    @property
+    def effective_cover_noise_strength(self) -> float:
+        if self.cover_noise_strength is not None:
+            return self.cover_noise_strength
+        return float(resolve_profile(self.profile_id)["cover_noise_strength"])
+
+    def to_normalized_request_json(
+        self, *, source_duration_seconds: float | None = None
+    ) -> dict[str, Any]:
         """Return the metadata-only cover shape accepted by the Runpod worker."""
 
+        if source_duration_seconds is not None:
+            ace_duration = validate_duration(
+                "source", float(source_duration_seconds), allow_source=True
+            )
+        else:
+            ace_duration = -1.0
+        resolved_parameters = resolve_parameters(
+            self.profile_id,
+            task_type="cover",
+            prompt_mode="direct",
+            duration_mode="source",
+            duration=ace_duration,
+            caption=self.effective_prompt,
+            lyrics=self.lyrics,
+            seed=self.seed,
+            audio_cover_strength=self.effective_audio_cover_strength,
+            cover_noise_strength=self.effective_cover_noise_strength,
+            source_duration_seconds=source_duration_seconds,
+        )
+        if source_duration_seconds is None:
+            resolved_parameters.pop("source_duration_seconds", None)
+            resolved_parameters.pop("target_duration_seconds", None)
+            resolved_parameters["duration"] = None
         generation: dict[str, Any] = {
             "prompt": self.effective_prompt,
+            "target_style": self.target_style,
+            "remix_guidance": self.remix_guidance,
+            "lyrics": self.lyrics or "",
             "instrumental": False,
             "vocal_language": "en",
-            "cover_strength": self.cover_strength,
+            "prompt_mode": "direct",
+            "duration_mode": "source",
+            "duration_seconds": source_duration_seconds,
+            "duration": source_duration_seconds,
+            "audio_cover_strength": self.effective_audio_cover_strength,
+            "cover_noise_strength": self.effective_cover_noise_strength,
+            "seed": self.seed,
             "output_format": self.output_format.value,
         }
-        if self.lyrics is not None:
-            generation["lyrics"] = self.lyrics
         return {
             "schema_version": WORKER_SCHEMA_VERSION,
+            "task_type": "cover",
+            "profile_id": self.profile_id,
+            "resolved_parameters": resolved_parameters,
             "generation": generation,
             "source": None,
         }
+
+
+def finalize_cover_normalized_request(
+    normalized_request: dict[str, Any], source_duration_seconds: float
+) -> dict[str, Any]:
+    """Add the probed source duration to a staged v2 cover request."""
+
+    if (
+        not isinstance(source_duration_seconds, (int, float))
+        or isinstance(source_duration_seconds, bool)
+        or not math.isfinite(float(source_duration_seconds))
+        or source_duration_seconds <= 0
+    ):
+        raise ValueError("source duration must be a finite positive number")
+    duration = validate_duration("source", float(source_duration_seconds), allow_source=True)
+    value = deepcopy(normalized_request)
+    if value.get("schema_version") != WORKER_SCHEMA_VERSION:
+        raise ValueError("only schema-v2 cover requests can be finalized")
+    generation = value.get("generation")
+    resolved = value.get("resolved_parameters")
+    if not isinstance(generation, dict) or not isinstance(resolved, dict):
+        raise ValueError("cover request is missing its resolved parameters")
+    generation["duration_seconds"] = duration
+    generation["duration"] = duration
+    resolved["duration"] = duration
+    resolved["source_duration_seconds"] = duration
+    resolved["target_duration_seconds"] = duration
+    value["source_duration_seconds"] = duration
+    value["resolved_target_duration_seconds"] = duration
+    value["ace_duration_seconds"] = duration
+    return value
+
+
+MAX_RESULT_METADATA_BYTES = 65_536
+MAX_RESULT_METADATA_DEPTH = 6
+MAX_RESULT_METADATA_KEYS = 128
+MAX_RESULT_METADATA_STRING = 16_384
+
+
+def validate_worker_result_metadata(
+    value: Any, *, expected_schema_version: int | None = None
+) -> dict[str, Any]:
+    """Validate and copy bounded private metadata before database persistence."""
+
+    if not isinstance(value, dict):
+        raise ValueError("worker result metadata must be an object")
+    schema_version = value.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version not in {
+        LEGACY_WORKER_SCHEMA_VERSION,
+        WORKER_SCHEMA_VERSION,
+    }:
+        raise ValueError("worker result metadata has an unsupported schema version")
+    if expected_schema_version is not None and schema_version != expected_schema_version:
+        raise ValueError("worker result schema version does not match the stored request")
+    _validate_metadata_node(value, depth=0)
+    try:
+        import json
+
+        encoded_size = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("worker result metadata is not JSON serializable") from exc
+    if encoded_size > MAX_RESULT_METADATA_BYTES:
+        raise ValueError("worker result metadata is too large")
+    for field_name in ("input", "effective"):
+        record = value.get(field_name)
+        if isinstance(record, dict):
+            caption = record.get("caption", record.get("prompt"))
+            lyrics = record.get("lyrics")
+            caption_limit = MAX_CAPTION_LENGTH if schema_version == WORKER_SCHEMA_VERSION else 4_000
+            lyrics_limit = MAX_LYRICS_LENGTH if schema_version == WORKER_SCHEMA_VERSION else 20_000
+            if caption is not None:
+                if (
+                    not isinstance(caption, str)
+                    or not caption.strip()
+                    or len(caption) > caption_limit
+                ):
+                    raise ValueError(
+                        f"worker result caption must be at most {caption_limit} characters"
+                    )
+            if lyrics is not None:
+                if not isinstance(lyrics, str) or len(lyrics) > lyrics_limit:
+                    raise ValueError(
+                        f"worker result lyrics must be at most {lyrics_limit} characters"
+                    )
+    return deepcopy(value)
+
+
+def _validate_metadata_node(value: Any, *, depth: int) -> None:
+    if depth > MAX_RESULT_METADATA_DEPTH:
+        raise ValueError("worker result metadata is too deeply nested")
+    if isinstance(value, dict):
+        if len(value) > MAX_RESULT_METADATA_KEYS:
+            raise ValueError("worker result metadata contains too many fields")
+        for key, child in value.items():
+            if not isinstance(key, str) or len(key) > 128:
+                raise ValueError("worker result metadata contains an invalid field name")
+            _validate_metadata_node(child, depth=depth + 1)
+        return
+    if isinstance(value, list):
+        if len(value) > MAX_RESULT_METADATA_KEYS:
+            raise ValueError("worker result metadata contains too many list items")
+        for child in value:
+            _validate_metadata_node(child, depth=depth + 1)
+        return
+    if isinstance(value, str):
+        if len(value) > MAX_RESULT_METADATA_STRING:
+            raise ValueError("worker result metadata contains an oversized text field")
+        if "/transfer/v1/" in value:
+            raise ValueError("worker result metadata must not contain transfer URLs")
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("worker result metadata contains a non-finite number")
+    if value is not None and not isinstance(value, (bool, int, float)):
+        raise ValueError("worker result metadata contains an unsupported value")
 
 
 class OutputCreateRequest(BaseModel):

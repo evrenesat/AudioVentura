@@ -26,6 +26,7 @@ from ace_service.auth import (
     require_csrf,
 )
 from ace_service.config import ServiceSettings
+from ace_service.cover import remove_cover_source
 from ace_service.models import (
     Job,
     JobStatus,
@@ -35,7 +36,14 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
-from ace_service.repository import create_cover_job, create_original_job, get_job, get_output
+from ace_service.repository import (
+    cancel_cover_staging,
+    confirm_cover_job,
+    create_cover_job,
+    create_original_job,
+    get_job,
+    get_output,
+)
 from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
 
 _TEMPLATES = Path(__file__).with_name("templates")
@@ -172,6 +180,38 @@ def register_web_routes(app: FastAPI) -> None:
         _enqueue(app, job_id)
         return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
 
+    @app.post("/cover/{job_id}/confirm", dependencies=[Depends(authenticated)])
+    async def confirm_cover(request: Request, job_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        with app.state.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+            try:
+                confirm_cover_job(session, job.id)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            session.commit()
+        _enqueue(app, job_id)
+        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/cover/{job_id}/cancel", dependencies=[Depends(authenticated)])
+    async def cancel_cover(request: Request, job_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        with app.state.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+            try:
+                cancel_cover_staging(session, job.id)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            session.commit()
+        remove_cover_source(app.state.settings, job_id)
+        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+
     @app.get("/jobs", dependencies=[Depends(authenticated)])
     async def jobs(request: Request) -> Response:
         with app.state.session_factory() as session:
@@ -270,7 +310,10 @@ def _original_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
         "lyrics": fields.get("lyrics") or None,
         "instrumental": fields.get("instrumental") in {"1", "true", "on", "yes"},
         "vocal_language": fields.get("vocal_language", "en"),
-        "duration": _optional_number(fields.get("duration")),
+        "profile_id": fields.get("profile_id", "fast-beta-v1"),
+        "prompt_mode": fields.get("prompt_mode", "direct"),
+        "duration_mode": fields.get("duration_mode", "auto"),
+        "duration_seconds": _optional_number(fields.get("duration_seconds")),
         "bpm": _optional_int(fields.get("bpm")),
         "key_scale": fields.get("key_scale") or None,
         "time_signature": _optional_int(fields.get("time_signature")),
@@ -286,7 +329,11 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
         "target_style": fields.get("target_style", ""),
         "remix_guidance": fields.get("remix_guidance") or None,
         "lyrics": fields.get("lyrics") or None,
-        "cover_strength": _optional_number(fields.get("cover_strength"), default=0.65),
+        "profile_id": fields.get("profile_id", "fast-beta-v1"),
+        "audio_cover_strength": _optional_number(fields.get("audio_cover_strength"), default=0.65),
+        "cover_noise_strength": _optional_number(fields.get("cover_noise_strength"), default=0.0),
+        "variation_count": _required_int(fields.get("variation_count", "2")),
+        "seed": _optional_int(fields.get("seed")),
         "output_format": fields.get("output_format", OutputFormat.MP3.value),
         "rights_confirmation": fields.get("rights_confirmation") in {"1", "true", "on", "yes"},
     }
@@ -330,6 +377,26 @@ def _job_view(job: Job) -> dict[str, Any]:
     attempts = sorted(job.variation_attempts, key=lambda item: item.variation_index)
     outputs = sorted(job.outputs, key=lambda item: (item.variation_index, item.result_index))
     completed_variations = sum(item.status is JobStatus.COMPLETED for item in attempts)
+    normalized_value = job.normalized_request_json
+    normalized = (
+        cast(dict[str, Any], normalized_value) if isinstance(normalized_value, dict) else {}
+    )
+    generation_value = normalized.get("generation")
+    generation = (
+        cast(dict[str, Any], generation_value) if isinstance(generation_value, dict) else {}
+    )
+    resolved_value = normalized.get("resolved_parameters")
+    resolved = cast(dict[str, Any], resolved_value) if isinstance(resolved_value, dict) else {}
+    staging_value = normalized.get("cover_staging")
+    staging = cast(dict[str, Any], staging_value) if isinstance(staging_value, dict) else {}
+    source_duration = normalized.get("source_duration_seconds", job.source_duration)
+    target_duration = normalized.get(
+        "resolved_target_duration_seconds", resolved.get("target_duration_seconds")
+    )
+    if target_duration is None:
+        target_duration = generation.get("duration_seconds", resolved.get("duration"))
+    audio_cover_strength = generation.get("audio_cover_strength", job.cover_strength)
+    cover_noise_strength = generation.get("cover_noise_strength")
     return {
         "job_id": job.id,
         "job_type": job.job_type.value,
@@ -340,7 +407,17 @@ def _job_view(job: Job) -> dict[str, Any]:
         "source_url": job.source_url,
         "prompt": job.prompt,
         "lyrics": job.lyrics,
-        "cover_strength": job.cover_strength,
+        "profile_id": normalized.get("profile_id"),
+        "prompt_mode": generation.get("prompt_mode", resolved.get("prompt_mode")),
+        "duration_mode": generation.get("duration_mode", resolved.get("duration_mode")),
+        "duration_seconds": generation.get("duration_seconds"),
+        "source_duration_seconds": source_duration,
+        "target_duration_seconds": target_duration,
+        "audio_cover_strength": audio_cover_strength,
+        "cover_noise_strength": cover_noise_strength,
+        "target_style": generation.get("target_style"),
+        "remix_guidance": generation.get("remix_guidance"),
+        "cover_confirmation_status": staging.get("status"),
         "output_format": job.output_format.value,
         "variation_count": job.variation_count,
         "current_variation": job.current_variation,
@@ -357,13 +434,27 @@ def _job_view(job: Job) -> dict[str, Any]:
 
 
 def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
-    result = attempt.runpod_result_json or {}
+    result_value = attempt.runpod_result_json
+    result = cast(dict[str, Any], result_value) if isinstance(result_value, dict) else {}
+    output_value = result.get("output")
+    output = cast(dict[str, Any], output_value) if isinstance(output_value, dict) else {}
+    worker_value = result.get("worker")
+    worker = cast(dict[str, Any], worker_value) if isinstance(worker_value, dict) else {}
     return {
         "variation_index": attempt.variation_index,
         "status": attempt.status.value,
         "status_label": _STATUS_LABELS[attempt.status],
         "queue_delay_ms": result.get("runpod_queue_delay_ms"),
         "execution_ms": result.get("runpod_execution_ms"),
+        "profile_id": result.get("profile_id", worker.get("profile_id")),
+        "gpu": worker.get("gpu"),
+        "dit_model": worker.get("dit_model", worker.get("model")),
+        "lm_model": worker.get("lm_model"),
+        "requested_seed": output.get("requested_seed"),
+        "effective_seed": output.get("effective_seed", output.get("seed")),
+        "duration_seconds": output.get("duration_seconds"),
+        "target_duration_seconds": output.get("target_duration_seconds"),
+        "duration_tolerance_seconds": output.get("duration_tolerance_seconds"),
     }
 
 

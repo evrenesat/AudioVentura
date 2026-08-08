@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
-from ace_service.db import create_database_engine, initialize_database
+from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.models import (
     JobStatus,
     JobType,
@@ -15,6 +17,7 @@ from ace_service.models import (
     utc_now,
 )
 from ace_service.repository import (
+    check_schema_v1_rollback_readiness,
     consume_transfer,
     create_job,
     create_output,
@@ -24,6 +27,7 @@ from ace_service.repository import (
     issue_transfer_capability,
     revoke_transfer,
 )
+from ace_service.rollback_readiness import main as rollback_readiness_main
 from ace_service.schemas import normalize_relative_path, resolve_relative_path
 
 
@@ -126,3 +130,203 @@ def test_relative_path_traversal_is_rejected(tmp_path, value: str) -> None:
 def test_relative_path_resolution_stays_under_root(tmp_path) -> None:
     resolved = resolve_relative_path(tmp_path, "jobs/one/output.mp3")
     assert resolved == (tmp_path / "jobs/one/output.mp3").resolve()
+
+
+def _logical_database_snapshot(database: Path) -> tuple[str, ...]:
+    uri = f"file:{database.resolve().as_posix()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        return tuple(connection.iterdump())
+
+
+def _v2_request(
+    job_type: JobType, *, staging: dict[str, object] | None = None
+) -> dict[str, object]:
+    value: dict[str, object] = {"schema_version": 2, "task_type": job_type.value}
+    if staging is not None:
+        value["cover_staging"] = staging
+    return value
+
+
+def test_schema_v1_rollback_check_empty_database_is_read_only(settings, capsys) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    database = settings.paths.database
+    before = _logical_database_snapshot(database)
+    try:
+        assert rollback_readiness_main(["--database", str(database)]) == 0
+        output = capsys.readouterr()
+        assert output.out == "rollback=safe blockers=0\n"
+        assert output.err == ""
+        assert _logical_database_snapshot(database) == before
+    finally:
+        engine.dispose()
+
+
+def test_schema_v1_rollback_check_ignores_terminal_v2_and_historical_rows(settings, capsys) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    database = settings.paths.database
+    try:
+        with create_session_factory(engine)() as session:
+            terminal = create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id="terminal-v2",
+                normalized_request_json=_v2_request(JobType.ORIGINAL),
+            )
+            terminal.status = JobStatus.COMPLETED
+            create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id="legacy-v1",
+                normalized_request_json={"schema_version": 1},
+            )
+            unknown = create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id="unknown-history",
+                normalized_request_json={"schema_version": 99},
+            )
+            unknown.status = JobStatus.GENERATING
+            session.commit()
+        before = _logical_database_snapshot(database)
+
+        assert rollback_readiness_main(["--database", str(database)]) == 0
+        output = capsys.readouterr().out
+        assert "job_id=terminal-v2 status=completed schema=v2 classification=terminal" in output
+        assert "job_id=legacy-v1 status=queued schema=v1 classification=legacy_or_unknown" in output
+        assert "job_id=unknown-history status=generating schema=unknown" in output
+        assert output.endswith("rollback=safe blockers=0\n")
+        assert _logical_database_snapshot(database) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        JobStatus.QUEUED,
+        JobStatus.INGESTING,
+        JobStatus.STAGING,
+        JobStatus.CLOUD_QUEUED,
+        JobStatus.GENERATING,
+    ],
+)
+def test_schema_v1_rollback_check_blocks_every_nonterminal_v2_status(
+    settings, capsys, status: JobStatus
+) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    database = settings.paths.database
+    try:
+        with create_session_factory(engine)() as session:
+            job = create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id=f"v2-{status.value}",
+                normalized_request_json=_v2_request(JobType.ORIGINAL),
+            )
+            job.status = status
+            session.commit()
+        before = _logical_database_snapshot(database)
+
+        assert rollback_readiness_main(["--database", str(database)]) == 1
+        output = capsys.readouterr().out
+        assert (
+            f"job_id=v2-{status.value} status={status.value} "
+            "schema=v2 classification=nonterminal_v2"
+        ) in output
+        assert output.endswith("rollback=not-safe blockers=1\n")
+        assert _logical_database_snapshot(database) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("staging_status", "classification"),
+    [
+        ("awaiting_confirmation", "unconfirmed_v2_cover_staging"),
+        ("confirmed", "nonterminal_v2"),
+    ],
+)
+def test_schema_v1_rollback_check_identifies_cover_staging_state(
+    settings, capsys, staging_status: str, classification: str
+) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    database = settings.paths.database
+    try:
+        with create_session_factory(engine)() as session:
+            job = create_job(
+                session,
+                job_type=JobType.COVER,
+                job_id=f"cover-{staging_status}",
+                normalized_request_json=_v2_request(
+                    JobType.COVER,
+                    staging={"status": staging_status, "staged_at": "2026-08-08T00:00:00+00:00"},
+                ),
+            )
+            job.status = JobStatus.STAGING
+            session.commit()
+        before = _logical_database_snapshot(database)
+
+        assert rollback_readiness_main(["--database", str(database)]) == 1
+        output = capsys.readouterr().out
+        assert f"schema=v2 classification={classification}" in output
+        assert output.endswith("rollback=not-safe blockers=1\n")
+        assert _logical_database_snapshot(database) == before
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "normalized",
+    [
+        {"schema_version": 2, "task_type": "cover", "cover_staging": {"status": "bad"}},
+        {
+            "schema_version": 2,
+            "task_type": "original",
+            "cover_staging": {"status": "confirmed"},
+        },
+        {"schema_version": 2, "task_type": "cover", "cover_staging": "bad"},
+        {"schema_version": 2, "task_type": "cover", "cover_staging": None},
+    ],
+)
+def test_schema_v1_rollback_check_fails_closed_for_malformed_v2_lifecycle(
+    settings, capsys, normalized: dict[str, object]
+) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    database = settings.paths.database
+    try:
+        job_type = JobType.COVER if normalized.get("task_type") == "cover" else JobType.ORIGINAL
+        with create_session_factory(engine)() as session:
+            job = create_job(
+                session,
+                job_type=job_type,
+                job_id="malformed-v2",
+                normalized_request_json=normalized,
+            )
+            job.status = JobStatus.COMPLETED
+            session.commit()
+        before = _logical_database_snapshot(database)
+
+        assert rollback_readiness_main(["--database", str(database)]) == 1
+        output = capsys.readouterr().out
+        assert "schema=v2 classification=malformed_v2_lifecycle" in output
+        assert output.endswith("rollback=not-safe blockers=1\n")
+        assert _logical_database_snapshot(database) == before
+    finally:
+        engine.dispose()
+
+
+def test_schema_v1_rollback_repository_result_is_bounded_and_read_only(session) -> None:
+    job = create_job(
+        session,
+        job_type=JobType.ORIGINAL,
+        normalized_request_json=_v2_request(JobType.ORIGINAL),
+    )
+    result = check_schema_v1_rollback_readiness(session)
+    assert result.safe is False
+    assert result.blockers[0].job_id == job.id
+    assert result.blockers[0].classification == "nonterminal_v2"

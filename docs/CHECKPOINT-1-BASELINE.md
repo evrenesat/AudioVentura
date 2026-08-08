@@ -182,3 +182,28 @@ The private fixture manifest and no-run baseline result are stored at:
 
 They are outside Git, mode-restricted, and must not be copied into the
 repository or logs.
+
+## Checkpoint 1 verification rerun
+
+The prescribed verification was rerun on 2026-08-08 at 12:25 UTC from the
+checkpoint worktree, without application or deployment edits after the
+approved CP1 evidence. Results were unchanged:
+
+```text
+uv run pytest -q tests runpod_worker/tests       112 passed, 6 failed
+uv run ruff check .                              passed
+uv run ruff format --check .                    passed (70 files)
+uv run mypy src runpod_worker                   passed (31 source files)
+cd home_ingest && uv run pytest -q               passed (33 tests)
+cd home_ingest && uv run ruff check .            passed
+cd home_ingest && uv run ruff format --check .  passed (14 files)
+cd home_ingest && uv run mypy src                passed (8 source files)
+```
+
+The six root-suite failures remain the previously recorded Docker-only
+`lameenc` dependency failures in the worker MP3 tests. No new failure was
+introduced. A read-only validation also confirmed that the private fixture
+hash matches its manifest, the no-run result is `status: "not_run"` with null
+GPU/timing/cost measurements for both samples, and both private JSON records
+remain mode `0600`. The authorized live GPU baseline is still pending; no
+Runpod call was made.

@@ -13,7 +13,7 @@ from ace_service.config import ServiceSettings
 from ace_service.cover import remove_cover_source
 from ace_service.db import SessionFactory
 from ace_service.models import Job, JobStatus, JobType, TransferCapability, TransferStatus
-from ace_service.repository import revoke_active_transfers
+from ace_service.repository import revoke_active_transfers, transition_job
 
 LOGGER = logging.getLogger(__name__)
 _TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
@@ -31,6 +31,7 @@ class CleanupReport:
     revoked_capabilities: int = 0
     deleted_capability_records: int = 0
     removed_cover_sources: int = 0
+    expired_cover_staging: int = 0
 
 
 def cleanup_controller(
@@ -49,10 +50,28 @@ def cleanup_controller(
     expired = 0
     deleted = 0
     terminal_cover_ids: list[str] = []
+    expired_staging = 0
 
     with session_factory() as session:
         jobs = list(session.scalars(select(Job)))
         for job in jobs:
+            if (
+                job.job_type is JobType.COVER
+                and job.status is JobStatus.STAGING
+                and job.updated_at <= stale_cutoff
+                and not _cover_is_confirmed(job)
+            ):
+                transition_job(
+                    session,
+                    job.id,
+                    JobStatus.FAILED,
+                    now=current_time,
+                    error_code="cover_staging_expired",
+                    user_facing_error=(
+                        "Cover preparation expired before confirmation; submit the cover again."
+                    ),
+                )
+                expired_staging += 1
             if job.status not in _TERMINAL_STATUSES:
                 continue
             revoked += len(revoke_active_transfers(session, job.id, now=current_time))
@@ -85,15 +104,18 @@ def cleanup_controller(
         revoked_capabilities=revoked,
         deleted_capability_records=deleted,
         removed_cover_sources=removed_sources,
+        expired_cover_staging=expired_staging,
     )
     LOGGER.info(
         "cleanup complete stage=cleanup stale_part_files=%d expired_capabilities=%d "
-        "revoked_capabilities=%d deleted_capability_records=%d removed_cover_sources=%d",
+        "revoked_capabilities=%d deleted_capability_records=%d removed_cover_sources=%d "
+        "expired_cover_staging=%d",
         report.stale_part_files,
         report.expired_capabilities,
         report.revoked_capabilities,
         report.deleted_capability_records,
         report.removed_cover_sources,
+        report.expired_cover_staging,
         extra={"component": "controller"},
     )
     return report
@@ -127,6 +149,14 @@ def _capability_timestamp(capability: TransferCapability) -> datetime:
 def _source_exists(settings: ServiceSettings, job_id: str) -> bool:
     path = settings.paths.incoming / job_id / "source.mp3"
     return path.is_file() or path.is_symlink()
+
+
+def _cover_is_confirmed(job: Job) -> bool:
+    normalized = job.normalized_request_json
+    if not isinstance(normalized, dict) or normalized.get("schema_version") != 2:
+        return True
+    staging = normalized.get("cover_staging")
+    return isinstance(staging, dict) and staging.get("status") == "confirmed"
 
 
 def _inside_root(root: Path, candidate: Path) -> bool:

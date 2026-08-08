@@ -10,15 +10,18 @@ from ace_service.db import create_database_engine, create_session_factory, initi
 from ace_service.models import JobStatus, JobType
 from ace_service.repository import (
     create_job,
+    create_original_job,
     create_output,
     get_job,
     get_variation_attempt,
     persist_variation_runpod_job_id,
     prepare_variation_submission,
+    set_variation_runpod_result,
     transition_job,
     transition_variation_attempt,
 )
 from ace_service.runpod_client import RunpodError, RunpodState, RunpodStatusResult
+from ace_service.schemas import OriginalSongRequest
 from ace_service.worker import ControllerWorker
 
 
@@ -89,6 +92,160 @@ class _FakeRunpod:
                 sha256=hashlib.sha256(payload).hexdigest(),
             )
             session.commit()
+
+
+class _CompletionEvidenceRunpod:
+    def __init__(self, result: dict[str, object], *, fail_status: bool) -> None:
+        self.result = result
+        self.fail_status = fail_status
+        self.submissions: list[str] = []
+
+    async def submit(
+        self, payload: Mapping[str, object], execution_timeout_ms: int, ttl_ms: int
+    ) -> str:
+        raise AssertionError("completion-evidence tests must not resubmit")
+
+    async def status(self, runpod_job_id: str) -> RunpodStatusResult:
+        if self.fail_status:
+            raise RunpodError("status expired")
+        return RunpodStatusResult(
+            job_id=runpod_job_id,
+            category=RunpodState.COMPLETED,
+            raw_status="COMPLETED",
+            result=self.result,
+        )
+
+
+def _completion_evidence(
+    *, job_id: str, submission_nonce: str, variation_index: int, output_bytes: bytes
+) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "job_id": job_id,
+        "submission_nonce": submission_nonce,
+        "variation_index": variation_index,
+        "status": "uploaded",
+        "profile_id": "fast-beta-v1",
+        "input": {"caption": "correlation test", "lyrics": ""},
+        "effective": {"caption": "correlation test", "lyrics": ""},
+        "resolved_parameters": {"seed": 123},
+        "generated_metadata": {"bpm": 120},
+        "output": {
+            "bytes": len(output_bytes),
+            "sha256": hashlib.sha256(output_bytes).hexdigest(),
+            "effective_seed": 123,
+            "seed": 123,
+        },
+        "worker": {
+            "ace_tag": "v0.1.8",
+            "dit_model": "test-model",
+            "lm_model": "test-lm",
+            "image_digest": "sha256:" + "d" * 64,
+            "gpu": "test-gpu",
+        },
+    }
+
+
+def _create_completion_evidence_case(
+    settings, factory, *, result_before_upload: bool, mismatch_field: str | None = None
+) -> tuple[str, dict[str, object], bytes]:
+    job_id = "job-completion-correlation"
+    output_bytes = b"correlated output"
+    with factory() as session:
+        job = create_original_job(
+            session,
+            OriginalSongRequest(description="correlation test", seed=123),
+            job_id=job_id,
+        )
+        _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+        persist_variation_runpod_job_id(
+            session, attempt.id, "correlation-runpod", submission_nonce=nonce
+        )
+        transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
+        transition_job(session, job.id, JobStatus.GENERATING)
+        session.commit()
+
+    result = _completion_evidence(
+        job_id=job_id,
+        submission_nonce=nonce,
+        variation_index=1,
+        output_bytes=output_bytes,
+    )
+    if mismatch_field == "job_id":
+        result["job_id"] = "another-job"
+    elif mismatch_field == "submission_nonce":
+        result["submission_nonce"] = "another-nonce"
+    elif mismatch_field == "variation_index":
+        result["variation_index"] = 2
+    elif mismatch_field in {"bytes", "sha256"}:
+        output = result["output"]
+        assert isinstance(output, dict)
+        output = dict(output)
+        output[mismatch_field] = int(output["bytes"]) + 1 if mismatch_field == "bytes" else "b" * 64
+        result["output"] = output
+    if result_before_upload:
+        with factory() as session:
+            attempt = get_variation_attempt(session, job_id, 1)
+            assert attempt is not None
+            set_variation_runpod_result(session, attempt.id, result)
+            session.commit()
+
+    output_path = settings.paths.outputs / job_id / "variation-01.mp3"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(output_bytes)
+    with factory() as session:
+        create_output(
+            session,
+            job_id=job_id,
+            variation_index=1,
+            result_index=0,
+            runpod_job_id="correlation-runpod",
+            relative_path=f"{job_id}/variation-01.mp3",
+            mime_type="audio/mpeg",
+            byte_size=len(output_bytes),
+            sha256=hashlib.sha256(output_bytes).hexdigest(),
+        )
+        session.commit()
+    return job_id, result, output_bytes
+
+
+@pytest.mark.parametrize(
+    "mismatch_field",
+    ["job_id", "submission_nonce", "variation_index", "bytes", "sha256"],
+)
+@pytest.mark.parametrize("result_before_upload", [False, True])
+def test_schema_v2_completion_evidence_mismatch_fails_closed(
+    settings, mismatch_field: str, result_before_upload: bool
+) -> None:
+    engine, factory = _database(settings)
+    try:
+        job_id, result, _ = _create_completion_evidence_case(
+            settings,
+            factory,
+            result_before_upload=result_before_upload,
+            mismatch_field=mismatch_field,
+        )
+
+        runpod = _CompletionEvidenceRunpod(result, fail_status=result_before_upload)
+
+        async def scenario() -> None:
+            worker = ControllerWorker(settings, factory, runpod, poll_interval_seconds=0)
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, job_id)
+            attempt = get_variation_attempt(session, job_id, 1)
+            assert job is not None and job.status is JobStatus.FAILED
+            assert attempt is not None and attempt.status is JobStatus.FAILED
+            output = job.outputs[0]
+            assert output.seed_metadata_json is None
+            assert output.generation_metadata_json is None
+        assert runpod.submissions == []
+    finally:
+        engine.dispose()
 
 
 def test_four_variations_are_serialized_and_each_gets_one_runpod_job(settings) -> None:
@@ -343,5 +500,145 @@ def test_status_expiry_recovers_from_valid_local_upload(settings) -> None:
             assert attempt.runpod_result_json == {
                 "recovery_note": "runpod_status_unavailable_after_output"
             }
+    finally:
+        engine.dispose()
+
+
+def test_schema_v2_status_expiry_does_not_complete_from_output_alone(settings) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_original_job(
+                session,
+                OriginalSongRequest(description="random seed recovery", seed=None),
+                job_id="job-v2-missing-result",
+            )
+            _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+            persist_variation_runpod_job_id(
+                session, attempt.id, "v2-missing-result", submission_nonce=nonce
+            )
+            transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
+            transition_job(session, job.id, JobStatus.GENERATING)
+            session.commit()
+        fake = _FakeRunpod(settings, factory, fail_status=True)
+        fake._write_output("job-v2-missing-result", 1)
+
+        async def scenario() -> None:
+            worker = ControllerWorker(settings, factory, fake, poll_interval_seconds=0)
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, "job-v2-missing-result")
+            attempt = get_variation_attempt(session, "job-v2-missing-result", 1)
+            assert job is not None and job.status is JobStatus.FAILED
+            assert job.error_code == "controller_task_error"
+            assert attempt is not None and attempt.status is JobStatus.FAILED
+            assert attempt.runpod_result_json is None
+        assert fake.submissions == []
+    finally:
+        engine.dispose()
+
+
+def test_schema_v2_status_expiry_uses_persisted_completion_metadata(settings) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_original_job(
+                session,
+                OriginalSongRequest(description="random seed recovery", seed=None),
+                job_id="job-v2-persisted-result",
+            )
+            _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+            persist_variation_runpod_job_id(
+                session, attempt.id, "v2-persisted-result", submission_nonce=nonce
+            )
+            transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
+            transition_job(session, job.id, JobStatus.GENERATING)
+            session.commit()
+        fake = _FakeRunpod(settings, factory, fail_status=True)
+        output_bytes = b"generated-1"
+        with factory() as session:
+            job = get_job(session, "job-v2-persisted-result")
+            attempt = get_variation_attempt(session, "job-v2-persisted-result", 1)
+            assert job is not None and attempt is not None and attempt.submission_nonce is not None
+            resolved = job.normalized_request_json["resolved_parameters"]
+            set_variation_runpod_result(
+                session,
+                attempt.id,
+                {
+                    "schema_version": 2,
+                    "job_id": job.id,
+                    "submission_nonce": attempt.submission_nonce,
+                    "variation_index": 1,
+                    "status": "uploaded",
+                    "profile_id": "fast-beta-v1",
+                    "input": {"caption": "random seed recovery", "lyrics": ""},
+                    "effective": {
+                        "caption": "random seed recovery",
+                        "lyrics": "[verse] generated by planner",
+                    },
+                    "resolved_parameters": dict(resolved),
+                    "generated_metadata": {
+                        "caption": "random seed recovery",
+                        "lyrics": "[verse] generated by planner",
+                        "bpm": 120,
+                    },
+                    "output": {
+                        "bytes": len(output_bytes),
+                        "sha256": hashlib.sha256(output_bytes).hexdigest(),
+                        "requested_seed": None,
+                        "effective_seed": 123456,
+                        "seed": 123456,
+                        "duration_seconds": 1.0,
+                        "target_duration_seconds": None,
+                        "duration_tolerance_seconds": None,
+                        "duration_within_tolerance": True,
+                    },
+                    "worker": {
+                        "ace_tag": "v0.1.8",
+                        "dit_model": "test-model",
+                        "lm_model": "test-lm",
+                        "image_digest": "sha256:" + "d" * 64,
+                        "gpu": "test-gpu",
+                    },
+                },
+            )
+            session.commit()
+        # Exercise the result-before-upload arrival order: the signed upload
+        # is finalized only after completion metadata is durable.
+        fake._write_output("job-v2-persisted-result", 1)
+
+        async def scenario() -> None:
+            worker = ControllerWorker(settings, factory, fake, poll_interval_seconds=0)
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, "job-v2-persisted-result")
+            attempt = get_variation_attempt(session, "job-v2-persisted-result", 1)
+            assert job is not None and job.status is JobStatus.COMPLETED
+            assert attempt is not None and attempt.status is JobStatus.COMPLETED
+            assert attempt.runpod_result_json["output"]["effective_seed"] == 123456
+            assert (
+                attempt.runpod_result_json["recovery_note"]
+                == "runpod_status_unavailable_after_output"
+            )
+            output = job.outputs[0]
+            assert output.seed_metadata_json == {
+                "requested_seed": None,
+                "effective_seed": 123456,
+                "seed": 123456,
+            }
+            assert output.generation_metadata_json["profile_id"] == "fast-beta-v1"
+            assert output.generation_metadata_json["generated_metadata"]["bpm"] == 120
+            assert output.generation_metadata_json["resolved_parameters"] == dict(resolved)
+            assert output.generation_metadata_json["worker"]["gpu"] == "test-gpu"
+            assert "runpod_queue_delay_ms" not in output.generation_metadata_json
+        assert fake.submissions == []
     finally:
         engine.dispose()

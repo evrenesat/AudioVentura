@@ -18,16 +18,87 @@ from runpod_worker.transfer_client import TransferError, UploadedOutput
 JOB_ID = "11111111-1111-4111-8111-111111111111"
 NONCE = "22222222-2222-4222-8222-222222222222"
 SOURCE_BODY = b"prepared source"
+TEST_IMAGE_DIGEST = "sha256:" + "a" * 64
 
 
 class FakeParams:
-    def __init__(self, **values: Any) -> None:
-        self.values = values
+    def __init__(
+        self,
+        *,
+        task_type: Any,
+        caption: Any,
+        lyrics: Any,
+        instrumental: Any,
+        vocal_language: Any,
+        duration: Any,
+        bpm: Any,
+        keyscale: Any,
+        timesignature: Any,
+        seed: Any,
+        inference_steps: Any,
+        shift: Any,
+        thinking: Any,
+        use_cot_metas: Any,
+        use_cot_caption: Any,
+        use_cot_language: Any,
+        src_audio: Any,
+        audio_cover_strength: Any,
+        cover_noise_strength: Any,
+        lm_temperature: Any,
+        lm_cfg_scale: Any,
+        lm_top_k: Any,
+        lm_top_p: Any,
+        lm_negative_prompt: Any,
+    ) -> None:
+        self.values = {
+            "task_type": task_type,
+            "caption": caption,
+            "lyrics": lyrics,
+            "instrumental": instrumental,
+            "vocal_language": vocal_language,
+            "duration": duration,
+            "bpm": bpm,
+            "keyscale": keyscale,
+            "timesignature": timesignature,
+            "seed": seed,
+            "inference_steps": inference_steps,
+            "shift": shift,
+            "thinking": thinking,
+            "use_cot_metas": use_cot_metas,
+            "use_cot_caption": use_cot_caption,
+            "use_cot_language": use_cot_language,
+            "src_audio": src_audio,
+            "audio_cover_strength": audio_cover_strength,
+            "cover_noise_strength": cover_noise_strength,
+            "lm_temperature": lm_temperature,
+            "lm_cfg_scale": lm_cfg_scale,
+            "lm_top_k": lm_top_k,
+            "lm_top_p": lm_top_p,
+            "lm_negative_prompt": lm_negative_prompt,
+        }
 
 
 class FakeConfig:
-    def __init__(self, **values: Any) -> None:
-        self.values = values
+    def __init__(
+        self,
+        *,
+        batch_size: Any,
+        allow_lm_batch: Any,
+        use_random_seed: Any,
+        seeds: Any,
+        audio_format: Any,
+        mp3_bitrate: Any,
+        mp3_sample_rate: Any,
+    ) -> None:
+        self.values = {
+            "batch_size": batch_size,
+            "allow_lm_batch": allow_lm_batch,
+            "use_random_seed": use_random_seed,
+            "seeds": seeds,
+            "audio_format": audio_format,
+            "mp3_bitrate": mp3_bitrate,
+            "mp3_sample_rate": mp3_sample_rate,
+        }
 
 
 class FakeTransferClient:
@@ -87,11 +158,145 @@ def _payload(
     }
 
 
+def _v2_cover_payload() -> dict[str, Any]:
+    resolved = {
+        "profile_id": "fast-beta-v1",
+        "task_type": "cover",
+        "prompt_mode": "direct",
+        "duration_mode": "source",
+        "duration": 0.1,
+        "caption": "warm analog synth",
+        "lyrics": "",
+        "seed": 17,
+        "inference_steps": 8,
+        "shift": 1.0,
+        "lm_temperature": 0.85,
+        "lm_cfg_scale": 2.0,
+        "lm_top_k": 0,
+        "lm_top_p": 0.9,
+        "lm_negative_prompt": "NO USER INPUT",
+        "thinking": False,
+        "use_cot_metas": False,
+        "use_cot_caption": False,
+        "use_cot_language": False,
+        "audio_cover_strength": 0.75,
+        "cover_noise_strength": 0.20,
+        "source_duration_seconds": 0.1,
+        "target_duration_seconds": 0.1,
+    }
+    return {
+        "input": {
+            "schema_version": 2,
+            "job_id": JOB_ID,
+            "submission_nonce": NONCE,
+            "variation_index": 1,
+            "task_type": "cover",
+            "profile_id": "fast-beta-v1",
+            "resolved_parameters": resolved,
+            "source_duration_seconds": 0.1,
+            "resolved_target_duration_seconds": 0.1,
+            "ace_duration_seconds": 0.1,
+            "cover_staging": {"status": "confirmed"},
+            "generation": {
+                "prompt": "warm analog synth",
+                "target_style": "warm analog synth",
+                "remix_guidance": None,
+                "lyrics": "",
+                "instrumental": False,
+                "vocal_language": "en",
+                "prompt_mode": "direct",
+                "duration_mode": "source",
+                "duration_seconds": 0.1,
+                "duration": 0.1,
+                "bpm": None,
+                "key_scale": None,
+                "time_signature": None,
+                "seed": 17,
+                "output_format": "wav",
+                "audio_cover_strength": 0.75,
+                "cover_noise_strength": 0.20,
+            },
+            "source": {
+                "url": "https://transfer.example.test/transfer/v1/source/capability",
+                "sha256": "a" * 64,
+                "bytes": len(SOURCE_BODY),
+                "format": "mp3",
+            },
+            "result_upload": {
+                "url": "https://transfer.example.test/transfer/v1/output/capability",
+                "max_bytes": 1024,
+            },
+        }
+    }
+
+
+def _v2_enhance_payload(*, lyrics: str = "[verse] preserve exactly") -> dict[str, Any]:
+    resolved = {
+        "profile_id": "fast-beta-v1",
+        "task_type": "original",
+        "prompt_mode": "enhance",
+        "duration_mode": "auto",
+        "duration": -1.0,
+        "caption": "warm analog synth",
+        "lyrics": lyrics,
+        "seed": 17,
+        "inference_steps": 8,
+        "shift": 1.0,
+        "lm_temperature": 0.85,
+        "lm_cfg_scale": 2.0,
+        "lm_top_k": 0,
+        "lm_top_p": 0.9,
+        "lm_negative_prompt": "NO USER INPUT",
+        "thinking": False,
+        "use_cot_metas": True,
+        "use_cot_caption": True,
+        "use_cot_language": True,
+        "audio_cover_strength": 1.0,
+        "cover_noise_strength": 0.0,
+    }
+    return {
+        "input": {
+            "schema_version": 2,
+            "job_id": JOB_ID,
+            "submission_nonce": NONCE,
+            "variation_index": 1,
+            "task_type": "original",
+            "profile_id": "fast-beta-v1",
+            "resolved_parameters": resolved,
+            "generation": {
+                "prompt": "warm analog synth",
+                "lyrics": lyrics,
+                "instrumental": False,
+                "vocal_language": "en",
+                "prompt_mode": "enhance",
+                "duration_mode": "auto",
+                "duration_seconds": None,
+                "duration": -1.0,
+                "bpm": None,
+                "key_scale": None,
+                "time_signature": None,
+                "seed": 17,
+                "output_format": "mp3",
+                "audio_cover_strength": 1.0,
+                "cover_noise_strength": 0.0,
+            },
+            "source": None,
+            "result_upload": {
+                "url": "https://transfer.example.test/transfer/v1/output/capability",
+                "max_bytes": 1024,
+            },
+        }
+    }
+
+
 def _runtime(
     transfer_client: FakeTransferClient,
     generated_paths: list[Path],
     calls: list[tuple[FakeParams, FakeConfig]],
     writer: Callable[[Path, str], None] | None = None,
+    *,
+    lm_metadata: dict[str, Any] | None = None,
+    result_style: str = "attribute",
 ) -> WorkerRuntime:
     def generate_music(
         _dit: object,
@@ -100,7 +305,7 @@ def _runtime(
         config: FakeConfig,
         *,
         save_dir: str,
-    ) -> SimpleNamespace:
+    ) -> Any:
         calls.append((params, config))
         output_format = config.values["audio_format"]
         output = Path(save_dir) / f"generated.{output_format}"
@@ -116,15 +321,25 @@ def _runtime(
         else:
             writer(output, output_format)
         generated_paths.append(output)
+        audios = [
+            {
+                "path": str(output),
+                "sample_rate": 48_000,
+                "params": {"seed": 17},
+                "duration_seconds": 0.1,
+            }
+        ]
+        extra_outputs = {"lm_metadata": lm_metadata} if lm_metadata is not None else {}
+        if result_style == "mapping":
+            return {
+                "success": True,
+                "audios": audios,
+                "extra_outputs": extra_outputs,
+            }
         return SimpleNamespace(
             success=True,
-            audios=[
-                {
-                    "path": str(output),
-                    "sample_rate": 48_000,
-                    "params": {"seed": 17},
-                }
-            ],
+            audios=audios,
+            extra_outputs=extra_outputs,
         )
 
     return WorkerRuntime(
@@ -135,6 +350,7 @@ def _runtime(
         generate_music=generate_music,
         gpu_name="test-gpu",
         gpu_vram_bytes=24 * 1024**3,
+        worker_image_digest=TEST_IMAGE_DIGEST,
         transfer_client_factory=lambda: transfer_client,
     )
 
@@ -157,7 +373,7 @@ def test_original_mapping_forces_one_output_and_returns_small_metadata() -> None
     assert result["output"]["format"] == "mp3"
     assert result["output"]["mime_type"] == "audio/mpeg"
     assert "path" not in json.dumps(result)
-    assert len(json.dumps(result)) < 4096
+    assert len(json.dumps(result)) < 65_536
     assert not generated_paths[0].exists()
 
 
@@ -178,6 +394,91 @@ def test_cover_downloads_source_maps_local_path_and_cleans_everything() -> None:
     assert transfer_client.uploaded_path is not None
     assert not transfer_client.uploaded_path.exists()
     assert result["output"]["bytes"] > 0
+
+
+def test_v2_cover_probes_source_duration_and_preserves_independent_controls() -> None:
+    transfer_client = FakeTransferClient()
+    generated_paths: list[Path] = []
+    calls: list[tuple[FakeParams, FakeConfig]] = []
+    handler_module.configure_runtime(_runtime(transfer_client, generated_paths, calls))
+
+    result = handler_module.handler(_v2_cover_payload())
+    params, config = calls[0]
+
+    assert params.values["audio_cover_strength"] == 0.75
+    assert params.values["cover_noise_strength"] == 0.20
+    assert params.values["duration"] == 0.1
+    assert config.values["audio_format"] == "wav"
+    assert result["schema_version"] == 2
+    assert result["output"]["duration_seconds"] == pytest.approx(0.1)
+    assert result["output"]["target_duration_seconds"] == pytest.approx(0.1)
+    assert result["output"]["duration_within_tolerance"] is True
+
+
+@pytest.mark.parametrize("result_style", ["mapping", "attribute"])
+def test_v2_enhance_persists_pinned_lm_metadata_without_rewriting_lyrics(
+    result_style: str,
+) -> None:
+    transfer_client = FakeTransferClient()
+    generated_paths: list[Path] = []
+    calls: list[tuple[FakeParams, FakeConfig]] = []
+    handler_module.configure_runtime(
+        _runtime(
+            transfer_client,
+            generated_paths,
+            calls,
+            lm_metadata={
+                "caption": "LM-generated atmospheric synthwave",
+                "lyrics": "planner rewrite must not replace supplied lyrics",
+                "bpm": 118,
+                "keyscale": "D minor",
+                "audio_codes": "<|audio_code_1|>",
+                "time_costs": {"total_time": 999},
+            },
+            result_style=result_style,
+        )
+    )
+
+    result = handler_module.handler(_v2_enhance_payload())
+
+    assert result["effective"]["caption"] == "LM-generated atmospheric synthwave"
+    assert result["effective"]["lyrics"] == "[verse] preserve exactly"
+    assert result["generated_metadata"] == {
+        "caption": "LM-generated atmospheric synthwave",
+        "lyrics": "planner rewrite must not replace supplied lyrics",
+        "bpm": 118,
+        "keyscale": "D minor",
+    }
+    assert result["worker"]["image_digest"] == TEST_IMAGE_DIGEST
+    encoded = json.dumps(result)
+    assert "audio_codes" not in encoded
+    assert "time_costs" not in encoded
+    assert "tensor" not in encoded
+
+
+@pytest.mark.parametrize("result_style", ["mapping", "attribute"])
+def test_v2_empty_lyrics_use_bounded_pinned_lm_lyrics(result_style: str) -> None:
+    transfer_client = FakeTransferClient()
+    generated_paths: list[Path] = []
+    calls: list[tuple[FakeParams, FakeConfig]] = []
+    handler_module.configure_runtime(
+        _runtime(
+            transfer_client,
+            generated_paths,
+            calls,
+            lm_metadata={
+                "caption": "LM-generated atmospheric synthwave",
+                "lyrics": "[verse] planner lyrics",
+            },
+            result_style=result_style,
+        )
+    )
+
+    result = handler_module.handler(_v2_enhance_payload(lyrics=""))
+
+    assert result["input"]["lyrics"] == ""
+    assert result["effective"]["lyrics"] == "[verse] planner lyrics"
+    assert result["generated_metadata"]["lyrics"] == "[verse] planner lyrics"
 
 
 def test_failed_upload_propagates_and_generated_file_is_cleaned() -> None:

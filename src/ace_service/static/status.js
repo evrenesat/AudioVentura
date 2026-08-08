@@ -5,12 +5,20 @@
   const progressNode = document.querySelector("#job-progress");
   const outputsNode = document.querySelector("#outputs");
   const terminal = new Set(["completed", "failed"]);
+  let confirmationReloaded = false;
   const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (character) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[character]));
   const refresh = async () => {
     try {
       const response = await fetch(detail.dataset.statusUrl, {headers: {Accept: "application/json"}, credentials: "same-origin"});
       if (!response.ok) return;
       const job = await response.json();
+      if (job.cover_confirmation_status === "awaiting_confirmation" &&
+          !document.querySelector("[data-cover-confirmation-form]") &&
+          !confirmationReloaded) {
+        confirmationReloaded = true;
+        window.location.reload();
+        return;
+      }
       statusNode.textContent = job.status_label;
       statusNode.className = `status status-${job.status}`;
       progressNode.textContent = `${job.completed_variations}/${job.variation_count} variations`;

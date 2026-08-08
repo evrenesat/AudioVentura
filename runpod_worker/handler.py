@@ -1,9 +1,10 @@
-"""Runpod Serverless handler for metadata-only ACE-Step jobs."""
+"""Runpod Serverless handler for bounded ACE-Step generation metadata."""
 
 from __future__ import annotations
 
-import inspect
+import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -11,12 +12,61 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .audio_output import finalize_generated_output, internal_audio_format
-from .runtime import WorkerRuntime, initialize_runtime
-from .schemas import WorkerRequest
+from .audio_output import finalize_generated_output, internal_audio_format, probe_audio_duration
+from .runtime import (
+    WorkerInitializationError,
+    WorkerRuntime,
+    initialize_runtime,
+    validate_worker_image_digest,
+)
+from .schemas import (
+    MAX_CAPTION_LENGTH,
+    MAX_LYRICS_LENGTH,
+    MAX_RESULT_METADATA_BYTES,
+    SCHEMA_VERSION,
+    WorkerRequest,
+)
 
 LOGGER = logging.getLogger(__name__)
 _RUNTIME: WorkerRuntime | None = None
+_PRIVATE_METADATA_KEYS = frozenset(
+    {
+        "path",
+        "src_audio",
+        "source_path",
+        "output_path",
+        "url",
+        "source_url",
+        "output_url",
+        "capability_url",
+    }
+)
+_LM_METADATA_FIELDS = frozenset(
+    {
+        "bpm",
+        "caption",
+        "duration",
+        "key_scale",
+        "keyscale",
+        "lyrics",
+        "timesignature",
+        "time_signature",
+        "vocal_language",
+    }
+)
+_LM_TEXT_FIELDS = frozenset(
+    {
+        "caption",
+        "key_scale",
+        "keyscale",
+        "lyrics",
+        "timesignature",
+        "time_signature",
+        "vocal_language",
+    }
+)
+_LM_NUMERIC_FIELDS = frozenset({"bpm", "duration"})
+_MAX_LM_METADATA_BYTES = 16_384
 
 
 class GenerationError(RuntimeError):
@@ -24,7 +74,7 @@ class GenerationError(RuntimeError):
 
 
 def configure_runtime(runtime: WorkerRuntime) -> None:
-    """Install the process-global runtime before accepting handler calls."""
+    """Install the process-global runtime only after its signature check."""
 
     global _RUNTIME
     _RUNTIME = runtime
@@ -74,9 +124,15 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
             save_dir=str(output_directory),
         )
         audio = _one_audio(result)
+        lm_metadata = _lm_metadata_from_result(result)
         output_format = request.generation.output_format
         internal_format = internal_audio_format(output_format)
         output_path = _safe_generated_path(audio.get("path"), output_directory, internal_format)
+        actual_duration = probe_audio_duration(output_path, audio)
+        target_duration = _target_duration(request)
+        duration_evidence = _duration_evidence(actual_duration, target_duration)
+        if target_duration is not None and not duration_evidence["duration_within_tolerance"]:
+            raise GenerationError("ACE-Step output duration is outside the accepted tolerance")
         output_path = finalize_generated_output(
             output_path,
             requested_format=output_format,
@@ -85,7 +141,16 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
         if output_path.suffix.lower().lstrip(".") != output_format:
             raise GenerationError("ACE-Step returned an unexpected output format")
         uploaded = transfer_client.upload_output(request.result_upload, output_path)
-        metadata = _small_result_metadata(request, runtime, audio, uploaded)
+        metadata = _result_metadata(
+            request,
+            runtime,
+            audio,
+            uploaded,
+            actual_duration=actual_duration,
+            target_duration=target_duration,
+            duration_evidence=duration_evidence,
+            lm_metadata=lm_metadata,
+        )
         LOGGER.info(
             "completed job=%s stage=worker variation=%d bytes=%d elapsed_ms=%d",
             request.job_id,
@@ -100,28 +165,44 @@ def _build_generation_params(
     runtime: WorkerRuntime, request: WorkerRequest, source_path: Path | None
 ) -> Any:
     generation = request.generation
-    caption = generation.prompt
-    if generation.instrumental:
-        caption = f"{caption}\nInstrumental only; no vocals."
+    resolved = request.resolved_parameters or {}
+    is_v2 = request.schema_version == SCHEMA_VERSION
+    caption = (
+        str(resolved["caption"])
+        if is_v2
+        else generation.prompt
+        + ("\nInstrumental only; no vocals." if generation.instrumental else "")
+    )
+    lyrics = (
+        str(resolved["lyrics"]) if is_v2 else ("" if generation.instrumental else generation.lyrics)
+    )
     values: dict[str, Any] = {
         "task_type": "cover" if request.task_type == "cover" else "text2music",
         "caption": caption,
-        "lyrics": "" if generation.instrumental else generation.lyrics,
+        "lyrics": lyrics,
         "instrumental": generation.instrumental,
         "vocal_language": generation.vocal_language,
-        "duration": generation.duration if generation.duration is not None else -1.0,
+        "duration": resolved.get("duration", -1.0) if is_v2 else generation.duration or -1.0,
         "bpm": generation.bpm,
         "keyscale": generation.key_scale or "",
         "timesignature": str(generation.time_signature) if generation.time_signature else "",
         "seed": generation.seed if generation.seed is not None else -1,
-        "thinking": True,
-        "use_format": True,
+        "inference_steps": resolved.get("inference_steps", 8),
+        "shift": resolved.get("shift", 1.0),
+        "thinking": resolved.get("thinking", True) if is_v2 else True,
+        "use_cot_metas": resolved.get("use_cot_metas", True) if is_v2 else True,
+        "use_cot_caption": resolved.get("use_cot_caption", True) if is_v2 else True,
+        "use_cot_language": resolved.get("use_cot_language", True) if is_v2 else True,
+        "lm_temperature": resolved.get("lm_temperature", 0.85),
+        "lm_cfg_scale": resolved.get("lm_cfg_scale", 2.0),
+        "lm_top_k": resolved.get("lm_top_k", 0),
+        "lm_top_p": resolved.get("lm_top_p", 0.9),
+        "lm_negative_prompt": resolved.get("lm_negative_prompt", "NO USER INPUT"),
         "src_audio": str(source_path) if source_path is not None else None,
-        "audio_cover_strength": generation.cover_strength,
+        "audio_cover_strength": generation.audio_cover_strength,
+        "cover_noise_strength": generation.cover_noise_strength,
     }
-    return runtime.generation_params_type(
-        **_supported_values(runtime.generation_params_type, values)
-    )
+    return runtime.generation_params_type(**values)
 
 
 def _build_generation_config(runtime: WorkerRuntime, request: WorkerRequest) -> Any:
@@ -136,17 +217,7 @@ def _build_generation_config(runtime: WorkerRuntime, request: WorkerRequest) -> 
         "mp3_bitrate": "192k",
         "mp3_sample_rate": 48_000,
     }
-    return runtime.generation_config_type(
-        **_supported_values(runtime.generation_config_type, values)
-    )
-
-
-def _supported_values(callable_type: Any, values: dict[str, Any]) -> dict[str, Any]:
-    parameters = inspect.signature(callable_type).parameters.values()
-    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
-        return values
-    accepted = set(inspect.signature(callable_type).parameters)
-    return {key: value for key, value in values.items() if key in accepted}
+    return runtime.generation_config_type(**values)
 
 
 def _one_audio(result: Any) -> Mapping[str, Any]:
@@ -161,6 +232,57 @@ def _one_audio(result: Any) -> Mapping[str, Any]:
     if not isinstance(audios, list) or len(audios) != 1 or not isinstance(audios[0], Mapping):
         raise GenerationError("ACE-Step did not return exactly one output")
     return audios[0]
+
+
+def _lm_metadata_from_result(result: Any) -> dict[str, Any]:
+    """Extract only the pinned GenerationResult LM metadata field."""
+
+    if isinstance(result, Mapping):
+        extra_outputs = result.get("extra_outputs")
+    else:
+        extra_outputs = getattr(result, "extra_outputs", None)
+    if extra_outputs is None:
+        return {}
+    if not isinstance(extra_outputs, Mapping):
+        raise GenerationError("ACE-Step returned malformed extra outputs")
+    return _bounded_lm_metadata(extra_outputs.get("lm_metadata"))
+
+
+def _bounded_lm_metadata(value: Any) -> dict[str, Any]:
+    """Keep the bounded, JSON-safe metadata fields produced by the pinned LM."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise GenerationError("ACE-Step returned malformed LM metadata")
+    result: dict[str, Any] = {}
+    for key, child in value.items():
+        if not isinstance(key, str) or len(key) > 128:
+            raise GenerationError("ACE-Step returned malformed LM metadata")
+        if key not in _LM_METADATA_FIELDS:
+            continue
+        if key in _LM_TEXT_FIELDS:
+            if not isinstance(child, str) or len(child) > MAX_LYRICS_LENGTH:
+                raise GenerationError("ACE-Step returned oversized LM text metadata")
+            if key == "caption" and len(child) > MAX_CAPTION_LENGTH:
+                raise GenerationError("ACE-Step returned an oversized LM caption")
+            result[key] = child
+            continue
+        if key in _LM_NUMERIC_FIELDS:
+            if isinstance(child, bool) or not isinstance(child, (int, float, str)):
+                raise GenerationError("ACE-Step returned malformed LM numeric metadata")
+            if isinstance(child, float) and not math.isfinite(child):
+                raise GenerationError("ACE-Step returned non-finite LM metadata")
+            if isinstance(child, str) and len(child) > 128:
+                raise GenerationError("ACE-Step returned oversized LM numeric metadata")
+            result[key] = child
+    try:
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+    except (TypeError, ValueError) as exc:
+        raise GenerationError("ACE-Step returned non-JSON LM metadata") from exc
+    if len(encoded) > _MAX_LM_METADATA_BYTES:
+        raise GenerationError("ACE-Step returned oversized LM metadata")
+    return result
 
 
 def _safe_generated_path(value: Any, output_directory: Path, expected_format: str) -> Path:
@@ -179,24 +301,120 @@ def _safe_generated_path(value: Any, output_directory: Path, expected_format: st
     return candidate
 
 
-def _small_result_metadata(
-    request: WorkerRequest, runtime: WorkerRuntime, audio: Mapping[str, Any], uploaded: Any
+def _target_duration(request: WorkerRequest) -> float | None:
+    if request.schema_version != SCHEMA_VERSION:
+        return None
+    value = (request.resolved_parameters or {}).get("target_duration_seconds")
+    if value is None:
+        value = (request.resolved_parameters or {}).get("duration")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) <= 0:
+        return None
+    return float(value)
+
+
+def _duration_evidence(actual: float, target: float | None) -> dict[str, Any]:
+    if target is None:
+        return {
+            "duration_seconds": actual,
+            "target_duration_seconds": None,
+            "duration_tolerance_seconds": None,
+            "duration_within_tolerance": True,
+        }
+    tolerance = max(2.0, target * 0.02)
+    return {
+        "duration_seconds": actual,
+        "target_duration_seconds": target,
+        "duration_tolerance_seconds": tolerance,
+        "duration_within_tolerance": abs(actual - target) <= tolerance,
+    }
+
+
+def _result_metadata(
+    request: WorkerRequest,
+    runtime: WorkerRuntime,
+    audio: Mapping[str, Any],
+    uploaded: Any,
+    *,
+    actual_duration: float,
+    target_duration: float | None,
+    duration_evidence: Mapping[str, Any],
+    lm_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     audio_params = audio.get("params")
-    seed = (
-        audio_params.get("seed") if isinstance(audio_params, Mapping) else request.generation.seed
-    )
-    if not isinstance(seed, int):
-        seed = None
+    effective_seed = audio_params.get("seed") if isinstance(audio_params, Mapping) else None
+    if (
+        isinstance(effective_seed, bool)
+        or not isinstance(effective_seed, int)
+        or effective_seed < 0
+    ):
+        raise GenerationError("ACE-Step did not return an effective integer seed")
     sample_rate = audio.get("sample_rate")
-    if not isinstance(sample_rate, int):
+    if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
         sample_rate = None
-    return {
+    if request.schema_version == SCHEMA_VERSION:
+        effective_caption = request.generation.prompt
+        if request.generation.prompt_mode in {"enhance", "auto-compose"}:
+            generated_caption = lm_metadata.get("caption")
+            if generated_caption is not None:
+                effective_caption = generated_caption
+        effective_lyrics = request.generation.lyrics
+        if request.generation.prompt_mode in {"enhance", "auto-compose"} and not effective_lyrics:
+            generated_lyrics = lm_metadata.get("lyrics")
+            if isinstance(generated_lyrics, str):
+                effective_lyrics = generated_lyrics
+    else:
+        effective_caption = audio.get(
+            "caption", audio.get("effective_caption", request.generation.prompt)
+        )
+        effective_lyrics = audio.get(
+            "lyrics", audio.get("effective_lyrics", request.generation.lyrics)
+        )
+    caption_limit = MAX_CAPTION_LENGTH if request.schema_version == SCHEMA_VERSION else 4_000
+    lyrics_limit = MAX_LYRICS_LENGTH if request.schema_version == SCHEMA_VERSION else 20_000
+    if not isinstance(effective_caption, str) or len(effective_caption) > caption_limit:
+        raise GenerationError("ACE-Step returned an oversized effective caption")
+    if not isinstance(effective_lyrics, str) or len(effective_lyrics) > lyrics_limit:
+        raise GenerationError("ACE-Step returned oversized effective lyrics")
+    requested_seed = request.generation.seed
+    resolved_parameters = dict(request.resolved_parameters or {})
+    if not resolved_parameters:
+        resolved_parameters = {
+            "task_type": request.task_type,
+            "duration": request.generation.duration
+            if request.generation.duration is not None
+            else -1.0,
+            "audio_cover_strength": request.generation.audio_cover_strength,
+            "cover_noise_strength": request.generation.cover_noise_strength,
+        }
+    generated_metadata = (
+        dict(lm_metadata)
+        if request.schema_version == SCHEMA_VERSION
+        else _bounded_private_mapping(audio.get("metadata", audio.get("generated_metadata")))
+    )
+    quality_scores = _bounded_private_mapping(audio.get("quality_scores"))
+    try:
+        image_digest = validate_worker_image_digest(runtime.worker_image_digest)
+    except WorkerInitializationError as exc:
+        raise GenerationError("worker image identity is missing or malformed") from exc
+    result: dict[str, Any] = {
         "schema_version": request.schema_version,
         "job_id": request.job_id,
         "submission_nonce": request.submission_nonce,
         "variation_index": request.variation_index,
         "status": "uploaded",
+        "profile_id": request.profile_id,
+        "input": {
+            "caption": request.generation.prompt,
+            "lyrics": request.generation.lyrics,
+            "prompt_mode": request.generation.prompt_mode,
+            "duration_mode": request.generation.duration_mode,
+        },
+        "effective": {
+            "caption": effective_caption,
+            "lyrics": effective_lyrics,
+        },
+        "resolved_parameters": resolved_parameters,
+        "generated_metadata": generated_metadata,
         "output": {
             "format": request.generation.output_format,
             "mime_type": {
@@ -206,15 +424,84 @@ def _small_result_metadata(
             }[request.generation.output_format],
             "bytes": uploaded.bytes,
             "sha256": uploaded.sha256,
-            "seed": seed,
+            "requested_seed": requested_seed,
+            "effective_seed": effective_seed,
+            "seed": effective_seed,
             "sample_rate": sample_rate,
+            "quality_scores": quality_scores,
+            **dict(duration_evidence),
         },
         "worker": {
-            "model": runtime.model_name,
+            "profile_id": request.profile_id,
+            "dit_model": runtime.model_name,
+            "lm_model": runtime.lm_model_name,
+            "ace_tag": runtime.ace_tag,
+            "ace_commit": runtime.ace_commit,
+            "image_digest": image_digest,
             "gpu": runtime.gpu_name,
             "vram_bytes": runtime.gpu_vram_bytes,
         },
     }
+    _validate_result_metadata(result)
+    return result
+
+
+def _bounded_private_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise GenerationError("ACE-Step returned malformed private metadata")
+    result = _sanitize_private_metadata(value, depth=0)
+    if not isinstance(result, dict):
+        raise GenerationError("ACE-Step returned malformed private metadata")
+    try:
+        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+    except (TypeError, ValueError) as exc:
+        raise GenerationError("ACE-Step returned non-JSON private metadata") from exc
+    if len(encoded) > 16_384:
+        raise GenerationError("ACE-Step returned oversized private metadata")
+    return result
+
+
+def _sanitize_private_metadata(value: Any, *, depth: int) -> Any:
+    if depth > 5:
+        raise GenerationError("ACE-Step returned overly deep private metadata")
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            if not isinstance(key, str) or len(key) > 128:
+                raise GenerationError("ACE-Step returned malformed private metadata")
+            normalized_key = key.lower()
+            if normalized_key in _PRIVATE_METADATA_KEYS or normalized_key.endswith(
+                ("_url", "_path")
+            ):
+                continue
+            result[key] = _sanitize_private_metadata(child, depth=depth + 1)
+        return result
+    if isinstance(value, list):
+        if len(value) > 128:
+            raise GenerationError("ACE-Step returned oversized private metadata")
+        return [_sanitize_private_metadata(child, depth=depth + 1) for child in value]
+    if isinstance(value, str):
+        if "/transfer/v1/" in value:
+            raise GenerationError("worker result metadata must not contain transfer URLs")
+        return value
+    if isinstance(value, float) and not math.isfinite(value):
+        raise GenerationError("ACE-Step returned non-finite private metadata")
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise GenerationError("ACE-Step returned non-JSON private metadata")
+
+
+def _validate_result_metadata(value: Mapping[str, Any]) -> None:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    except (TypeError, ValueError) as exc:
+        raise GenerationError("worker result metadata is not JSON serializable") from exc
+    if len(encoded) > MAX_RESULT_METADATA_BYTES:
+        raise GenerationError("worker result metadata is too large")
+    if "/transfer/v1/" in encoded.decode("utf-8", errors="ignore"):
+        raise GenerationError("worker result metadata must not contain transfer URLs")
 
 
 def _configured_transfer_host() -> str | None:

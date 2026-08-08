@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 import wave
+from collections.abc import Mapping
 from pathlib import Path
 
 OUTPUT_FORMATS = frozenset({"flac", "mp3", "wav"})
@@ -36,6 +38,41 @@ def finalize_generated_output(
     destination = generated_path.with_suffix(".mp3")
     convert_wav_to_mp3(generated_path, destination, temporary_root=temporary_root)
     return destination
+
+
+def probe_audio_duration(path: Path, metadata: Mapping[str, object] | None = None) -> float:
+    """Probe generated duration before upload, using metadata only as fallback."""
+
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as wav_file:
+                frame_count = wav_file.getnframes()
+                sample_rate = wav_file.getframerate()
+                if frame_count <= 0 or sample_rate <= 0:
+                    raise AudioOutputError("generated WAV has no frames")
+                return frame_count / sample_rate
+        except AudioOutputError:
+            raise
+        except (OSError, EOFError, wave.Error) as exc:
+            raise AudioOutputError("generated WAV duration could not be probed") from exc
+    for key in ("duration_seconds", "duration"):
+        value = metadata.get(key) if metadata is not None else None
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        ):
+            if float(value) > 0:
+                return float(value)
+    try:
+        import soundfile  # type: ignore[import-not-found]
+
+        info = soundfile.info(str(path))
+        if info.frames > 0 and info.samplerate > 0:
+            return float(info.frames / info.samplerate)
+    except Exception as exc:
+        raise AudioOutputError("generated audio duration could not be probed") from exc
+    raise AudioOutputError("generated audio duration could not be probed")
 
 
 def convert_wav_to_mp3(source_path: Path, destination_path: Path, *, temporary_root: Path) -> Path:

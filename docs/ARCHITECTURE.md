@@ -1,5 +1,47 @@
 # Architecture
 
+## Checkpoint 2 controls and compatibility
+
+New controller jobs persist a strict schema-v2 normalized request in the
+existing JSON columns. The request contains an immutable `profile_id`, the
+complete resolved ACE-Step parameters, explicit prompt and duration modes, and
+the exact effective caption/lyrics. `fast-beta-v1` is the only UI default;
+`quality-v1` remains an unselected grid candidate. Schema-v1 normalized rows
+are not rewritten and continue through the legacy worker mapping.
+
+Originals use `direct`, `enhance`, or `auto-compose` prompt flags. `auto`
+duration sends ACE-Step `-1.0`; `custom` requires 10-600 seconds. Bounded
+numeric seconds/minutes in prose are checked against matching custom seconds;
+conflicting or vague duration language is rejected without mutating the
+structured value. The final caption/lyrics remain bounded at 511/4095
+characters without truncation.
+
+Cover preparation is a two-phase flow: home ingest probes and persists the
+source duration, the controller enters `staging`, and the UI displays the
+detected duration and requires confirmation before issuing Runpod capabilities.
+The source duration becomes the exact ACE-Step duration. Covers retain
+independent `audio_cover_strength` and `cover_noise_strength` values, run two
+to four variations sequentially, and persist the returned effective seed and
+bounded worker result metadata, including output duration/tolerance and build
+identity, in existing JSON fields. An awaiting-confirmation cover may be
+cancelled once through the authenticated CSRF-protected UI; its prepared
+source is removed after the failed state commits. Status polling reloads the
+detail page once when the server-rendered confirmation form becomes available.
+Enhance and auto-compose use bounded LM lyrics as effective lyrics only when
+the submitted lyrics are empty; supplied lyrics remain exact. The controller
+projects the same bounded profile, input/effective values, generated metadata,
+resolved parameters, output evidence, and worker identity onto the output
+record, while keeping queue and execution timing on the attempt record.
+
+Immediately before starting a schema-v1 controller rollback, operators run
+`ACE_SERVICE_DATA_ROOT=/srv/ace-service/data uv run python -m
+ace_service.rollback_readiness`. The local read-only check reports bounded job
+IDs, statuses, and schema classifications. It exits nonzero for every
+nonterminal or malformed schema-v2 row, including unconfirmed cover staging;
+legacy/unknown historical rows and valid terminal rows do not block. A
+nonzero or indeterminate result requires retaining the v2-capable controller
+and worker.
+
 ## Checkpoint 9 operations
 
 The controller and home agent configure UTC rotating file logs below their
@@ -48,7 +90,8 @@ preparation or generation.
 
 `CoverRequest` validates one approved single-video YouTube URL, required rights
 confirmation, bounded style/guidance text, optional replacement lyrics, and
-cover strength before `create_cover_job` persists the metadata-only request.
+the independent ACE cover controls before `create_cover_job` persists the
+metadata-only request.
 The serialized controller worker changes a queued cover to `ingesting`, calls
 the bearer-authenticated home-ingest endpoint over the configured private
 network, and waits for the metadata response after SFTP has uploaded
@@ -56,11 +99,15 @@ network, and waits for the metadata response after SFTP has uploaded
 
 Hetzner verifies the home-reported positive byte size and SHA-256 against the
 `.part` file, atomically renames it to `source.mp3`, and persists the returned
-title, canonical URL, duration, checksum, and size. Only then does the worker
-issue one source-download capability and one output-upload capability and
-submit the cover payload to Runpod. The payload contains the composed style
-caption, optional exact lyrics, cover strength, source checksum/size, and
-signed URLs; it contains no audio bytes or YouTube credentials.
+title, canonical URL, duration, checksum, and size. The controller records the
+source duration and enters `staging`; the authenticated UI must confirm the
+detected duration before the worker issues one source-download capability and
+one output-upload capability and submits the cover payload to Runpod. The
+payload contains the composed style caption, optional exact lyrics,
+independent cover controls, source checksum/size, exact source duration, and
+signed URLs; it contains no audio bytes or YouTube credentials. The same
+staging page can cancel before confirmation, with no Runpod enqueue; the
+prepared source is removed after cancellation commits.
 
 After a valid output is accepted, or after a terminal cover failure, issued
 capabilities are revoked. Non-retained source files are removed from Hetzner
@@ -108,20 +155,22 @@ ACE-Step save formats. Hetzner performs no media processing.
 
 Original-song requests are validated at the controller boundary and persisted
 as a normalized, metadata-only Runpod request before the job is enqueued. The
-description is trimmed, creative lyrics are preserved, optional generation
-fields are omitted when absent, and instrumental requests cannot carry
-non-empty lyrics. A supplied seed advances by one per serialized variation;
-each variation remains an independent Runpod job.
+description is trimmed, creative lyrics are preserved, prompt mode and
+duration mode are explicit, and instrumental requests cannot carry non-empty
+lyrics. `auto` sends model-selected duration `-1.0`; `custom` requires 10-600
+seconds. A supplied seed advances by one per serialized variation; each
+variation remains an independent Runpod job.
 
 Before each original variation crosses the cloud submission boundary, the
 controller issues a new short-lived output-upload capability bound to
 `<job-id>/variation-XX.<format>`. The worker payload contains only bounded
 generation metadata, the current variation seed, the nonce, and that capability
 URL; it contains no audio bytes and no `variation_count` field. Output records
-retain deterministic paths and checksums, while the variation attempt stores
-the bounded worker result and any Runpod queue-delay/execution timing returned
-by the API. The existing single controller queue submits variations serially,
-so a later failure leaves earlier durable outputs available.
+retain deterministic paths, checksums, and the bounded generation projection,
+while the variation attempt stores the complete bounded worker result and any
+Runpod queue-delay/execution timing returned by the API. The existing single
+controller queue submits variations serially, so a later failure leaves
+earlier durable outputs available.
 
 ## Checkpoint 4 controller orchestration
 
@@ -145,8 +194,10 @@ advanced only when its canonical source is fully verified, and persisted
 Runpod IDs are polled without resubmission. Missing IDs and uncertain
 submissions become stable terminal errors. Completed Runpod status is accepted
 only after a deterministic output file and matching durable output record pass
-size, path, and SHA-256 validation; a valid consumed output can recover a job
-when Runpod status retention has expired.
+size, path, and SHA-256 validation. Legacy rows may recover from a valid local
+output after Runpod status retention expires; schema-v2 rows additionally
+require already-persisted validated completion metadata, an effective integer
+seed, and worker identity, and are never completed from the output file alone.
 
 ## Checkpoint 3 boundary
 

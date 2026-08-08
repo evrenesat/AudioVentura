@@ -13,8 +13,14 @@ import ace_service.web as web_routes
 from ace_service.app import create_app
 from ace_service.config import ServiceSettings
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
-from ace_service.models import JobType
-from ace_service.repository import create_job, create_output, get_job
+from ace_service.models import JobStatus, JobType
+from ace_service.repository import (
+    create_job,
+    create_output,
+    finalize_cover_job_duration,
+    get_job,
+    transition_job,
+)
 from ace_service.transfers import create_transfer_app
 
 
@@ -185,6 +191,169 @@ def test_form_validation_escaping_and_cover_rights(web_app) -> None:
         assert "&lt;script&gt;alert(&#39;owned&#39;)&lt;/script&gt;" in detail.text
         assert "<script>alert('owned')</script>" not in detail.text
         assert worker.enqueued == [job_id]
+
+
+def test_cover_confirmation_gates_second_enqueue_and_displays_source_duration(web_app) -> None:
+    app, factory, worker = web_app
+    with TestClient(app) as client:
+        token = _csrf(client, "/cover")
+        created = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "rights_confirmation": "true",
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        job_id = created.headers["location"].rsplit("/", 1)[-1]
+        assert worker.enqueued == [job_id]
+        worker.enqueued.clear()
+        initial_detail = client.get(f"/jobs/{job_id}", auth=_auth(client))
+        assert initial_detail.status_code == 200
+        assert "data-cover-confirmation-form" not in initial_detail.text
+
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
+            transition_job(session, job.id, JobStatus.STAGING)
+            session.commit()
+
+        status_response = client.get(f"/jobs/{job_id}/status", auth=_auth(client))
+        assert status_response.status_code == 200
+        assert status_response.json()["cover_confirmation_status"] == "awaiting_confirmation"
+        detail = client.get(f"/jobs/{job_id}", auth=_auth(client))
+        assert detail.status_code == 200
+        assert "Detected source duration: 42.0 seconds" in detail.text
+        assert detail.text.count("data-cover-confirmation-form") == 1
+        static_status = client.get("/static/status.js", auth=_auth(client))
+        assert "window.location.reload()" in static_status.text
+        confirm_token = client.cookies.get("ace_csrf")
+        assert confirm_token
+        confirmed = client.post(
+            f"/cover/{job_id}/confirm",
+            auth=_auth(client),
+            data={"csrf_token": confirm_token},
+            follow_redirects=False,
+        )
+        assert confirmed.status_code == 303
+        assert worker.enqueued == [job_id]
+
+        replay = client.post(
+            f"/cover/{job_id}/confirm",
+            auth=_auth(client),
+            data={"csrf_token": confirm_token},
+        )
+        assert replay.status_code == 409
+        assert worker.enqueued == [job_id]
+
+
+def test_staged_cover_cancellation_is_authenticated_csrf_protected_and_single_use(
+    web_app, settings
+) -> None:
+    app, factory, worker = web_app
+    with TestClient(app) as client:
+        token = _csrf(client, "/cover")
+        created = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "rights_confirmation": "true",
+            },
+            follow_redirects=False,
+        )
+        job_id = created.headers["location"].rsplit("/", 1)[-1]
+        worker.enqueued.clear()
+        source = settings.paths.incoming / job_id / "source.mp3"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"prepared source")
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
+            job.source_byte_size = source.stat().st_size
+            job.source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            transition_job(session, job.id, JobStatus.STAGING)
+            session.commit()
+
+        assert client.post(f"/cover/{job_id}/cancel").status_code == 401
+        assert (
+            client.post(
+                f"/cover/{job_id}/cancel",
+                auth=_auth(client),
+                data={"csrf_token": "wrong"},
+            ).status_code
+            == 403
+        )
+        cancelled = client.post(
+            f"/cover/{job_id}/cancel",
+            auth=_auth(client),
+            data={"csrf_token": token},
+            follow_redirects=False,
+        )
+        assert cancelled.status_code == 303
+        assert worker.enqueued == []
+        assert not source.exists()
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            assert job.status is JobStatus.FAILED
+            assert job.error_code == "cover_staging_cancelled"
+            assert job.user_facing_error == ("Cover preparation was cancelled before confirmation.")
+
+        replay = client.post(
+            f"/cover/{job_id}/cancel",
+            auth=_auth(client),
+            data={"csrf_token": token},
+        )
+        assert replay.status_code == 409
+        assert worker.enqueued == []
+
+
+@pytest.mark.parametrize(
+    ("description", "duration_mode", "duration_seconds", "expected_status"),
+    [
+        ("a 30-second song", "custom", "30", 303),
+        ("a 45-second song", "custom", "30", 422),
+        ("a 30-second song", "auto", "", 422),
+        ("make it longer", "custom", "30", 422),
+        ("plain piano arrangement", "custom", "30", 303),
+    ],
+)
+def test_original_form_duration_language_validation(
+    web_app,
+    description: str,
+    duration_mode: str,
+    duration_seconds: str,
+    expected_status: int,
+) -> None:
+    app, _factory, worker = web_app
+    with TestClient(app) as client:
+        token = _csrf(client)
+        response = client.post(
+            "/create",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "description": description,
+                "duration_mode": duration_mode,
+                "duration_seconds": duration_seconds,
+            },
+            follow_redirects=False,
+        )
+
+        assert response.status_code == expected_status
+        if expected_status == 303:
+            assert len(worker.enqueued) == 1
 
 
 def test_status_polling_and_timing_metadata(web_app) -> None:

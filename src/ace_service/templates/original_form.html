@@ -1,18 +1,25 @@
 {% extends "base.html" %}
 {% block title %}New original · ACE Service{% endblock %}
 {% block content %}
-<section class="form-header"><p class="eyebrow">Original song</p><h1>Start with a feeling.</h1><p>Describe the sound, then let ACE-Step take it from there.</p></section>
+<section class="form-header"><p class="eyebrow">Original song</p><h1>Start with a feeling.</h1><p>Describe the sound, then choose how much ACE-Step should help shape it.</p></section>
 {% if errors %}<div class="banner error"><strong>Check your request:</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
 <form method="post" action="/create" class="form-card">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="profile_id" value="fast-beta-v1">
   <label for="description">Description <span class="required">required</span></label>
-  <textarea id="description" name="description" required maxlength="4000" rows="5">{{ form.get('description', '') }}</textarea>
+  <textarea id="description" name="description" required maxlength="511" rows="5">{{ form.get('description', '') }}</textarea>
+  <p class="hint">The final caption is limited to 511 characters. Duration-like prose is not interpreted as a setting.</p>
   <label for="lyrics">Lyrics <span class="hint">optional</span></label>
-  <textarea id="lyrics" name="lyrics" maxlength="20000" rows="7">{{ form.get('lyrics', '') }}</textarea>
+  <textarea id="lyrics" name="lyrics" maxlength="4095" rows="7">{{ form.get('lyrics', '') }}</textarea>
+  <p class="hint">Lyrics are preserved unchanged in Enhance and Auto-compose modes, up to 4095 characters.</p>
   <label class="check"><input type="checkbox" name="instrumental" value="true"{% if form.get('instrumental') in ['true', 'on', '1'] %} checked{% endif %}> Instrumental</label>
   <div class="grid two">
+    <div><label for="prompt_mode">Prompt mode</label><select id="prompt_mode" name="prompt_mode"><option value="direct"{% if form.get('prompt_mode', 'direct') == 'direct' %} selected{% endif %}>Direct</option><option value="enhance"{% if form.get('prompt_mode') == 'enhance' %} selected{% endif %}>Enhance</option><option value="auto-compose"{% if form.get('prompt_mode') == 'auto-compose' %} selected{% endif %}>Auto-compose</option></select><p class="hint">Direct bypasses planner rewriting; Enhance enables metadata/caption/language help; Auto-compose also enables planner thinking.</p></div>
     <div><label for="vocal_language">Vocal language</label><input id="vocal_language" name="vocal_language" value="{{ form.get('vocal_language', 'en') }}" maxlength="32"></div>
-    <div><label for="duration">Duration, seconds</label><input id="duration" name="duration" inputmode="decimal" value="{{ form.get('duration', '') }}" placeholder="180"></div>
+  </div>
+  <div class="grid two">
+    <div><label for="duration_mode">Duration mode</label><select id="duration_mode" name="duration_mode"><option value="auto"{% if form.get('duration_mode', 'auto') == 'auto' %} selected{% endif %}>Auto (model-selected)</option><option value="custom"{% if form.get('duration_mode') == 'custom' %} selected{% endif %}>Custom duration</option></select></div>
+    <div><label for="duration_seconds">Custom duration, seconds</label><input id="duration_seconds" name="duration_seconds" inputmode="decimal" value="{{ form.get('duration_seconds', '') }}" placeholder="10–600"></div>
     <div><label for="bpm">BPM</label><input id="bpm" name="bpm" inputmode="numeric" value="{{ form.get('bpm', '') }}"></div>
     <div><label for="key_scale">Key / scale</label><input id="key_scale" name="key_scale" value="{{ form.get('key_scale', '') }}" placeholder="C major"></div>
     <div><label for="time_signature">Time signature</label><input id="time_signature" name="time_signature" inputmode="numeric" value="{{ form.get('time_signature', '') }}" placeholder="4"></div>

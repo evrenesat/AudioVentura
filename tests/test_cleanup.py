@@ -10,11 +10,14 @@ from ace_service.cleanup import cleanup_controller
 from ace_service.db import create_session_factory
 from ace_service.models import JobStatus, JobType, TransferDirection, TransferStatus
 from ace_service.repository import (
+    create_cover_job,
     create_job,
+    finalize_cover_job_duration,
     get_transfer_by_token,
     issue_transfer_capability,
     transition_job,
 )
+from ace_service.schemas import CoverRequest
 
 
 def test_controller_cleanup_reclaims_stale_files_and_terminal_state(
@@ -85,6 +88,30 @@ def test_controller_cleanup_reclaims_stale_files_and_terminal_state(
         active_capability = get_transfer_by_token(check, active.token)
         assert active_capability is not None
         assert active_capability.status is TransferStatus.REVOKED
+
+
+def test_controller_cleanup_expires_unconfirmed_v2_cover_staging(settings, session) -> None:
+    now = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    request = CoverRequest(
+        youtube_url="https://www.youtube.com/watch?v=abc123",
+        target_style="dreamy synthwave",
+        rights_confirmation=True,
+    )
+    staged = create_cover_job(session, request)
+    transition_job(session, staged.id, JobStatus.INGESTING, now=now - timedelta(days=2))
+    finalize_cover_job_duration(session, staged.id, 42.0)
+    transition_job(session, staged.id, JobStatus.STAGING, now=now - timedelta(days=2))
+    session.commit()
+
+    factory = create_session_factory(session.get_bind())
+    report = cleanup_controller(settings, factory, now=now)
+
+    assert report.expired_cover_staging == 1
+    with factory() as check:
+        expired = check.get(type(staged), staged.id)
+        assert expired is not None
+        assert expired.status is JobStatus.FAILED
+        assert expired.error_code == "cover_staging_expired"
 
 
 def test_controller_lifespan_schedules_and_cancels_periodic_cleanup(settings) -> None:

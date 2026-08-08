@@ -10,6 +10,31 @@
   guard in `docs/QUALITY-EVALUATION.md`. Stored the CC0 fixture manifest and
   honest no-run baseline result under the private data root; no evaluation
   media or paid inference state is tracked in Git.
+- Re-ran the full Checkpoint 1 verification after the approved baseline
+  evidence: the six known Docker-only `lameenc` test failures remain isolated,
+  while Ruff, format, mypy, and all home-ingest checks pass. Revalidated the
+  private fixture hash, no-run result shape, and `0600` permissions without
+  making a Runpod call.
+- Implemented the focused Checkpoint 2 recovery: immutable v2 profiles and
+  prompt modes, explicit original duration, independent cover controls,
+  source-duration staging/confirmation, strict dual-version worker parsing,
+  fail-closed ACE constructor checks, sequential reproducible variations, and
+  bounded versioned result metadata in existing JSON fields.
+- Repaired the v2 lifecycle overlay: staged covers can cancel safely, polling
+  reveals confirmation asynchronously, pinned ACE LM metadata and effective
+  captions persist without rewriting lyrics, status-loss recovery requires
+  validated v2 evidence, worker images require immutable digests, and matching
+  numeric duration prose is accepted without changing structured seconds.
+- Added the read-only schema-v1 rollback gate with fail-closed v2 lifecycle
+  classification, and corrected pinned LM lyric truth for empty-input
+  Enhance/auto-compose requests while preserving supplied lyrics exactly.
+- Unified bounded result projection so profile, generated metadata, resolved
+  parameters, output evidence, and worker identity survive on outputs in both
+  result-before-upload and normal arrival orders; queue/execution timing stays
+  on attempts.
+- Added `lameenc==1.8.4` to the development group so the local worker contract
+  suite uses the same in-process MP3 encoder already installed by the worker
+  image; production controller dependencies remain media-free.
 
 ## 2026-08-07
 

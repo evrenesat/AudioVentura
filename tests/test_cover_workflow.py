@@ -14,8 +14,10 @@ from ace_service.db import create_database_engine, create_session_factory, initi
 from ace_service.home_ingest import HomeIngestClient, HomeIngestError, PreparedCoverSource
 from ace_service.models import JobStatus, TransferStatus
 from ace_service.repository import (
+    confirm_cover_job,
     create_cover_job,
     create_output,
+    finalize_cover_job_duration,
     get_job,
     get_variation_attempt,
     persist_variation_runpod_job_id,
@@ -113,7 +115,8 @@ class _CoverRunpod:
         assert ttl_ms > 0
         copied = dict(payload)
         self.payloads.append(copied)
-        runpod_job_id = "cover-runpod"
+        variation_index = int(copied["variation_index"])
+        runpod_job_id = f"cover-runpod-{variation_index}"
         self.submissions.append(runpod_job_id)
         source = copied["source"]
         assert isinstance(source, Mapping)
@@ -147,10 +150,47 @@ class _CoverRunpod:
                 category=RunpodState.FAILED,
                 raw_status="FAILED",
             )
+        variation_index = int(runpod_job_id.rsplit("-", 1)[1])
+        payload = self.payloads[variation_index - 1]
+        generation = payload["generation"]
+        assert isinstance(generation, Mapping)
+        resolved = payload["resolved_parameters"]
+        assert isinstance(resolved, Mapping)
+        output_bytes = b"generated cover"
+        result = {
+            "schema_version": 2,
+            "job_id": payload["job_id"],
+            "submission_nonce": payload["submission_nonce"],
+            "variation_index": variation_index,
+            "status": "uploaded",
+            "profile_id": payload["profile_id"],
+            "input": {"caption": generation["prompt"], "lyrics": generation["lyrics"]},
+            "effective": {"caption": generation["prompt"], "lyrics": generation["lyrics"]},
+            "resolved_parameters": dict(resolved),
+            "output": {
+                "bytes": len(output_bytes),
+                "sha256": hashlib.sha256(output_bytes).hexdigest(),
+                "requested_seed": generation.get("seed"),
+                "effective_seed": generation.get("seed") or 20_000 + variation_index,
+                "seed": generation.get("seed") or 20_000 + variation_index,
+                "duration_seconds": 42.0,
+                "target_duration_seconds": 42.0,
+                "duration_tolerance_seconds": 2.0,
+                "duration_within_tolerance": True,
+            },
+            "worker": {
+                "ace_tag": "v0.1.8",
+                "dit_model": "test-model",
+                "lm_model": "test-lm",
+                "image_digest": "sha256:" + "c" * 64,
+                "gpu": "test-gpu",
+            },
+        }
         return RunpodStatusResult(
             job_id=runpod_job_id,
             category=RunpodState.COMPLETED,
             raw_status="COMPLETED",
+            result=result,
         )
 
 
@@ -173,23 +213,18 @@ def test_cover_request_composes_prompt_and_omits_empty_lyrics() -> None:
         target_style="  dreamy synthwave  ",
         remix_guidance="  wider drums  ",
         lyrics="   ",
-        cover_strength=0.4,
+        audio_cover_strength=0.4,
+        cover_noise_strength=0.2,
         rights_confirmation=True,
     )
 
     assert request.effective_prompt == "dreamy synthwave\n\nwider drums"
     assert request.lyrics is None
-    assert request.to_normalized_request_json() == {
-        "schema_version": 1,
-        "generation": {
-            "prompt": "dreamy synthwave\n\nwider drums",
-            "instrumental": False,
-            "vocal_language": "en",
-            "cover_strength": 0.4,
-            "output_format": "mp3",
-        },
-        "source": None,
-    }
+    normalized = request.to_normalized_request_json()
+    assert normalized["schema_version"] == 2
+    assert normalized["generation"]["audio_cover_strength"] == 0.4
+    assert normalized["generation"]["cover_noise_strength"] == 0.2
+    assert normalized["resolved_parameters"]["cover_noise_strength"] == 0.2
 
 
 @pytest.mark.parametrize(
@@ -199,6 +234,7 @@ def test_cover_request_composes_prompt_and_omits_empty_lyrics() -> None:
         {"youtube_url": "http://www.youtube.com/watch?v=abc123"},
         {"rights_confirmation": False},
         {"target_style": "  "},
+        {"remix_guidance": "longer remix"},
     ],
 )
 def test_cover_request_rejects_unsafe_or_unconfirmed_requests(kwargs: dict[str, object]) -> None:
@@ -215,14 +251,20 @@ def test_cover_request_rejects_unsafe_or_unconfirmed_requests(kwargs: dict[str, 
 def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(settings) -> None:
     engine, factory = _database(settings)
     try:
-        job_id = _create_cover(settings, factory, cover_strength=0.55)
+        job_id = _create_cover(
+            settings,
+            factory,
+            audio_cover_strength=0.55,
+            cover_noise_strength=0.25,
+            variation_count=2,
+        )
         home = _FakeHome(settings)
         from ace_service.transfers import create_transfer_app
 
         transfer_app = create_transfer_app(settings, session_factory=factory)
         runpod = _CoverRunpod(settings, factory, transfer_app)
 
-        async def scenario() -> None:
+        async def prepare() -> None:
             worker = ControllerWorker(
                 settings,
                 factory,
@@ -234,7 +276,7 @@ def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(setti
             await worker.wait_idle()
             await worker.stop()
 
-        _run(scenario())
+        _run(prepare())
 
         assert home.calls == [
             {
@@ -244,30 +286,62 @@ def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(setti
                 "max_source_bytes": settings.transfer_max_source_bytes,
             }
         ]
-        assert len(runpod.payloads) == 1
+        assert len(runpod.payloads) == 0
+        with factory() as session:
+            staged = get_job(session, job_id)
+            assert staged is not None and staged.status is JobStatus.STAGING
+            assert staged.source_duration == 42.0
+            assert staged.normalized_request_json["source_duration_seconds"] == 42.0
+            assert staged.normalized_request_json["resolved_target_duration_seconds"] == 42.0
+            confirm_cover_job(session, job_id)
+            session.commit()
+
+        async def generate() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                runpod,
+                home_ingest_client=home,
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            worker.enqueue(job_id)
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(generate())
+        assert len(runpod.payloads) == 2
         payload = runpod.payloads[0]
         assert payload["task_type"] == "cover"
         assert payload["source"]["format"] == "mp3"
         assert payload["source"]["bytes"] == len(b"prepared source")
-        assert payload["generation"]["cover_strength"] == 0.55
-        assert "lyrics" not in payload["generation"]
-        assert len(runpod.status_calls) == 1
+        assert payload["generation"]["audio_cover_strength"] == 0.55
+        assert payload["generation"]["cover_noise_strength"] == 0.25
+        assert payload["generation"]["duration"] == 42.0
+        assert payload["resolved_parameters"]["duration"] == 42.0
+        assert len(runpod.status_calls) == 2
         with factory() as session:
             job = get_job(session, job_id)
             assert job is not None and job.status is JobStatus.COMPLETED
             assert job.rights_confirmation_at is not None
-            assert job.normalized_request_json["generation"]["cover_strength"] == 0.55
+            assert job.normalized_request_json["generation"]["audio_cover_strength"] == 0.55
+            assert job.normalized_request_json["generation"]["cover_noise_strength"] == 0.25
+            assert job.normalized_request_json["generation"]["duration"] == 42.0
+            assert job.normalized_request_json["cover_staging"]["status"] == "confirmed"
             assert job.sanitized_source_title == "Safe title"
             assert job.source_url == "https://www.youtube.com/watch?v=abc123"
             assert job.source_byte_size == len(b"prepared source")
             assert job.source_sha256 == hashlib.sha256(b"prepared source").hexdigest()
-            assert [transfer.status for transfer in job.transfers] == [
-                TransferStatus.CONSUMED,
-                TransferStatus.REVOKED,
-            ]
+            assert [transfer.status for transfer in job.transfers].count(
+                TransferStatus.CONSUMED
+            ) == 2
+            assert [transfer.status for transfer in job.transfers].count(
+                TransferStatus.REVOKED
+            ) == 2
         assert not (settings.paths.incoming / job_id).exists()
         output = settings.paths.outputs / job_id / "variation-01.mp3"
         assert output.read_bytes() == b"generated cover"
+        assert (settings.paths.outputs / job_id / "variation-02.mp3").is_file()
     finally:
         engine.dispose()
 
@@ -360,11 +434,16 @@ def test_cover_restart_polls_persisted_runpod_id_without_resubmission(settings) 
         with factory() as session:
             job = get_job(session, job_id)
             assert job is not None
+            job.variation_count = 1
             job.source_byte_size = len(source)
             job.source_sha256 = hashlib.sha256(source).hexdigest()
             transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
             transition_job(session, job.id, JobStatus.STAGING)
+            confirm_cover_job(session, job.id)
             _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+            submission_nonce = nonce
+            resolved_parameters = dict(job.normalized_request_json["resolved_parameters"])
             persist_variation_runpod_job_id(
                 session, attempt.id, "persisted-cover-runpod", submission_nonce=nonce
             )
@@ -398,6 +477,35 @@ def test_cover_restart_polls_persisted_runpod_id_without_resubmission(settings) 
                     job_id=runpod_job_id,
                     category=RunpodState.COMPLETED,
                     raw_status="COMPLETED",
+                    result={
+                        "schema_version": 2,
+                        "job_id": job_id,
+                        "submission_nonce": submission_nonce,
+                        "variation_index": 1,
+                        "status": "uploaded",
+                        "profile_id": "fast-beta-v1",
+                        "input": {"caption": "dreamy synthwave", "lyrics": ""},
+                        "effective": {"caption": "dreamy synthwave", "lyrics": ""},
+                        "resolved_parameters": resolved_parameters,
+                        "output": {
+                            "bytes": len(output),
+                            "sha256": hashlib.sha256(output).hexdigest(),
+                            "requested_seed": None,
+                            "effective_seed": 101,
+                            "seed": 101,
+                            "duration_seconds": 42.0,
+                            "target_duration_seconds": 42.0,
+                            "duration_tolerance_seconds": 2.0,
+                            "duration_within_tolerance": True,
+                        },
+                        "worker": {
+                            "ace_tag": "v0.1.8",
+                            "dit_model": "test-model",
+                            "lm_model": "test-lm",
+                            "image_digest": "sha256:" + "c" * 64,
+                            "gpu": "test-gpu",
+                        },
+                    },
                 )
 
         runpod = PollOnlyRunpod()
@@ -412,6 +520,8 @@ def test_cover_restart_polls_persisted_runpod_id_without_resubmission(settings) 
         with factory() as session:
             job = get_job(session, job_id)
             assert job is not None and job.status is JobStatus.COMPLETED
+            first = get_variation_attempt(session, job_id, 1)
+            assert first is not None and first.status is JobStatus.COMPLETED
             assert get_variation_attempt(session, job_id, 1).runpod_job_id == (
                 "persisted-cover-runpod"
             )

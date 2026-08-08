@@ -7,12 +7,15 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG ACE_STEP_REPOSITORY=https://github.com/ace-step/ACE-Step-1.5.git
 ARG ACE_STEP_TAG=v0.1.8
+ARG ACE_STEP_COMMIT=dce621408bee8c31b4fcf4811682eb9359e1bc94
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     TOKENIZERS_PARALLELISM=false \
+    ACE_STEP_TAG=${ACE_STEP_TAG} \
+    ACE_STEP_COMMIT=${ACE_STEP_COMMIT} \
     ACE_WORKER_CHECKPOINTS_DIR=/runpod-volume/checkpoints \
     ACE_TRANSFER_ALLOWED_HOST= \
     ACESTEP_DISABLE_TQDM=true
@@ -36,6 +39,7 @@ RUN python3.11 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
 RUN git clone --quiet --depth 1 --branch "${ACE_STEP_TAG}" "${ACE_STEP_REPOSITORY}" /opt/ace-step \
+    && test "$(git -C /opt/ace-step rev-parse HEAD)" = "${ACE_STEP_COMMIT}" \
     && python -m pip install --upgrade pip \
     && python -m pip install --extra-index-url https://download.pytorch.org/whl/cu128 \
         /opt/ace-step/acestep/third_parts/nano-vllm \

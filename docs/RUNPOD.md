@@ -52,15 +52,22 @@ FlashBoot: enabled
 
 Set `ACE_TRANSFER_ALLOWED_HOST` to the hostname of the public HTTPS transfer
 app. When it is set, both source and output capabilities must use that exact
-host. The worker accepts no credentials for Runpod, SFTP, SSH, Tailscale, or
-YouTube.
+host. Set `ACE_WORKER_IMAGE_DIGEST` to the immutable deployed OCI digest (for
+example `ghcr.io/example/ace-worker@sha256:<64 lowercase hex digits>`); an
+empty value or mutable tag fails startup. The worker accepts no credentials
+for Runpod, SFTP, SSH, Tailscale, or YouTube.
 
 ## Request and result boundary
 
-Runpod receives a small JSON object with `schema_version`, UUID-like job and
-submission identifiers, one bounded generation description, an optional
-prepared-source capability, and one output-upload capability. Capability URLs
-must be HTTPS and use `/transfer/v1/`.
+Runpod receives a small JSON object with a strict `schema_version` of `1` or
+`2`, UUID job/submission identifiers, one bounded generation description, an
+optional prepared-source capability, and one output-upload capability.
+Schema-v1 keeps the approved legacy `cover_strength` mapping and omitted
+original-duration behavior. New schema-v2 requests use independent
+`audio_cover_strength`/`cover_noise_strength`, an immutable resolved profile
+record, explicit prompt/duration modes, and no legacy alias. Unknown versions
+and fields are rejected. Capability URLs must be HTTPS and use
+`/transfer/v1/`.
 
 For a cover job, the worker streams the prepared MP3 to a private temporary
 file, verifies its declared byte count and SHA-256, and passes that local file
@@ -72,9 +79,33 @@ Every request forces `GenerationConfig.batch_size=1`. The worker requires
 exactly one generated file, streams it to the signed output capability with
 `Content-Length`, `X-ACE-Output-Bytes`, and `X-ACE-Output-SHA256`, and removes
 all source/output temporary files in a temporary-directory scope. The Runpod
-result contains only identifiers, output size/checksum/format, controlled
-seed/sample-rate metadata, and non-secret worker GPU metadata; it never
-contains audio bytes, base64 audio, a local path, or a permanent media URL.
+result is explicitly versioned and bounded. It contains input/effective
+caption and lyrics, resolved parameters, the returned effective seed, bounded
+`extra_outputs.lm_metadata` from the pinned ACE-Step result, output
+duration/tolerance evidence, available quality scores, and non-secret
+ACE/model/image/GPU identity. Enhance and auto-compose use the returned LM
+caption and use returned bounded LM lyrics only when submitted lyrics are
+empty; supplied lyrics remain exact. Private paths, tensors, audio codes,
+status/debug output, and capability URLs are removed; it never contains audio
+bytes, base64 audio, or a permanent media URL.
+
+For an explicit duration target, the worker probes the generated file before
+upload and accepts completion only within `max(2 seconds, 2% of target)`. The
+controller validates the same evidence before persisting it on the variation
+attempt and output JSON fields. Cover requests carry the probed source
+duration and a confirmed staging marker, so an unconfirmed cover cannot reach
+the worker.
+
+Before a schema-v1 controller rollback, run the local read-only gate from the
+controller checkout:
+
+```text
+ACE_SERVICE_DATA_ROOT=/srv/ace-service/data uv run python -m ace_service.rollback_readiness
+```
+
+It prints only bounded job IDs, status/schema classifications, and a
+safe/not-safe summary. Exit zero means no blocker was found; any nonzero or
+indeterminate result requires keeping the v2-capable controller and worker.
 
 The worker accepts `mp3`, `flac`, and `wav` output requests. WAV and FLAC use
 the corresponding ACE-Step save format. For MP3, ACE-Step saves a temporary

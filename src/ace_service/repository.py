@@ -27,11 +27,46 @@ from ace_service.models import (
 from ace_service.schemas import (
     CoverRequest,
     OriginalSongRequest,
+    finalize_cover_normalized_request,
     normalize_extension,
     normalize_relative_path,
     validate_sha256,
 )
 from ace_service.state import validate_job_transition, validate_variation_transition
+
+COVER_STAGING_CANCELLED_CODE = "cover_staging_cancelled"
+COVER_STAGING_CANCELLED_MESSAGE = "Cover preparation was cancelled before confirmation."
+_TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+_NONTERMINAL_JOB_STATUSES = frozenset(JobStatus) - _TERMINAL_JOB_STATUSES
+_COVER_STAGING_STATUSES = frozenset({"awaiting_confirmation", "confirmed"})
+_COVER_STAGING_KEYS = frozenset({"status", "staged_at", "confirmed_at"})
+_MISSING = object()
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackJobDiagnostic:
+    """Bounded, non-secret classification of one job for schema-v1 rollback."""
+
+    job_id: str
+    status: str
+    schema: str
+    classification: str
+    blocks_rollback: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackReadiness:
+    """Read-only schema-v1 rollback decision and its bounded diagnostics."""
+
+    diagnostics: tuple[RollbackJobDiagnostic, ...]
+
+    @property
+    def blockers(self) -> tuple[RollbackJobDiagnostic, ...]:
+        return tuple(item for item in self.diagnostics if item.blocks_rollback)
+
+    @property
+    def safe(self) -> bool:
+        return not self.blockers
 
 
 def _id_string(value: str | UUID | None) -> str:
@@ -138,15 +173,237 @@ def create_cover_job(
         prompt=request.effective_prompt,
         lyrics=request.lyrics,
         rights_confirmation_at=confirmation_at,
-        cover_strength=request.cover_strength,
+        cover_strength=request.effective_audio_cover_strength,
         output_format=request.output_format,
+        variation_count=request.variation_count,
         normalized_request_json=request.to_normalized_request_json(),
         job_id=job_id,
     )
 
 
+def finalize_cover_job_duration(
+    session: Session, job_id: str | UUID, source_duration_seconds: float
+) -> Job:
+    """Persist the home-probed cover duration before the first cloud attempt."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if job.job_type is not JobType.COVER:
+        raise ValueError("only cover jobs have a source duration")
+    if job.normalized_request_json is None:
+        raise ValueError("cover job is missing its normalized request")
+    job.normalized_request_json = finalize_cover_normalized_request(
+        job.normalized_request_json, source_duration_seconds
+    )
+    duration = float(source_duration_seconds)
+    job.source_duration = duration
+    result = dict(job.runpod_result_json or {})
+    result.update(
+        {
+            "schema_version": 2,
+            "source_duration_seconds": duration,
+            "resolved_target_duration_seconds": duration,
+            "ace_duration_seconds": duration,
+        }
+    )
+    job.runpod_result_json = result
+    normalized = dict(job.normalized_request_json)
+    normalized["cover_staging"] = {
+        "status": "awaiting_confirmation",
+        "staged_at": utc_now().isoformat(),
+    }
+    job.normalized_request_json = normalized
+    job.updated_at = utc_now()
+    session.flush()
+    return job
+
+
+def confirm_cover_job(session: Session, job_id: str | UUID) -> Job:
+    """Atomically freeze one prepared cover for the serialized cloud queue."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if job.job_type is not JobType.COVER or job.status is not JobStatus.STAGING:
+        raise ValueError("cover is not awaiting confirmation")
+    normalized = dict(job.normalized_request_json or {})
+    staging = dict(normalized.get("cover_staging") or {})
+    state = staging.get("status")
+    if state == "confirmed":
+        raise ValueError("cover confirmation has already been consumed")
+    if state != "awaiting_confirmation":
+        raise ValueError("cover is not awaiting confirmation")
+    if not isinstance(normalized.get("resolved_target_duration_seconds"), (int, float)):
+        raise ValueError("cover source duration is not finalized")
+    staging.update({"status": "confirmed", "confirmed_at": utc_now().isoformat()})
+    normalized["cover_staging"] = staging
+    job.normalized_request_json = normalized
+    job.updated_at = utc_now()
+    session.flush()
+    return job
+
+
+def cancel_cover_staging(session: Session, job_id: str | UUID) -> Job:
+    """Cancel one unconfirmed schema-v2 cover while it is still staged."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if job.job_type is not JobType.COVER or job.status is not JobStatus.STAGING:
+        raise ValueError("cover is not awaiting confirmation")
+    normalized = job.normalized_request_json
+    if not isinstance(normalized, dict) or normalized.get("schema_version") != 2:
+        raise ValueError("cover cancellation is only supported for schema-v2 staging")
+    staging = normalized.get("cover_staging")
+    if not isinstance(staging, dict) or staging.get("status") != "awaiting_confirmation":
+        raise ValueError("cover is not awaiting confirmation")
+    transition_job(
+        session,
+        job.id,
+        JobStatus.FAILED,
+        error_code=COVER_STAGING_CANCELLED_CODE,
+        user_facing_error=COVER_STAGING_CANCELLED_MESSAGE,
+    )
+    return job
+
+
 def get_job(session: Session, job_id: str | UUID) -> Job | None:
     return session.get(Job, str(job_id))
+
+
+def check_schema_v1_rollback_readiness(session: Session) -> RollbackReadiness:
+    """Classify durable jobs without changing the database or external state."""
+
+    diagnostics: list[RollbackJobDiagnostic] = []
+    jobs = session.scalars(select(Job).order_by(Job.created_at, Job.id))
+    for job in jobs:
+        schema_version = _normalized_schema_version(job.normalized_request_json)
+        status = job.status.value
+        job_id = _bounded_job_id(job.id)
+        if schema_version != 2:
+            diagnostics.append(
+                RollbackJobDiagnostic(
+                    job_id=job_id,
+                    status=status,
+                    schema="v1" if schema_version == 1 else "unknown",
+                    classification="legacy_or_unknown",
+                    blocks_rollback=False,
+                )
+            )
+            continue
+
+        lifecycle_error = _v2_rollback_lifecycle_error(job)
+        if lifecycle_error is not None:
+            diagnostics.append(
+                RollbackJobDiagnostic(
+                    job_id=job_id,
+                    status=status,
+                    schema="v2",
+                    classification="malformed_v2_lifecycle",
+                    blocks_rollback=True,
+                )
+            )
+            continue
+
+        if job.status in _TERMINAL_JOB_STATUSES:
+            classification = "terminal"
+            blocks_rollback = False
+        elif (
+            job.job_type is JobType.COVER
+            and job.status is JobStatus.STAGING
+            and _cover_staging_status(job.normalized_request_json) == "awaiting_confirmation"
+        ):
+            classification = "unconfirmed_v2_cover_staging"
+            blocks_rollback = True
+        elif job.status in _NONTERMINAL_JOB_STATUSES:
+            classification = "nonterminal_v2"
+            blocks_rollback = True
+        else:
+            # A future/unknown enum value must not be treated as safe.
+            classification = "malformed_v2_lifecycle"
+            blocks_rollback = True
+        diagnostics.append(
+            RollbackJobDiagnostic(
+                job_id=job_id,
+                status=status,
+                schema="v2",
+                classification=classification,
+                blocks_rollback=blocks_rollback,
+            )
+        )
+    return RollbackReadiness(tuple(diagnostics))
+
+
+def _normalized_schema_version(value: Any) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    schema_version = value.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        return None
+    return schema_version
+
+
+def _bounded_job_id(value: Any) -> str:
+    text = str(value)
+    return text if len(text) <= 128 else text[:125] + "..."
+
+
+def _cover_staging_status(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    staging = value.get("cover_staging")
+    if not isinstance(staging, dict):
+        return None
+    status = staging.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _v2_rollback_lifecycle_error(job: Job) -> str | None:
+    """Return a bounded reason when a v2 lifecycle cannot be classified safely."""
+
+    normalized = job.normalized_request_json
+    if not isinstance(normalized, dict) or _normalized_schema_version(normalized) != 2:
+        return "schema-v2 request is not a JSON object"
+    if normalized.get("task_type") != job.job_type.value:
+        return "schema-v2 task type does not match the durable job"
+    if job.job_type is JobType.ORIGINAL:
+        if "cover_staging" in normalized:
+            return "original schema-v2 request contains cover staging metadata"
+        return None
+
+    staging = normalized.get("cover_staging", _MISSING)
+    if staging is _MISSING:
+        if job.status in {
+            JobStatus.QUEUED,
+            JobStatus.INGESTING,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+        }:
+            return None
+        return "cover schema-v2 request is missing staging metadata"
+    if not isinstance(staging, dict) or not set(staging).issubset(_COVER_STAGING_KEYS):
+        return "cover staging metadata is malformed"
+    staging_status = staging.get("status")
+    if staging_status not in _COVER_STAGING_STATUSES:
+        return "cover staging status is malformed"
+    for field_name in ("staged_at", "confirmed_at"):
+        value = staging.get(field_name)
+        if value is not None and (not isinstance(value, str) or not value or len(value) > 64):
+            return "cover staging timestamp is malformed"
+    if staging_status == "awaiting_confirmation":
+        if job.status is JobStatus.STAGING or job.status in _TERMINAL_JOB_STATUSES:
+            return None
+        return "unconfirmed cover staging has an inconsistent job status"
+    if job.status in {
+        JobStatus.STAGING,
+        JobStatus.CLOUD_QUEUED,
+        JobStatus.GENERATING,
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+    }:
+        return None
+    return "confirmed cover staging has an inconsistent job status"
 
 
 def transition_job(
@@ -364,15 +621,63 @@ def set_variation_runpod_result(
     attempt_id: int,
     result: dict[str, Any] | None,
     *,
+    project_to_output: bool = True,
     now: datetime | None = None,
 ) -> VariationAttempt:
     attempt = session.get(VariationAttempt, attempt_id)
     if attempt is None:
         raise KeyError(f"unknown variation attempt: {attempt_id}")
     attempt.runpod_result_json = result
+    job = get_job(session, attempt.job_id)
+    if job is not None and result is not None:
+        merged_job_result = dict(job.runpod_result_json or {})
+        merged_job_result.update(result)
+        job.runpod_result_json = merged_job_result
+        if project_to_output:
+            output_records = list(
+                session.scalars(
+                    select(Output).where(
+                        Output.job_id == attempt.job_id,
+                        Output.variation_index == attempt.variation_index,
+                    )
+                )
+            )
+            for output in output_records:
+                project_runpod_result_to_output(output, result)
     attempt.updated_at = _utc_timestamp(now)
     session.flush()
     return attempt
+
+
+def project_runpod_result_to_output(output: Output, result: dict[str, Any]) -> None:
+    """Project only bounded generation truth from a worker result onto an output."""
+
+    result_output = result.get("output")
+    if isinstance(result_output, dict):
+        seed_metadata = {
+            key: result_output[key]
+            for key in ("requested_seed", "effective_seed", "seed")
+            if key in result_output
+        }
+        if seed_metadata:
+            output.seed_metadata_json = seed_metadata
+
+    generation_metadata = {
+        key: result[key]
+        for key in (
+            "schema_version",
+            "profile_id",
+            "input",
+            "effective",
+            "generated_metadata",
+            "resolved_parameters",
+            "output",
+            "worker",
+        )
+        if key in result
+    }
+    if generation_metadata:
+        output.generation_metadata_json = generation_metadata
 
 
 def complete_variation_attempt(
