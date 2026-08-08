@@ -25,6 +25,7 @@ from ace_service.auth import (
     require_basic_auth,
     require_csrf,
 )
+from ace_service.campaign import CampaignError, CampaignStore
 from ace_service.config import ServiceSettings
 from ace_service.cover import remove_cover_source
 from ace_service.models import (
@@ -125,6 +126,7 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.post("/create", dependencies=[Depends(authenticated)])
     async def create_original(request: Request) -> Response:
+        _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
         form = dict(fields)
@@ -156,6 +158,7 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.post("/cover", dependencies=[Depends(authenticated)])
     async def create_cover(request: Request) -> Response:
+        _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
         form = dict(fields)
@@ -182,6 +185,7 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.post("/cover/{job_id}/confirm", dependencies=[Depends(authenticated)])
     async def confirm_cover(request: Request, job_id: str) -> Response:
+        _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
         with app.state.session_factory() as session:
@@ -301,6 +305,24 @@ def _enqueue(app: FastAPI, job_id: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="controller worker is unavailable",
+        ) from exc
+
+
+def _assert_public_enqueue_allowed(app: FastAPI) -> None:
+    """Fail closed while the private campaign maintenance gate is active."""
+
+    settings: ServiceSettings = app.state.settings
+    database = settings.campaign_database_path
+    if not database.is_file():
+        return
+    try:
+        store = CampaignStore.open_existing(database)
+        if store is not None:
+            store.require_submission_allowed()
+    except CampaignError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ordinary submissions are temporarily paused for operator maintenance",
         ) from exc
 
 

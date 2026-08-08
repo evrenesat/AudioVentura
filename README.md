@@ -56,6 +56,72 @@ The command exits zero only when no nonterminal or malformed schema-v2 state
 or unconfirmed cover staging is present. A nonzero or indeterminate result
 means the v2-capable controller and worker must remain active.
 
+Checkpoint 3 quality comparisons are local operator actions, separate from
+browser requests and the product database. Validate the fixed private fixture
+without contacting Runpod with:
+
+```text
+uv run python -m ace_service.quality_eval \
+  --manifest /srv/ace-service/data/evaluations/quality-fixture-v1/manifest.json \
+  --dry-run
+```
+
+Paid execution remains blocked until the campaign has fresh rate and billing
+boundary evidence plus the separately authorized worker, controller, and edge
+rollback artifacts.
+
+The private quality campaign keeps two distinct identities for every executed
+sample: the opaque campaign sample ID (for example `s-…`) that keys blinded
+score sheets, aliases, and reservations, and the product job ID, which is a
+generated UUID stored in the product database and durably linked to the
+campaign sample by the campaign store. No campaign sample ID is ever used as a
+worker `job_id`; the strict worker schema validates every job ID as a UUID.
+The strict v1/v2 compatibility smokes are expanded into complete worker
+envelopes and validated end-to-end against the real worker parser
+(`runpod_worker.schemas.WorkerRequest`) before any execution window opens.
+Score-sheet export, import, and finalization all enforce exact current
+scoreable-sample-set and pair coverage: a sample or pair declared after export
+causes import and finalization to reject the stale sheet even after that
+sample completes. The operator CLI persists deterministic screening
+advancement (`--advance --confirm`) from the two finalized screening sheets —
+the fresh explicit confirmation is mandatory before any campaign mutation,
+and a score-equivalence group that crosses the two-finalist cutoff is excluded
+in its entirety — and materializes the confirmation cases that
+`--execute --stage confirmation` then submits. Every executed sample gets a
+preassigned UUID product job that is crash-recoverable through a durable
+campaign submission intent, and windows close only on provider-observed
+zero-worker/zero-work Runpod `/health` evidence; `--status`, `--reconcile`,
+and `--verified-teardown` expose bounded recovery actions. Recovery actions
+run from frozen campaign/sample/submission-intent state and never load the
+external fixture manifest, so status, backup, reconciliation, and verified
+teardown stay usable even when the manifest is missing or corrupted.
+Every recovery action validates `--campaign-id` against the campaign
+database first: an unknown campaign is blocked before any backup file,
+product engine, controller worker, Home Ingest client, or Runpod client is
+created, and verified teardown rejects an active maintenance gate that
+belongs to a different campaign. Terminal attempts whose attributable
+compute is unknown keep their full original reservation counted in budget
+totals as `conservatively_retained` (never invented as executed compute)
+and may be closed by verified teardown only after provider-observed zero
+work is proven; in-flight/uncertain attempts stay `unresolved` with their
+full reservation and keep teardown and rollback blocked, and a failed,
+cancelled, unsubmitted, or completed terminal identity can never be
+rewritten into conflicting later evidence — only an uncertain attempt may
+advance to a compatible terminal outcome and only a completed sample with
+missing cost inputs may fill them in place, requiring any supplied output
+path, GPU, execution, reason, or status to match the recorded evidence and
+rejecting conflicts before any cost/reservation mutation. The campaign
+database schema (v3) constrains reservations to exactly `open`,
+`unresolved`, `conservatively_retained`, and `settled`, and migrates v1/v2
+stores to v3 as one atomic unit — a rejected migration leaves the source
+schema version, objects, rows, reservation state, timestamps, and storage
+child links unchanged — while refusing any unknown reservation state before
+status, admission, teardown, recovery, or rollback could omit it; confirmed
+`--reconcile` additionally settles the exact
+crash state that committed a reservation but never persisted a submission
+intent as proven unsubmitted, creating no product job and calling no
+provider.
+
 ### Runtime Architecture
 
 ```text

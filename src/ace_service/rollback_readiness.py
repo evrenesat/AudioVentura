@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from ace_service.campaign import CampaignError, CampaignStore
 from ace_service.repository import check_schema_v1_rollback_readiness
 
 
@@ -40,7 +41,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         engine = _create_read_only_engine(database)
         with Session(engine) as session:
-            readiness = check_schema_v1_rollback_readiness(session)
+            product_readiness = check_schema_v1_rollback_readiness(session)
     except (OSError, SQLAlchemyError, sqlite3.Error):
         print("rollback=indeterminate reason=database_unavailable", file=sys.stderr)
         return 2
@@ -48,19 +49,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         if engine is not None:
             engine.dispose()
 
-    for diagnostic in readiness.diagnostics:
+    campaign_safe = True
+    campaign_database = _default_campaign_database_path()
+    if campaign_database.exists():
+        try:
+            campaign_store = CampaignStore.open_existing(campaign_database)
+            if campaign_store is None:
+                campaign_safe = False
+                print("campaign=indeterminate reason=database_unavailable", file=sys.stderr)
+            else:
+                campaign_readiness = campaign_store.rollback_readiness()
+                for campaign_diagnostic in campaign_readiness.diagnostics:
+                    print(
+                        f"campaign_classification={campaign_diagnostic.classification} "
+                        f"campaign_detail={campaign_diagnostic.detail}"
+                    )
+                campaign_safe = campaign_readiness.safe
+        except (CampaignError, OSError, sqlite3.Error):
+            campaign_safe = False
+            print("campaign=indeterminate reason=database_unavailable", file=sys.stderr)
+
+    for diagnostic in product_readiness.diagnostics:
         print(
             f"job_id={diagnostic.job_id} status={diagnostic.status} "
             f"schema={diagnostic.schema} classification={diagnostic.classification}"
         )
-    outcome = "safe" if readiness.safe else "not-safe"
-    print(f"rollback={outcome} blockers={len(readiness.blockers)}")
-    return 0 if readiness.safe else 1
+    outcome = "safe" if product_readiness.safe and campaign_safe else "not-safe"
+    campaign_blockers = 0 if campaign_safe else 1
+    print(f"rollback={outcome} blockers={len(product_readiness.blockers) + campaign_blockers}")
+    return 0 if product_readiness.safe and campaign_safe else 1
 
 
 def _default_database_path() -> Path:
     data_root = os.environ.get("ACE_SERVICE_DATA_ROOT", "/srv/ace-service/data")
     return Path(data_root).expanduser() / "service.db"
+
+
+def _default_campaign_database_path() -> Path:
+    explicit = os.environ.get("ACE_EVALUATION_CAMPAIGN_DATABASE")
+    if explicit:
+        return Path(explicit).expanduser()
+    data_root = os.environ.get("ACE_SERVICE_DATA_ROOT", "/srv/ace-service/data")
+    return Path(data_root).expanduser() / "evaluations" / "quality-campaign.sqlite3"
 
 
 def _create_read_only_engine(database: Path) -> Engine:

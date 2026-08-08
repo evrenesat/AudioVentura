@@ -58,6 +58,66 @@ class RunpodHealth:
     details: dict[str, Any]
 
 
+# A campaign endpoint above this many workers or queued jobs is outside the
+# frozen contract; the gate fails closed instead of trusting an unknown shape.
+_MAX_HEALTH_COUNT = 10_000
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointWorkerCounts:
+    """Bounded validated worker/job counts from one Runpod health response."""
+
+    idle: int
+    running: int
+    queued: int
+    in_progress: int
+
+    @property
+    def active(self) -> int:
+        """Idle plus running workers are the zero-at-rest worker population."""
+        return self.idle + self.running
+
+    @property
+    def has_pending_work(self) -> bool:
+        return self.queued > 0 or self.in_progress > 0
+
+
+def _bounded_count(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RunpodResponseError(f"Runpod health field {name} is malformed")
+    if value > _MAX_HEALTH_COUNT:
+        raise RunpodResponseError(f"Runpod health field {name} is out of bounds")
+    return cast(int, value)
+
+
+def parse_worker_counts(health: RunpodHealth) -> EndpointWorkerCounts:
+    """Extract bounded zero-at-rest counts from the pinned Runpod /health contract.
+
+    The pinned contract reports ``workers`` (``idle``/``running``) and ``jobs``
+    (``inQueue``/``inProgress``) as non-negative integers.  Missing, boolean,
+    negative, oversized, or unknown structures are rejected so teardown can
+    never infer zero from a malformed or empty provider body.  The obsolete
+    ``jobs.queued``/``jobs.running`` shape is likewise rejected rather than
+    silently accepted as provider evidence.
+    """
+
+    details = health.details
+    workers = details.get("workers")
+    jobs = details.get("jobs")
+    if not isinstance(workers, Mapping) or not isinstance(jobs, Mapping):
+        raise RunpodResponseError("Runpod health response is missing the workers/jobs contract")
+    if "queued" in jobs or "running" in jobs:
+        raise RunpodResponseError(
+            "Runpod health response uses the obsolete jobs.queued/jobs.running shape"
+        )
+    return EndpointWorkerCounts(
+        idle=_bounded_count(workers.get("idle"), "workers.idle"),
+        running=_bounded_count(workers.get("running"), "workers.running"),
+        queued=_bounded_count(jobs.get("inQueue"), "jobs.inQueue"),
+        in_progress=_bounded_count(jobs.get("inProgress"), "jobs.inProgress"),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RunpodStatusResult:
     """Normalized status and bounded metadata from a Runpod job."""

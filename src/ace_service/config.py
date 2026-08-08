@@ -53,8 +53,23 @@ class DataPaths:
         return self.root / "logs"
 
     @property
+    def evaluations(self) -> Path:
+        return self.root / "evaluations"
+
+    @property
+    def campaign_database(self) -> Path:
+        return self.evaluations / "quality-campaign.sqlite3"
+
+    @property
     def all_directories(self) -> tuple[Path, ...]:
-        return (self.root, self.incoming, self.outputs, self.temporary, self.logs)
+        return (
+            self.root,
+            self.incoming,
+            self.outputs,
+            self.temporary,
+            self.logs,
+            self.evaluations,
+        )
 
     def job_incoming(self, job_id: str) -> Path:
         return self.incoming / job_id
@@ -265,6 +280,20 @@ class ServiceSettings(BaseSettings):
         ),
         gt=0,
     )
+    evaluation_campaign_database: Path | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "ACE_EVALUATION_CAMPAIGN_DATABASE", "evaluation_campaign_database"
+        ),
+    )
+    evaluation_media_retention_days: int = Field(
+        default=7,
+        validation_alias=AliasChoices(
+            "EVALUATION_MEDIA_RETENTION_DAYS", "evaluation_media_retention_days"
+        ),
+        ge=1,
+        le=365,
+    )
 
     @field_validator("host", "transfer_host")
     @classmethod
@@ -305,11 +334,22 @@ class ServiceSettings(BaseSettings):
                 raise ValueError(f"{field_name} still contains a configuration placeholder")
 
         self.data_root = self.data_root.expanduser().resolve()
+        if self.evaluation_campaign_database is not None:
+            campaign_database = self.evaluation_campaign_database.expanduser().resolve()
+            if not campaign_database.parent.is_relative_to(self.data_root):
+                raise ValueError("evaluation campaign database must remain under data_root")
+            self.evaluation_campaign_database = campaign_database
         return self
 
     @property
     def paths(self) -> DataPaths:
         return DataPaths(self.data_root)
+
+    @property
+    def campaign_database_path(self) -> Path:
+        """Return the dedicated, non-product quality campaign database path."""
+
+        return self.evaluation_campaign_database or self.paths.campaign_database
 
     def ensure_data_layout(self) -> DataPaths:
         """Create the controller directories with private permissions where possible."""

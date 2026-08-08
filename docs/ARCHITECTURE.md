@@ -42,6 +42,106 @@ legacy/unknown historical rows and valid terminal rows do not block. A
 nonzero or indeterminate result requires retaining the v2-capable controller
 and worker.
 
+## Checkpoint 3 quality campaign boundary
+
+Quality evaluation is an operator process, not a browser feature. The
+`ace_service.quality_eval` CLI validates the private fixed fixture, constructs
+the frozen ordered decision tree, and uses the existing durable controller
+queue/transfer adapter for any explicitly authorized execution. Its campaign
+SQLite database is deliberately separate from the product database because the
+ordered production migration runner is a Checkpoint 4 concern. The old release
+does not need to understand the campaign tables.
+
+The campaign store owns reservations, runtime observations, append-only
+provider billing evidence, blinded sample mappings, score sheets, execution
+windows, durable submission intents, and the submission-maintenance gate.
+Normal `/create`, `/cover`, and cover-confirmation mutations fail closed while
+a window is active, while authenticated reads and the scoped operator campaign
+bypass remain available. The rollback readiness command checks both the
+existing v2 job lifecycle and the campaign store: active windows,
+in-flight/uncertain samples, unresolved reservations, corrupt state, or a
+missing verified edge guard block a rollback to a controller that lacks the
+durable gate.
+
+Worker payload contracts are validated end-to-end from the campaign store to
+the strict worker schema. The compatibility smokes and every ordinary
+screening/confirmation sample are normalized into complete schema-v1 or
+schema-v2 envelopes, stored as `normalized_request_json`, and only then pass
+through `ControllerWorker._default_payload` (job ID, task type, variation
+index) and the submission boundary (transfer capabilities, submission nonce,
+cover source) to `runpod_worker.schemas.WorkerRequest.from_mapping`. A
+malformed fixture therefore fails at the real parser before any completion
+can hide it. Product job IDs are generated UUIDs, never the opaque campaign
+sample IDs; the product UUID is preassigned before either database commit and
+a bounded campaign submission intent (sample ID, reservation ID, exact
+product UUID, and a non-sensitive fingerprint of the frozen request) is
+persisted before the product row exists. Recovery creates or validates the
+product row against that frozen intent, so either crash order recovers one
+UUID job, one campaign link, and one reservation, and remote submission never
+starts before both durable records agree. `mark_sample_submitted` durably
+links each opaque sample to its UUID job ID and settles the matching
+reservation.
+
+Teardown is evidence-backed and fail-closed: the executable path parses the
+real Runpod `/health` contract (bounded non-negative worker counts and
+`jobs.inQueue`/`jobs.inProgress` work counts) and closes an execution window
+only with immutable, timestamped zero-at-rest evidence for the authorized
+endpoint, stored on the window record. While a window, gate, or pending
+submission intent is open, the operator uses the read-only `--status` action
+and the confirmed `--reconcile`/`--verified-teardown` actions; ordinary
+score, advancement, decision, and execute actions are rejected until recovery
+completes. These recovery actions (plus `--backup`) dispatch from frozen
+campaign/sample/submission-intent state in the campaign database and never
+load, hash, or rebuild the external fixture manifest, so an unavailable
+manifest cannot block the recovery path. Every recovery action validates the
+named campaign before acting, and `--verified-teardown` rejects an active
+gate belonging to a different campaign.
+
+Reservations distinguish four lifecycle states. `open` means reserved but not
+yet resolved; `unresolved` means an in-flight/uncertain reservation whose
+outcome is still unknown (uncertain/in-flight work is never financially
+resolved: it keeps its full immutable reservation counted in admission
+totals and continues to block teardown and rollback); `settled` carries a
+final estimate (an immutable executed-attempt estimate, zero for
+proven-never-submitted work, or zero for a proven-not-started cancellation);
+and `conservatively_retained` marks a durably terminal attempt (failed,
+cancelled with unknown start, or completed without cost evidence) whose
+attributable compute is unknown. A conservatively
+retained reservation keeps its full immutable original
+`reserved_micro_usd` counted in every later admission/budget total — recovery
+can never lower committed spend — without presenting the amount as estimated
+or billed compute. Verified teardown treats it as financially resolved only
+after the sample is durably terminal and provider-observed zero evidence
+passes; genuinely `open` or `unresolved` reservations still block teardown,
+rollback readiness, and ordinary mutations.
+
+Terminal identity and evidence are immutable and fail closed. Once a
+`failed`, `cancelled`, `unsubmitted`, or completed terminal record exists, a
+later conflicting status, output, GPU, execution, reason, or estimate is
+rejected instead of rewriting it. The only allowed advances are a narrowly
+compatible uncertain-to-terminal outcome (uncertain work may later
+reconcile to completed, failed, or cancelled, preserving prior compatible
+identity) and a completed sample with missing cost inputs filling those
+inputs in place while remaining `completed`, requiring any supplied output
+path, GPU, execution, reason, or status to match the recorded evidence and
+rejecting conflicts before any cost/reservation mutation; exact repeats
+stay idempotent. The campaign schema (v3) enforces the four reservation
+states with a SQLite `CHECK`, and migrates v1/v2 stores to v3 as one atomic
+unit — any rejected migration leaves the source schema version, objects,
+rows, reservation state, timestamps, and storage child links unchanged. Any
+existing database containing an unknown or corrupt reservation state is
+refused before it can serve status, admission, teardown, recovery, or
+rollback, and committed-spend, teardown, campaign-status/recovery, and
+rollback-readiness paths fail closed even if a foreign state is injected
+after open.
+
+Campaign billing stores the raw provider amount and immutable fetch evidence.
+Runpod endpoint responses are treated as USD only through the versioned source
+contract because they omit a currency field. Network-volume responses without a
+volume identifier remain account-wide evidence and are excluded from the
+service endpoint total. Native UTC buckets are never shifted or prorated into
+local-day claims.
+
 ## Checkpoint 9 operations
 
 The controller and home agent configure UTC rotating file logs below their

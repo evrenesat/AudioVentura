@@ -207,3 +207,116 @@ def test_uncertain_recovery_fails_without_automatic_resubmission(session) -> Non
         assert recovered.error_code == "uncertain_cloud_submission"
         assert recovered.current_runpod_job_id is None
     assert fake.submissions == 0
+
+
+def _health_details(
+    *,
+    idle: int = 0,
+    running: int = 0,
+    queued: int = 0,
+    in_progress: int = 0,
+) -> dict[str, object]:
+    # Representative documented Runpod /health body.  Only the workers block
+    # and the inQueue/inProgress job counts are required; the remaining job
+    # fields are tolerated provider contract.
+    return {
+        "workers": {"idle": idle, "running": running},
+        "jobs": {
+            "completed": 0,
+            "failed": 0,
+            "inProgress": in_progress,
+            "inQueue": queued,
+            "retried": 0,
+        },
+    }
+
+
+def _parse(**counts: int):
+    from ace_service.runpod_client import EndpointWorkerCounts, RunpodHealth, parse_worker_counts
+
+    counts_obj = parse_worker_counts(RunpodHealth(details=_health_details(**counts)))
+    assert isinstance(counts_obj, EndpointWorkerCounts)
+    return counts_obj
+
+
+def test_parse_health_zero_workers_is_zero_at_rest() -> None:
+    counts = _parse()
+    assert counts.active == 0
+    assert counts.has_pending_work is False
+
+
+def test_parse_health_active_and_pending_work() -> None:
+    idle = _parse(idle=1)
+    assert idle.active == 1
+    running = _parse(running=1)
+    assert running.active == 1
+    queued = _parse(queued=2)
+    assert queued.active == 0 and queued.has_pending_work is True
+    in_progress = _parse(in_progress=1)
+    assert in_progress.has_pending_work is True
+    both = _parse(idle=2, running=3, queued=1, in_progress=4)
+    assert both.active == 5
+    assert both.queued == 1 and both.in_progress == 4
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {},
+        {"workers": {"idle": 0}},
+        {"jobs": {"inQueue": 0, "inProgress": 0}},
+        {"workers": "zero", "jobs": {"inQueue": 0, "inProgress": 0}},
+        {"workers": {"idle": 0, "running": 0}, "jobs": []},
+        {"workers": {"idle": None, "running": 0}, "jobs": {"inQueue": 0, "inProgress": 0}},
+        {"workers": {"idle": True, "running": 0}, "jobs": {"inQueue": 0, "inProgress": 0}},
+        {"workers": {"idle": -1, "running": 0}, "jobs": {"inQueue": 0, "inProgress": 0}},
+        {"workers": {"idle": 0, "running": 10_001}, "jobs": {"inQueue": 0, "inProgress": 0}},
+        {"workers": {"idle": 0, "running": 0}, "jobs": {"inQueue": 0, "inProgress": "0"}},
+        {"workers": {"idle": 0, "running": 0}, "jobs": {"inQueue": 0, "inProgress": -2}},
+        {"workers": {"idle": 0, "running": 0}, "jobs": {"inQueue": 99_999_999, "inProgress": 0}},
+        # The obsolete invented snake/lowercase shape is never provider evidence.
+        {"workers": {"idle": 0, "running": 0}, "jobs": {"queued": 0, "running": 0}},
+        {
+            "workers": {"idle": 0, "running": 0},
+            "jobs": {"inQueue": 0, "inProgress": 0, "queued": 0},
+        },
+        {
+            "workers": {"idle": 0, "running": 0},
+            "jobs": {"inQueue": 0, "inProgress": 0, "running": 0},
+        },
+    ],
+)
+def test_parse_health_rejects_malformed_structures(details: dict[str, object]) -> None:
+    from ace_service.runpod_client import RunpodHealth, RunpodResponseError, parse_worker_counts
+
+    with pytest.raises(RunpodResponseError):
+        parse_worker_counts(RunpodHealth(details=details))
+
+
+def test_health_endpoint_returns_parsable_zero_at_rest() -> None:
+    async def scenario() -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "workers": {"idle": 0, "running": 0},
+                    "jobs": {
+                        "completed": 0,
+                        "failed": 0,
+                        "inProgress": 0,
+                        "inQueue": 0,
+                        "retried": 0,
+                    },
+                },
+            )
+        )
+        async with httpx.AsyncClient(base_url="https://runpod.test", transport=transport) as http:
+            client = RunpodClient(
+                "secret-key", "endpoint", base_url="https://runpod.test", http_client=http
+            )
+            from ace_service.runpod_client import parse_worker_counts
+
+            counts = parse_worker_counts(await client.health())
+            assert counts.active == 0 and counts.has_pending_work is False
+
+    _run(scenario())

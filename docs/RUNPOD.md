@@ -127,7 +127,38 @@ uv run ruff format --check runpod_worker
 GPU acceptance remains a deployment check: cold start the worker, generate
 20-second and 180-second originals, generate one prepared-MP3 cover, record
 initialization/queue/execution/peak-VRAM metrics, and confirm the endpoint
-returns to zero workers after idle timeout.
+returns to zero workers after idle timeout. The campaign teardown gate parses
+the endpoint `/health` response under a strict bounded contract
+(`workers.idle`/`workers.running` and `jobs.inQueue`/`jobs.inProgress` as
+non-negative integers, matching the documented Runpod response) and treats
+idle plus running workers as the active population; a window closes only when
+the provider reports zero active workers and zero queued/in-progress jobs.
+Missing, boolean, negative, oversized, unknown structures, and the obsolete
+invented `jobs.queued`/`jobs.running` shape are rejected so zero-at-rest is
+never inferred from a malformed or empty provider body. Operator `--status`,
+`--backup`, `--reconcile`, and `--verified-teardown` recovery actions run from
+frozen campaign/sample/submission-intent state in the campaign database and
+do not require the external fixture manifest to be present or readable. The
+teardown reservation invariant is unchanged in spirit: terminal
+unknown-cost attempts are `conservatively_retained` (full original
+reservation still counted in budget totals, never an invented estimate) and
+verified teardown may close them only after this documented zero response is
+proven for the authorized endpoint; in-flight/uncertain attempts stay
+`unresolved` with their full reservation and keep teardown and rollback
+blocked even with provider-zero evidence. Terminal identity and evidence are
+immutable: failed, cancelled, unsubmitted, and completed attempts reject
+conflicting later status/output/GPU/execution/reason/estimate records; only
+uncertain-to-compatible-terminal and completed-unavailable-to-completed-
+with-authoritative-cost advances are allowed (the completed fill requires
+any supplied output path, GPU, execution, reason, or status to match the
+recorded evidence, rejecting conflicts before any cost/reservation
+mutation), and both stay idempotent. The campaign database schema (v3)
+accepts exactly `open`, `unresolved`, `conservatively_retained`, and
+`settled` reservation states, migrates v1/v2 stores to v3 as one atomic unit
+— a rejected migration leaves the source schema version, objects, rows,
+reservation state, timestamps, and storage child links unchanged — and
+fails closed on any unknown state before status, admission, teardown,
+recovery, or rollback can omit it.
 
 ## Deployment acceptance record
 

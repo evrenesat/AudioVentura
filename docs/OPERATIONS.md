@@ -39,6 +39,169 @@ uv run python -m ace_service.transfer_main
 Do not delete `outputs/` during cleanup: completed outputs are retained by
 design.
 
+## Quality campaign dry-run and gate
+
+Run the Checkpoint 3 dry-run from the application release with the private
+fixture mounted:
+
+```text
+uv run python -m ace_service.quality_eval \
+  --manifest /srv/ace-service/data/evaluations/quality-fixture-v1/manifest.json \
+  --dry-run
+```
+
+The output reports the ordered minimum/maximum jobs and paid attempts, the
+worst-case reservation when a fresh rate catalog is supplied, and explicit
+reasons for any inadmissible stage. It does not contact Runpod. Do not run
+`--execute` until the operator has recorded the separate remote-change
+authorization named in the quality plan, a read-only billing boundary probe,
+fresh official Flex-rate evidence for every eligible GPU, the exact worker
+digest/rollback target, and the rendered authenticated edge rule.
+
+The campaign database is private and separate from `service.db`. Create its
+SQLite-API backup with the operator action before any paid window:
+
+```text
+uv run python -m ace_service.quality_eval \
+  --manifest /srv/ace-service/data/evaluations/quality-fixture-v1/manifest.json \
+  --campaign-id <opaque-id> --backup /srv/ace-service/backups/<opaque-id>.sqlite3
+```
+
+The operator must retain the active maintenance gate after a crash or uncertain
+Runpod state. Restore ordinary submissions only after every opaque sample is
+terminal or explicitly reconciled, the endpoint reports zero active workers,
+the UTC window is closed, and the edge rollback guard is recorded and
+verified. The rollback-readiness command is deliberately not a cleanup command;
+nonzero or indeterminate output requires the dual-version controller/worker to
+remain active.
+
+### Score lifecycle and deterministic advancement
+
+Export, import, and finalization all enforce exact current scoreable-set
+coverage: every incumbent/candidate/corrected-controls sample of the stage
+must be completed with output evidence, and the frozen sheet's `sample_order`
+and pair memberships must equal the current campaign state exactly. A sample
+declared after export — planned, completed, failed, or uncertain — or any
+stale/duplicate pair makes import and finalization reject the sheet
+deterministically; finalization also re-requires complete output evidence at
+freeze time.
+
+After both screening sheets are finalized, the operator advances with:
+
+```text
+uv run python -m ace_service.quality_eval \
+  --manifest /srv/ace-service/data/evaluations/quality-fixture-v1/manifest.json \
+  --campaign-db <campaign-db> --campaign-id <opaque-id> --advance --confirm
+```
+
+`--advance` requires both `--campaign-id` and the fresh explicit `--confirm`
+flag before it opens or mutates the campaign database; without `--confirm` it
+returns the bounded blocked exit and creates no event, sample, or campaign
+state. It accepts no finalist input: it derives per-task-type rankings from
+the two finalized sheets with the frozen severe-artifact rule and the exact
+cutoff-tie rule — a score-equivalence group that crosses the two-finalist
+cutoff is excluded in its entirety, so a three-way tie for first advances
+none, an exact two-way tie for first advances both, and a tie spanning
+positions two and three advances only an untied first-place candidate — then
+persists the exact finalist set and rankings as a durable `screening_advanced`
+event (repeating the identical confirmed invocation is idempotent; a
+conflicting set fails closed), materializes the confirmation cases (seed-one
+aliases reuse the completed screening samples; seeds two and three are new
+payable rows), and moves the campaign to `awaiting_confirmation`. Confirmation
+execution then runs with
+`--execute --stage confirmation`, which submits only the durable planned
+payable samples; the exact-fingerprint seed-one aliases are never submitted or
+charged twice.
+
+### Recovery: status, reconciliation, and verified teardown
+
+When a campaign window, maintenance gate, or pending submission intent is
+open, ordinary score, advancement, decision, and execute actions are rejected;
+`--backup` and read-only `--status` remain available. The operator inspects
+and resolves the interrupted state with three bounded CLI actions:
+
+```text
+uv run python -m ace_service.quality_eval \
+  --manifest <manifest> --campaign-db <campaign-db> --campaign-id <opaque-id> --status
+
+uv run python -m ace_service.quality_eval \
+  --manifest <manifest> --campaign-db <campaign-db> --campaign-id <opaque-id> \
+  --reconcile --confirm
+
+uv run python -m ace_service.quality_eval \
+  --manifest <manifest> --campaign-db <campaign-db> --campaign-id <opaque-id> \
+  --verified-teardown --confirm
+```
+
+`--status` opens only an existing campaign database and reports bounded opaque
+campaign, window, gate, reservation, and per-sample state plus whether product
+linkage and zero-worker evidence are complete; it never prints URLs, prompts,
+lyrics, capabilities, listener mappings, credentials, or raw provider bodies.
+
+All four recovery actions (`--status`, `--backup`, `--reconcile`, and
+`--verified-teardown`) dispatch before the fixture manifest is loaded, hashed,
+or rebuilt: they run from the frozen campaign/sample/submission-intent state
+in the campaign database, so a missing, removed, or corrupted manifest never
+blocks status, backup, reconciliation, or teardown while the maintenance gate
+is open. The `--manifest` argument is still required and validated for
+dry-run, execute, advancement, score-sheet, and decision modes, whose
+semantics depend on the frozen fixture.
+
+Every recovery action also validates the named campaign before acting: an
+unknown `--campaign-id` returns the bounded blocked result before any backup
+file, product database engine, controller worker, Home Ingest client, or
+Runpod client is created. `--backup` may still copy the whole SQLite database,
+but only after the named campaign is proven to exist — the ID is an operator
+target guard, not a per-campaign export filter. `--verified-teardown` returns
+`not_needed` only for a known campaign with no active gate belonging to it;
+an active gate owned by a different campaign is rejected, never closed and
+never reported as success.
+
+`--reconcile` first settles the exact pre-intent crash boundary: a frozen
+sample still `planned` with exactly one open compute reservation, no
+`submitted_at_utc`, no submission intent, and no product-job link proves no
+remote submission or product job existed, so it is atomically recorded as
+proven unsubmitted and its reservation settled at zero, with an auditable
+`pre_intent_reconciled` event — no product job is created and no provider is
+contacted. Any contradictory evidence for that boundary (a submitted
+timestamp, duplicate reservations, non-compute reservations) fails closed;
+samples with a job link or a submission intent belong to the intent-present
+phase below. It then resumes only the campaign's frozen UUID-linked product
+jobs through the ordinary controller polling/transfer boundary. Each pending
+submission intent completes its product-row/campaign linkage with the
+preassigned product UUID (either crash order, never a second product job),
+and every submitted/running/uncertain sample is driven to terminal or
+uncertain evidence. Unknown or conflicting product rows are refused and no
+new sample is admitted; repeating the action is idempotent.
+
+`--verified-teardown` settles no reservation by assumption. It obtains the
+validated Runpod `/health` evidence for the authorized endpoint and closes
+the exact open window only when every submitted sample is terminal, every
+reservation is financially resolved (settled, or conservatively retained for
+a terminal unknown-cost attempt), and the provider reports zero active
+workers and zero queued/in-progress jobs; otherwise it retains the
+maintenance gate and returns a bounded blocked result. A conservatively
+retained reservation never becomes an executed-attempt estimate: the full
+immutable original `reserved_micro_usd` keeps counting in later budget and
+admission totals, and only provider-observed zero plus a terminal sample lets
+verified teardown close it. In-flight/uncertain attempts stay `unresolved`
+with their full reservation and keep teardown and rollback blocked even with
+provider-zero evidence. Terminal identity is immutable: failed, cancelled,
+unsubmitted, and completed attempts reject conflicting later status, output,
+GPU, execution, reason, or estimate evidence; only an uncertain attempt may
+advance to a compatible terminal outcome, and a completed sample with
+missing cost inputs may fill them in place only when any supplied output
+path, GPU, execution, reason, or status matches the recorded evidence,
+rejecting conflicts before any cost/reservation mutation. The campaign
+database (schema v3) constrains reservations to exactly `open`,
+`unresolved`, `conservatively_retained`, and `settled`, migrates v1/v2
+stores to v3 as one atomic unit (a rejected migration leaves the source
+schema version, objects, rows, reservation state, timestamps, and storage
+child links unchanged), and fails closed on any unknown reservation state
+before status, admission, teardown, recovery, or rollback can omit it. Zero-at-rest is provider-observed and fail-closed:
+no product-job, sample, timing, or empty-response inference ever clears the
+gate, and genuinely `open` or `unresolved` reservations still block it.
+
 ## Tailscale and public HTTPS
 
 Join Hetzner and the home server to the same tailnet. Expose only the

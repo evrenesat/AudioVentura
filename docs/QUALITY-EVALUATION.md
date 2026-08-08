@@ -180,3 +180,173 @@ Each campaign result follows this bounded shape:
 The `not_run` baseline uses null measurements and a reason code rather than
 pretending that a local mock or an unauthenticated endpoint probe is a quality
 or cost observation.
+
+## Checkpoint 3 operator controls
+
+The local comparison command is `uv run python -m ace_service.quality_eval`.
+It has no HTTP route and its `--dry-run` path does not import or contact an
+inference client. It validates the frozen manifest and private media hash,
+expands the compatibility smokes, incumbent samples, cover grid, staged
+original/cover conditionals, and confirmation bounds, then reports minimum and
+maximum job/attempt counts. A dry-run with no fresh official Flex-rate catalog
+is intentionally successful but reports `admissible: false`; it never invents
+a reservation.
+
+Campaign state lives in the dedicated
+`$ACE_SERVICE_DATA_ROOT/evaluations/quality-campaign.sqlite3` database (or the
+explicit `ACE_EVALUATION_CAMPAIGN_DATABASE` path). It is separate from
+`service.db`, uses a versioned schema, transactions, bounded JSON, private
+permissions, and a SQLite-API backup command. A restart expires only stale
+leases. It retains active maintenance gates, open reservations, and uncertain
+samples until an operator reconciles them. Operator `--status`, `--backup`,
+`--reconcile`, and `--verified-teardown` run from this frozen durable state
+alone: they do not load, hash, or rebuild the external fixture manifest, so
+fixture expiry, removal, or corruption cannot block the recovery actions that
+must remain available while the maintenance gate is open.
+
+Execution requires a campaign ID, an explicit confirmation flag, fresh
+server-owned official Flex-rate evidence for every eligible GPU, proven
+Runpod billing interval semantics, and a separate authorization record naming
+the application commit, worker digest, endpoint/template, evaluation models,
+rollback target, blocked enqueue routes, and ceiling. The campaign opens a
+durable one-at-a-time window that blocks `POST /create`, `POST /cover`, and
+`POST /cover/{job_id}/confirm`; authenticated reads remain available. The
+operator bypass is scoped to the matching campaign ID. A failed fetch never
+lowers committed spend, and the window is cleared only after reconciliation,
+provider-observed zero workers, and verified teardown.
+
+Terminal attempts whose attributable compute is unknown are recorded as
+`conservatively_retained` reservations, distinct from an executed-attempt
+estimate (`settled`), an in-flight/uncertain reservation (`unresolved`), and
+the never-submitted or proven-not-started zero cases (also `settled`, at
+zero). A conservatively retained reservation keeps its full immutable
+original `reserved_micro_usd` in every later admission/budget total — so
+recovery can never lower committed spend — but is never presented as an
+estimate, an invoice value, or billed compute. Uncertain/in-flight work is
+not terminal for financial purposes: it stays `unresolved` with its full
+immutable reservation counted in admission totals and continues to block
+teardown and rollback, and only a later compatible terminal record (or a
+completed-unavailable record gaining authoritative cost inputs) may advance
+it — failed, cancelled, unsubmitted, and completed terminal identities are
+immutable and reject conflicting later status, output, GPU, execution,
+reason, or estimate evidence, and a completed-unavailable record may gain
+authoritative cost inputs only when any supplied output path, GPU,
+execution, reason, or status matches the recorded evidence, rejecting
+conflicts before any cost/reservation mutation. Verified teardown treats
+conservatively retained reservations as financially resolved only after the
+sample is durably terminal and provider-observed zero evidence passes;
+genuinely open/unresolved reservations and nonterminal samples still block
+teardown and rollback. The campaign schema (v3) constrains reservation
+states to the four declared values with a SQLite `CHECK`, migrates v1/v2
+stores to v3 as one atomic unit without losing IDs, links, amounts,
+timestamps, estimates, or reasons or any `storage_artifacts` child link (a
+rejected migration leaves the source database unchanged), and fails closed
+whenever an unknown or corrupt reservation state is observed at open or in
+committed-spend, teardown, campaign-status/recovery, and rollback-readiness
+paths.
+
+`--execute` now constructs the real executable submission path: it creates
+ordinary durable controller jobs in `service.db` through the repository job
+factory (`ace_service.repository.create_job`), storing complete strict worker
+v1/v2 envelopes for the compatibility smokes (full legacy generation, or v2
+generation plus profile and resolved parameters) and validating every stored
+envelope end-to-end through `ControllerWorker._default_payload` and the real
+`runpod_worker.schemas.WorkerRequest` parser. The product UUID is preassigned
+before either database commit and the campaign store persists a bounded
+submission intent (sample ID, reservation ID, exact product UUID, and a
+non-sensitive SHA-256 fingerprint of the frozen request) before the product
+row exists; recovery accepts an existing product row only when its job type,
+immutable normalized request, variation count, source semantics, and output
+format match the intent exactly, so either crash order recovers one UUID job,
+one campaign link, and one reservation and never submits remote work before
+both durable records agree. Product job IDs remain distinct from the opaque
+campaign sample IDs that key the campaign store; `mark_sample_submitted`
+durably links each opaque sample to its UUID job ID. Each job is driven
+through the controller's own `ControllerWorker.process_job` queue/transfer
+machinery (Runpod client plus the signed-transfer path), waits for terminal
+evidence before the next sample, and only then tears the window down at
+provider-observed zero workers: `_teardown` fetches and validates the real
+Runpod `/health` contract (workers `idle`/`running` and jobs `inQueue`/
+`inProgress` as bounded non-negative integers, matching the documented
+response; the obsolete `jobs.queued`/`jobs.running` shape is rejected) and
+closes the window only with immutable, timestamped zero-at-rest evidence for
+the authorized endpoint; malformed, unavailable, or nonzero evidence retains
+the maintenance gate, and reaching Python `finally` never clears the gate by
+itself.
+The `--stage screening|confirmation` selector runs the matching stage;
+confirmation covers the two new payable seeds and never resubmits the reused
+screening-seed sample. `--cover-source-url` supplies the canonical fixture
+source for cover jobs, and `--terminal-timeout-ms` bounds how long one job may
+stay uncertain before the campaign fails closed. A failed, cancelled, or
+uncertain attempt is never billed, even when worker evidence arrives later;
+only completed attempts with authoritative GPU/execution/rate evidence receive
+an immutable `estimated_compute` snapshot, and an unresolved reservation keeps
+the teardown gate active until an operator reconciles it. While a window,
+gate, or pending submission intent is open, `--status` and `--backup` remain
+available and `--reconcile`/`--verified-teardown` (both confirmed) resume
+frozen UUID-linked jobs and close the window on complete evidence; ordinary
+score, advancement, decision, and execute actions are rejected until recovery
+completes.
+
+The screening seed is confirmation seed one. A confirmation case whose
+exact fingerprint matches a completed screening sample reuses that sample
+(recorded as an opaque alias) instead of paying to regenerate it; the alias
+never creates a second reservation or submission. Reuse is refused for failed
+or uncertain screening samples, for role/seed/stage mismatches, and for any
+other executed fingerprint (contamination), so duplicate charging is
+impossible.
+
+Endpoint billing rows are stored as append-only observations. Runpod's endpoint
+response does not contain a currency field, so the parser stores `USD` as the
+explicit versioned source-contract value rather than as provider-returned data.
+Network-volume rows without a volume identifier are retained as account-wide
+evidence and are not presented or included as service spend. Provider totals
+remain unavailable until fixtures and a read-only live probe prove the exact
+half-open interval behavior.
+
+Score-sheet exports contain only randomized opaque IDs, the anchored rubric,
+and opaque pair choices, scoped per stage (`--stage screening|confirmation`).
+Technical settings and the hidden mapping stay in the private campaign store.
+Imports reject unknown/duplicate samples, altered rubrics, out-of-range
+values, missing pair preferences, and partial finalization. Export and
+finalization both require the complete generated-output evidence state: every
+incumbent/candidate/corrected-controls sample of that stage must be terminal
+with a recorded output path, so a planned, in-flight, failed, or output-less
+sample rejects the sheet deterministically. Import and finalization also
+enforce exact current scoreable coverage: the frozen sheet's `sample_order`
+must equal the current scoreable sample-ID set and its pair memberships must
+match the current candidate/incumbent pair structure. A scoreable sample
+declared after export — even one that later completes — or any stale or
+duplicate pair makes import and finalization reject the stale sheet, so a
+partial decision set can never be frozen. The backup command refuses a
+missing or just-created campaign database before any SQLite open, so a typo
+cannot produce an empty backup.
+
+The operator advances from screening to confirmation with the `--advance`
+action after both screening sheets are finalized. It requires the fresh
+explicit `--confirm` flag (without it the action returns the bounded blocked
+exit before opening or mutating the campaign database) and accepts no finalist
+input: per task type it derives the eligible candidates from the two finalized
+sheets with `rank_screening_candidates` (complete sets only, severe-artifact
+rule, deterministic candidate-ID ordering applied only after eligibility is
+decided, and the exact cutoff-tie rule: a score-equivalence group that crosses
+the two-finalist cutoff is excluded in its entirety, so a three-way tie for
+first advances none, an exact two-way tie for first advances both, and a tie
+spanning positions two and three advances only the untied first-place
+candidate), persists the exact finalist set and rankings as a durable
+`screening_advanced` event (an identical confirmed retry is idempotent; a
+conflicting finalist set or ranking fails closed), materializes the
+confirmation cases, and moves the campaign to
+`awaiting_confirmation`. Seed-one confirmation cases reuse the completed
+screening samples by exact fingerprint; seeds two and three are new payable
+rows that `--execute --stage confirmation` submits through the durable
+controller path while the aliases remain non-payable.
+
+`--decision` validates both finalized stages, unblinds the complete matched
+three-seed pairs (screening scores supply confirmation seed one), applies the
+frozen promotion gate per finalist, and persists one immutable
+`quality_decisions` record whose ID hashes the exact fixture, listener IDs,
+seeds per task, profiles, models, sample fingerprints, and both sheet hashes.
+Repeating the same finalization is idempotent; any conflicting decision for
+the same campaign fails closed. The comparison code never changes
+`fast-beta-v1` or any production default.
