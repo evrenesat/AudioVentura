@@ -1,5 +1,16 @@
 # Development Log
 
+## 2026-08-08
+
+- Recorded Checkpoint 1's application/deployment heads, private network
+  bindings, v1 schema and queue-recovery behavior, current `create_all()`
+  startup limitation, SQLite backup/restore rehearsal, and pre-edit test
+  baseline in `docs/CHECKPOINT-1-BASELINE.md`.
+- Added the fixed-input, blinded listener contract and USD 5 hard campaign
+  guard in `docs/QUALITY-EVALUATION.md`. Stored the CC0 fixture manifest and
+  honest no-run baseline result under the private data root; no evaluation
+  media or paid inference state is tracked in Git.
+
 ## 2026-08-07
 
 - Repaired the Runpod output boundary: removed the worker image's `ffmpeg`
