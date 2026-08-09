@@ -176,6 +176,10 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Response:
+        request_path = request.scope["path"]
+        root_path = request.scope.get("root_path", "")
+        if root_path and request_path.startswith(f"{root_path}/"):
+            request_path = request_path[len(root_path) :]
         response = cast(Response, await call_next(request))
         response.headers.setdefault(
             "Content-Security-Policy",
@@ -186,7 +190,7 @@ def register_web_routes(app: FastAPI) -> None:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "DENY")
-        if request.url.path.startswith("/static/"):
+        if request_path.startswith("/static/"):
             response.headers.setdefault("Cache-Control", "public, max-age=3600")
         else:
             response.headers.setdefault("Cache-Control", "no-store")
@@ -207,25 +211,36 @@ def register_web_routes(app: FastAPI) -> None:
         response = templates.TemplateResponse(
             request=request,
             name=name,
-            context={**context, "csrf_token": token},
+            context={
+                **context,
+                "csrf_token": token,
+                "urls": {
+                    "dashboard": _route_path(request, "dashboard"),
+                    "create": _route_path(request, "create_form"),
+                    "cover": _route_path(request, "cover_form"),
+                    "jobs": _route_path(request, "jobs"),
+                    "app_css": _route_path(request, "static", path="app.css"),
+                    "status_js": _route_path(request, "static", path="status.js"),
+                },
+            },
             status_code=response_status,
         )
         attach_csrf_cookie(request, response, token)
         return response
 
-    @app.get("/", dependencies=[Depends(authenticated)])
+    @app.get("/", dependencies=[Depends(authenticated)], name="dashboard")
     async def dashboard(request: Request) -> Response:
         with app.state.session_factory() as session:
             jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(20)))
-            job_views = [_job_view(job) for job in jobs]
+            job_views = [_job_view(request, job) for job in jobs]
         readiness = await _readiness(app)
         return render(request, "dashboard.html", {"jobs": job_views, "readiness": readiness})
 
-    @app.get("/create", dependencies=[Depends(authenticated)])
+    @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
         return render(request, "original_form.html", {"form": {}, "errors": []})
 
-    @app.post("/create", dependencies=[Depends(authenticated)])
+    @app.post("/create", dependencies=[Depends(authenticated)], name="create_original")
     async def create_original(request: Request) -> Response:
         _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
@@ -247,9 +262,12 @@ def register_web_routes(app: FastAPI) -> None:
             session.commit()
             job_id = job.id
         _enqueue(app, job_id)
-        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(
+            _route_path(request, "job_detail", job_id=job_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
-    @app.get("/cover", dependencies=[Depends(authenticated)])
+    @app.get("/cover", dependencies=[Depends(authenticated)], name="cover_form")
     async def cover_form(request: Request) -> Response:
         readiness = await _readiness(app, only={"home_ingest"})
         return render(
@@ -258,7 +276,7 @@ def register_web_routes(app: FastAPI) -> None:
             {"form": {}, "errors": [], "readiness": readiness},
         )
 
-    @app.post("/cover", dependencies=[Depends(authenticated)])
+    @app.post("/cover", dependencies=[Depends(authenticated)], name="create_cover")
     async def create_cover(request: Request) -> Response:
         _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
@@ -283,9 +301,16 @@ def register_web_routes(app: FastAPI) -> None:
             session.commit()
             job_id = job.id
         _enqueue(app, job_id)
-        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(
+            _route_path(request, "job_detail", job_id=job_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
-    @app.post("/cover/{job_id}/confirm", dependencies=[Depends(authenticated)])
+    @app.post(
+        "/cover/{job_id}/confirm",
+        dependencies=[Depends(authenticated)],
+        name="confirm_cover",
+    )
     async def confirm_cover(request: Request, job_id: str) -> Response:
         _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
@@ -301,9 +326,16 @@ def register_web_routes(app: FastAPI) -> None:
             capture_submission_quote(app, session, job)
             session.commit()
         _enqueue(app, job_id)
-        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(
+            _route_path(request, "job_detail", job_id=job_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
-    @app.post("/cover/{job_id}/cancel", dependencies=[Depends(authenticated)])
+    @app.post(
+        "/cover/{job_id}/cancel",
+        dependencies=[Depends(authenticated)],
+        name="cancel_cover",
+    )
     async def cancel_cover(request: Request, job_id: str) -> Response:
         fields = await parse_form(request)
         require_csrf(request, fields)
@@ -317,35 +349,44 @@ def register_web_routes(app: FastAPI) -> None:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
             session.commit()
         remove_cover_source(app.state.settings, job_id)
-        return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(
+            _route_path(request, "job_detail", job_id=job_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
-    @app.get("/jobs", dependencies=[Depends(authenticated)])
+    @app.get("/jobs", dependencies=[Depends(authenticated)], name="jobs")
     async def jobs(request: Request) -> Response:
         with app.state.session_factory() as session:
             job_views = [
-                _job_view(job)
+                _job_view(request, job)
                 for job in session.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))
             ]
         return render(request, "jobs.html", {"jobs": job_views})
 
-    @app.get("/jobs/{job_id}", dependencies=[Depends(authenticated)])
+    @app.get("/jobs/{job_id}", dependencies=[Depends(authenticated)], name="job_detail")
     async def job_detail(request: Request, job_id: str) -> Response:
         with app.state.session_factory() as session:
             job = get_job(session, job_id)
             if job is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
-            view = _job_view(job)
+            view = _job_view(request, job)
         return render(request, "job_detail.html", {"job": view})
 
-    @app.get("/jobs/{job_id}/status", dependencies=[Depends(authenticated)])
-    async def job_status(job_id: str) -> JSONResponse:
+    @app.get(
+        "/jobs/{job_id}/status",
+        dependencies=[Depends(authenticated)],
+        name="job_status",
+    )
+    async def job_status(request: Request, job_id: str) -> JSONResponse:
         with app.state.session_factory() as session:
             job = get_job(session, job_id)
             if job is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
-            return JSONResponse(_job_view(job), headers={"Cache-Control": "no-store"})
+            return JSONResponse(
+                _job_view(request, job), headers={"Cache-Control": "no-store"}
+            )
 
-    @app.get("/media/{output_id}", dependencies=[Depends(authenticated)])
+    @app.get("/media/{output_id}", dependencies=[Depends(authenticated)], name="media")
     async def media(output_id: int) -> FileResponse:
         output = _verified_output(app.state.settings, app.state.session_factory, output_id)
         return FileResponse(
@@ -355,7 +396,11 @@ def register_web_routes(app: FastAPI) -> None:
             content_disposition_type="inline",
         )
 
-    @app.get("/files/{output_id}/download", dependencies=[Depends(authenticated)])
+    @app.get(
+        "/files/{output_id}/download",
+        dependencies=[Depends(authenticated)],
+        name="download",
+    )
     async def download(output_id: int) -> FileResponse:
         path, record = _verified_output(app.state.settings, app.state.session_factory, output_id)
         return FileResponse(
@@ -498,7 +543,13 @@ def _validation_errors(exc: ValidationError) -> list[str]:
     return errors or ["Please correct the highlighted fields."]
 
 
-def _job_view(job: Job) -> dict[str, Any]:
+def _route_path(request: Request, name: str, **path_params: Any) -> str:
+    """Build one same-origin browser path through Starlette's named routes."""
+
+    return request.url_for(name, **path_params).path
+
+
+def _job_view(request: Request, job: Job) -> dict[str, Any]:
     attempts = sorted(job.variation_attempts, key=lambda item: item.variation_index)
     outputs = sorted(job.outputs, key=lambda item: (item.variation_index, item.result_index))
     completed_variations = sum(item.status is JobStatus.COMPLETED for item in attempts)
@@ -553,8 +604,12 @@ def _job_view(job: Job) -> dict[str, Any]:
         "started_at": _iso(job.started_at),
         "completed_at": _iso(job.completed_at),
         "elapsed_seconds": _elapsed(job),
+        "detail_url": _route_path(request, "job_detail", job_id=job.id),
+        "status_url": _route_path(request, "job_status", job_id=job.id),
+        "confirm_url": _route_path(request, "confirm_cover", job_id=job.id),
+        "cancel_url": _route_path(request, "cancel_cover", job_id=job.id),
         "attempts": [_attempt_view(item) for item in attempts],
-        "outputs": [_output_view(item) for item in outputs],
+        "outputs": [_output_view(request, item) for item in outputs],
     }
 
 
@@ -583,7 +638,7 @@ def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
     }
 
 
-def _output_view(output: Output) -> dict[str, Any]:
+def _output_view(request: Request, output: Output) -> dict[str, Any]:
     return {
         "id": output.id,
         "variation_index": output.variation_index,
@@ -591,8 +646,8 @@ def _output_view(output: Output) -> dict[str, Any]:
         "mime_type": output.mime_type,
         "byte_size": output.byte_size,
         "size_label": _size_label(output.byte_size),
-        "media_url": f"/media/{output.id}",
-        "download_url": f"/files/{output.id}/download",
+        "media_url": _route_path(request, "media", output_id=output.id),
+        "download_url": _route_path(request, "download", output_id=output.id),
         "created_at": _iso(output.created_at),
     }
 

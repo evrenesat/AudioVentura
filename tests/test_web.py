@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -155,6 +156,145 @@ def test_auth_matrix_csrf_and_security_headers(web_app) -> None:
         )
         assert accepted.status_code == 303
         assert accepted.headers["location"].startswith("/jobs/")
+
+
+def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -> None:
+    beta_settings = ServiceSettings(**{**settings.model_dump(), "service_root_path": "/beta"})
+    engine = create_database_engine(beta_settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    worker = FakeWorker()
+    app = create_app(
+        beta_settings,
+        session_factory=factory,
+        runpod_client=FakeRunpod(),
+        home_ingest_client=FakeHome(),
+        worker=worker,
+    )
+    payload = b"prefix-safe generated mp3"
+    output_id: int
+    original_job_id = "123e4567-e89b-12d3-a456-426614174001"
+    relative_path = f"{original_job_id}/variation-01.mp3"
+    output_path = beta_settings.paths.outputs / relative_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(payload)
+    with factory() as session:
+        create_job(
+            session,
+            job_type=JobType.ORIGINAL,
+            job_id=original_job_id,
+            variation_count=1,
+        )
+        output = create_output(
+            session,
+            job_id=original_job_id,
+            variation_index=1,
+            result_index=0,
+            relative_path=relative_path,
+            mime_type="audio/mpeg",
+            byte_size=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+        session.commit()
+        output_id = output.id
+
+    def assert_prefixed_browser_attributes(html: str) -> None:
+        values = re.findall(r'(?:href|src|action)="([^"]+)"', html)
+        assert values
+        assert all(value.startswith("/beta/") or value == "/beta/" for value in values)
+        assert all(not value.startswith("/beta/beta/") for value in values)
+
+    try:
+        with TestClient(app) as client:
+            assert client.get("/").status_code == 401
+            dashboard = client.get("/", auth=_auth(client))
+            assert dashboard.status_code == 200
+            assert dashboard.headers["cache-control"] == "no-store"
+            assert "default-src 'self'" in dashboard.headers["content-security-policy"]
+            assert_prefixed_browser_attributes(dashboard.text)
+            history = client.get("/jobs", auth=_auth(client))
+            assert history.status_code == 200
+            assert_prefixed_browser_attributes(history.text)
+
+            original_form = client.get("/create", auth=_auth(client))
+            cover_form = client.get("/cover", auth=_auth(client))
+            assert 'action="/beta/create"' in original_form.text
+            assert 'action="/beta/cover"' in cover_form.text
+            assert_prefixed_browser_attributes(original_form.text)
+            assert_prefixed_browser_attributes(cover_form.text)
+
+            token = client.cookies.get("ace_csrf")
+            assert token
+            missing_csrf = client.post(
+                "/create", auth=_auth(client), data={"description": "A valid song"}
+            )
+            assert missing_csrf.status_code == 403
+            accepted = client.post(
+                "/create",
+                auth=_auth(client),
+                data={"csrf_token": token, "description": "A valid song"},
+                follow_redirects=False,
+            )
+            assert accepted.status_code == 303
+            assert re.fullmatch(r"/beta/jobs/[0-9a-f-]+", accepted.headers["location"])
+
+            detail = client.get(f"/jobs/{original_job_id}", auth=_auth(client))
+            assert f'data-status-url="/beta/jobs/{original_job_id}/status"' in detail.text
+            assert f'src="/beta/media/{output_id}"' in detail.text
+            assert f'href="/beta/files/{output_id}/download"' in detail.text
+            assert_prefixed_browser_attributes(detail.text)
+
+            status_response = client.get(
+                f"/jobs/{original_job_id}/status", auth=_auth(client)
+            )
+            status_body = status_response.json()
+            assert status_body["detail_url"] == f"/beta/jobs/{original_job_id}"
+            assert status_body["status_url"] == f"/beta/jobs/{original_job_id}/status"
+            assert status_body["outputs"][0]["media_url"] == f"/beta/media/{output_id}"
+            assert status_body["outputs"][0]["download_url"] == (
+                f"/beta/files/{output_id}/download"
+            )
+
+            cover_token = client.cookies.get("ace_csrf")
+            assert cover_token
+            created_cover = client.post(
+                "/cover",
+                auth=_auth(client),
+                data={
+                    "csrf_token": cover_token,
+                    "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                    "target_style": "dreamy synthwave",
+                    "rights_confirmation": "true",
+                },
+                follow_redirects=False,
+            )
+            assert created_cover.status_code == 303
+            assert created_cover.headers["location"].startswith("/beta/jobs/")
+            cover_job_id = created_cover.headers["location"].rsplit("/", 1)[-1]
+            with factory() as session:
+                transition_job(session, cover_job_id, JobStatus.INGESTING)
+                finalize_cover_job_duration(session, cover_job_id, 42.0)
+                transition_job(session, cover_job_id, JobStatus.STAGING)
+                session.commit()
+            cover_detail = client.get(f"/jobs/{cover_job_id}", auth=_auth(client))
+            assert f'action="/beta/cover/{cover_job_id}/confirm"' in cover_detail.text
+            assert f'action="/beta/cover/{cover_job_id}/cancel"' in cover_detail.text
+            assert_prefixed_browser_attributes(cover_detail.text)
+
+            static = client.get("/beta/static/app.css", auth=_auth(client))
+            assert static.status_code == 200
+            assert static.headers["cache-control"] == "public, max-age=3600"
+            assert client.get(f"/beta/media/{output_id}").status_code == 401
+            assert (
+                client.get(f"/beta/media/{output_id}", auth=_auth(client)).content == payload
+            )
+            download = client.get(
+                f"/beta/files/{output_id}/download", auth=_auth(client)
+            )
+            assert download.status_code == 200
+            assert "attachment" in download.headers["content-disposition"]
+    finally:
+        engine.dispose()
 
 
 def test_form_validation_escaping_and_cover_rights(web_app) -> None:

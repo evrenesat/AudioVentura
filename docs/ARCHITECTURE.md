@@ -1,5 +1,20 @@
 # Architecture
 
+## Controller deployment prefix boundary
+
+`ACE_SERVICE_ROOT_PATH` is the controller's trusted ASGI public-path boundary.
+It defaults to empty for root deployment and may be set to one validated
+absolute prefix such as `/beta`. A reverse proxy strips that prefix before
+forwarding; FastAPI retains the unprefixed route table and uses the configured
+`root_path` only when generating browser-visible paths. HTML navigation, form
+actions, redirects, status polling, static assets, media, and downloads are
+all resolved through named routes on the current request, so generated paths
+contain the prefix exactly once. Request headers never select the prefix.
+
+This boundary applies only to the private controller/UI. The separately
+constructed public transfer app and its signed `/transfer/v1/*` capabilities
+are unchanged.
+
 ## Checkpoint 2 controls and compatibility
 
 New controller jobs persist a strict schema-v2 normalized request in the

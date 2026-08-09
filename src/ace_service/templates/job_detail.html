@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ job.job_type_label }} · ACE Service{% endblock %}
 {% block content %}
-<article class="job-detail" data-status-url="/jobs/{{ job.job_id }}/status">
+<article class="job-detail" data-status-url="{{ job.status_url }}">
   <p class="eyebrow">{{ job.job_type_label }}</p>
   <h1>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h1>
   <div class="detail-status"><span id="job-status" class="status status-{{ job.status }}">{{ job.status_label }}</span><span id="job-progress">{{ job.completed_variations }}/{{ job.variation_count }} variations</span></div>
@@ -9,8 +9,8 @@
   {% if job.status == 'staging' and job.cover_confirmation_status == 'awaiting_confirmation' %}
   <div class="banner warning"><strong>Source ready.</strong> Detected source duration: {{ job.source_duration_seconds }} seconds. Covers retain this duration in the beta; custom cover duration is deferred.
     <div data-cover-confirmation-form>
-      <form method="post" action="/cover/{{ job.job_id }}/confirm"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button" type="submit">Confirm and generate</button></form>
-      <form method="post" action="/cover/{{ job.job_id }}/cancel"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Cancel preparation</button></form>
+      <form method="post" action="{{ job.confirm_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button" type="submit">Confirm and generate</button></form>
+      <form method="post" action="{{ job.cancel_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Cancel preparation</button></form>
     </div>
   </div>
   {% endif %}
@@ -21,5 +21,5 @@
   <section><h2>Attempts</h2>{% if job.attempts %}<dl>{% for attempt in job.attempts %}<dt>Variation {{ attempt.variation_index }}</dt><dd>{{ attempt.status_label }}{% if attempt.effective_seed is not none %} · seed {{ attempt.effective_seed }}{% endif %}{% if attempt.duration_seconds is not none %} · {{ attempt.duration_seconds }} seconds{% endif %}{% if attempt.gpu %} · {{ attempt.gpu }}{% endif %}</dd>{% endfor %}</dl>{% else %}<p class="muted">Attempts will appear after confirmation/submission.</p>{% endif %}</section>
   <section><h2>Timing</h2><p class="muted">Started: {{ job.started_at or '—' }} · Completed: {{ job.completed_at or 'in progress' }}</p></section>
 </article>
-<script src="{{ url_for('static', path='status.js') }}" defer></script>
+<script src="{{ urls.status_js }}" defer></script>
 {% endblock %}

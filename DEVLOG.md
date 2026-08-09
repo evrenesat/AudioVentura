@@ -1,5 +1,19 @@
 # Development Log
 
+## 2026-08-09 (AudioVentura beta subpath, Checkpoint 2 execution)
+
+Added the validated `ACE_SERVICE_ROOT_PATH` ASGI setting and converted the
+private controller's browser contract to request-scoped named-route URLs.
+Configured `/beta` deployments now keep navigation, forms, redirects, status
+polling, static assets, media, downloads, and staged-cover actions below the
+prefix exactly once, while the empty default preserves root-path behavior.
+Transfer-app construction and signed transfer routes remain unchanged. Added
+focused validation and full browser-contract regressions. Checkpoint
+verification passed with 37 focused and 365 full-suite tests (five existing
+framework deprecation warnings); compileall and diff-check passed. No
+deployment, external service call, secret, generated media commit, or
+checkpoint commit was performed.
+
 ## 2026-08-09 (Checkpoint 4 preserved-v4 retry repair, cp04 v05)
 
 Preserved v4 endpoint and account-wide network-volume observations now retain

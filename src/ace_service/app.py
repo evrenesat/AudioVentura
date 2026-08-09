@@ -121,6 +121,7 @@ def create_app(
 
     app = FastAPI(
         title="ACE Service",
+        root_path=resolved_settings.service_root_path,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

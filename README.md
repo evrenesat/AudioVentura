@@ -12,6 +12,19 @@ Run the controller locally with configured credentials using:
 uv run python -m ace_service
 ```
 
+The controller defaults to the public origin root. To publish it below a
+prefix-stripping reverse proxy, configure the exact public prefix explicitly:
+
+```text
+ACE_SERVICE_ROOT_PATH=/beta uv run python -m ace_service
+```
+
+The proxy must remove `/beta` before forwarding while setting the ASGI request
+root path consistently. The service never derives this prefix from request
+headers. An empty `ACE_SERVICE_ROOT_PATH` preserves root deployment; `/`,
+trailing or repeated slashes, dot segments, URLs, query/fragment content,
+backslashes, and control characters are rejected at startup.
+
 The schema is versioned and never migrated at startup. Use the explicit
 commands with an explicit resolved database path (read-only status first,
 then offline upgrade under an exclusive sidecar lock after a verified backup):

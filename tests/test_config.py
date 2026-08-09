@@ -21,6 +21,7 @@ def _settings_kwargs(tmp_path: Path) -> dict[str, object]:
 def test_settings_resolve_and_create_private_layout(tmp_path: Path) -> None:
     settings = ServiceSettings(**_settings_kwargs(tmp_path))
 
+    assert settings.service_root_path == ""
     assert settings.data_root.is_absolute()
     paths = settings.ensure_data_layout()
     assert all(path.is_relative_to(settings.data_root) for path in paths.all_directories)
@@ -68,3 +69,36 @@ def test_transfer_public_base_url_requires_https_and_normalizes(tmp_path: Path) 
         transfer_public_base_url="https://transfer.test/",
     )
     assert settings.transfer_public_base_url == "https://transfer.test"
+
+
+def test_service_root_path_accepts_environment_prefix_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ACE_SERVICE_ROOT_PATH", "/beta")
+
+    settings = ServiceSettings(**_settings_kwargs(tmp_path))
+
+    assert settings.service_root_path == "/beta"
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "/",
+        "beta",
+        "/beta/",
+        "/beta//nested",
+        "/beta/./nested",
+        "/beta/../nested",
+        "/beta?mode=test",
+        "/beta#fragment",
+        "/beta\\nested",
+        "/beta\n",
+        "https://player.example/beta",
+    ),
+)
+def test_service_root_path_rejects_unsafe_or_unnormalized_values(
+    value: str, tmp_path: Path
+) -> None:
+    with pytest.raises(ValidationError, match="service root path"):
+        ServiceSettings(**_settings_kwargs(tmp_path), service_root_path=value)

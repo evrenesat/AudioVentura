@@ -26,6 +26,7 @@ _CREDENTIAL_FIELDS = (
     "runpod_endpoint_id",
 )
 _WORKER_RUNTIME_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SERVICE_ROOT_PATH_RE = re.compile(r"^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,10 @@ class ServiceSettings(BaseSettings):
     )
     port: int = Field(
         default=8000, validation_alias=AliasChoices("ACE_SERVICE_PORT", "port"), ge=1, le=65535
+    )
+    service_root_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("ACE_SERVICE_ROOT_PATH", "service_root_path"),
     )
     transfer_host: str = Field(
         default="127.0.0.1",
@@ -350,6 +355,27 @@ class ServiceSettings(BaseSettings):
         if len(set(normalized)) != len(normalized):
             raise ValueError("eligible GPU IDs must not contain duplicates")
         return normalized
+
+    @field_validator("service_root_path")
+    @classmethod
+    def validate_service_root_path(cls, value: str) -> str:
+        if value == "":
+            return value
+        if (
+            value == "/"
+            or value.endswith("/")
+            or "//" in value
+            or "\\" in value
+            or "?" in value
+            or "#" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or not _SERVICE_ROOT_PATH_RE.fullmatch(value)
+            or any(segment in {".", ".."} for segment in value.split("/"))
+        ):
+            raise ValueError(
+                "service root path must be empty or a normalized absolute path prefix"
+            )
+        return value
 
     @field_validator("runpod_worker_runtime_identity")
     @classmethod
