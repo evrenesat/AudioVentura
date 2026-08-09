@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.models import (
+    PROJECT_TITLE_MAX_LENGTH,
     JobStatus,
     JobType,
     OutputFormat,
@@ -19,16 +20,29 @@ from ace_service.models import (
 from ace_service.repository import (
     check_schema_v1_rollback_readiness,
     consume_transfer,
+    create_cover_job,
     create_job,
+    create_original_job,
     create_output,
+    create_project,
     get_active_transfer,
     get_job,
+    get_project,
     get_transfer_by_token,
     issue_transfer_capability,
+    list_project_jobs,
+    list_projects,
+    rename_project,
+    resolve_continuation_source,
     revoke_transfer,
 )
 from ace_service.rollback_readiness import main as rollback_readiness_main
-from ace_service.schemas import normalize_relative_path, resolve_relative_path
+from ace_service.schemas import (
+    CoverRequest,
+    OriginalSongRequest,
+    normalize_relative_path,
+    resolve_relative_path,
+)
 
 
 def test_sqlite_initialization_enables_required_pragmas(settings) -> None:
@@ -86,6 +100,110 @@ def test_sqlite_round_trip_for_job_output_and_transfer(session) -> None:
     consumed = consume_transfer(session, issued.capability.id)
     assert consumed.status is TransferStatus.CONSUMED
     assert get_active_transfer(session, "test-token") is None
+
+
+def test_project_repository_crud_ordering_and_bounded_titles(session) -> None:
+    older = create_project(
+        session,
+        project_id="project-older",
+        job_type=JobType.ORIGINAL,
+        title="  First title  ",
+    )
+    newer = create_project(
+        session,
+        project_id="project-newer",
+        job_type=JobType.COVER,
+        title="Second title",
+    )
+    older.updated_at = newer.updated_at + timedelta(seconds=1)
+    session.flush()
+
+    assert get_project(session, older.id) is older
+    assert [project.id for project in list_projects(session)] == [older.id, newer.id]
+    with pytest.raises(ValueError, match="immutable"):
+        older.job_type = JobType.COVER
+    assert rename_project(session, older.id, "  Renamed  ").title == "Renamed"
+    with pytest.raises(ValueError, match="must not be empty"):
+        rename_project(session, older.id, "  ")
+    with pytest.raises(ValueError, match="at most"):
+        rename_project(session, older.id, "x" * (PROJECT_TITLE_MAX_LENGTH + 1))
+    with pytest.raises(KeyError, match="unknown project"):
+        rename_project(session, "missing", "Valid")
+
+
+def test_job_creation_assigns_and_validates_project_membership(session) -> None:
+    original_request = OriginalSongRequest(description="  midnight strings  ")
+    first = create_original_job(session, original_request, job_id="original-first")
+    project = get_project(session, first.project_id)
+    assert project is not None
+    assert project.job_type is JobType.ORIGINAL
+    assert project.title == "midnight strings"
+
+    previous_activity = project.updated_at
+    second = create_original_job(
+        session,
+        OriginalSongRequest(description="edited version"),
+        job_id="original-second",
+        project=project.id,
+    )
+    assert second.project_id == project.id
+    assert project.updated_at >= previous_activity
+    first.created_at = first.created_at - timedelta(seconds=1)
+    session.flush()
+    assert [job.id for job in list_project_jobs(session, project.id)] == [second.id, first.id]
+
+    cover_project = create_project(
+        session, job_type=JobType.COVER, title="Cover project", project_id="cover-project"
+    )
+    before_count = session.execute(text("SELECT COUNT(*) FROM jobs")).scalar_one()
+    with pytest.raises(ValueError, match="job type"):
+        create_original_job(session, original_request, project=cover_project)
+    with pytest.raises(KeyError, match="unknown project"):
+        create_original_job(session, original_request, project="missing-project")
+    assert session.execute(text("SELECT COUNT(*) FROM jobs")).scalar_one() == before_count
+
+    cover = create_cover_job(
+        session,
+        CoverRequest(
+            youtube_url="https://www.youtube.com/watch?v=abc123",
+            target_style="dreamy synthwave",
+            rights_confirmation=True,
+        ),
+    )
+    assert cover.project.job_type is JobType.COVER
+    assert cover.project.title == "dreamy synthwave"
+
+
+def test_continuation_source_resolution_requires_compatible_same_type_membership(session) -> None:
+    source = create_original_job(
+        session,
+        OriginalSongRequest(description="continuation source"),
+        job_id="continuation-source",
+    )
+    assert (
+        resolve_continuation_source(session, source.id, expected_job_type=JobType.ORIGINAL).id
+        == source.id
+    )
+    with pytest.raises(ValueError, match="type"):
+        resolve_continuation_source(session, source.id, expected_job_type=JobType.COVER)
+    source.normalized_request_json = {"schema_version": 1, "task_type": "original"}
+    session.flush()
+    with pytest.raises(ValueError, match="schema-v2"):
+        resolve_continuation_source(session, source.id, expected_job_type=JobType.ORIGINAL)
+    with pytest.raises(KeyError, match="unknown continuation"):
+        resolve_continuation_source(session, "missing", expected_job_type=JobType.ORIGINAL)
+
+
+def test_low_level_job_creation_uses_bounded_deterministic_project_titles(session) -> None:
+    source_titled = create_job(
+        session,
+        job_type=JobType.COVER,
+        sanitized_source_title="  " + "s" * (PROJECT_TITLE_MAX_LENGTH + 5),
+        prompt="ignored",
+    )
+    fallback = create_job(session, job_type=JobType.COVER, prompt="  ")
+    assert source_titled.project.title == "s" * PROJECT_TITLE_MAX_LENGTH
+    assert fallback.project.title == "Cover"
 
 
 def test_transfer_expiry_and_revocation(session) -> None:

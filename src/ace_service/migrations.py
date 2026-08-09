@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
+PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
 _STATE_UNVERSIONED_LEGACY = "unversioned_legacy"
@@ -335,10 +336,38 @@ def _cp5_ddl(connection: sqlite3.Connection) -> None:
     )
 
 
+def _cp6_ddl(connection: sqlite3.Connection) -> None:
+    """Add durable projects and backfill one same-type project per existing job."""
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS projects ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "job_type VARCHAR(8) NOT NULL, "
+        f"title VARCHAR({PROJECT_TITLE_MAX_LENGTH}) NOT NULL, "
+        "created_at DATETIME NOT NULL, "
+        "updated_at DATETIME NOT NULL)"
+    )
+    job_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "project_id" not in job_columns:
+        connection.execute(
+            "ALTER TABLE jobs ADD COLUMN project_id VARCHAR(36) REFERENCES projects(id)"
+        )
+    connection.execute(
+        "INSERT OR IGNORE INTO projects (id, job_type, title, created_at, updated_at) "
+        "SELECT id, job_type, "
+        f"substr(COALESCE(NULLIF(trim(sanitized_source_title), ''), "
+        "NULLIF(trim(prompt), ''), CASE job_type WHEN 'original' THEN 'Original song' "
+        f"ELSE 'Cover' END), 1, {PROJECT_TITLE_MAX_LENGTH}), created_at, updated_at FROM jobs"
+    )
+    connection.execute("UPDATE jobs SET project_id = id WHERE project_id IS NULL")
+    connection.execute("CREATE INDEX IF NOT EXISTS ix_jobs_project_id ON jobs (project_id)")
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
     expected_tables = {
+        "projects",
         "submission_quotes",
         "billing_observations",
         "billing_projections",
@@ -358,6 +387,7 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     if missing_tables:
         raise MigrationError(f"migrated schema is missing tables: {sorted(missing_tables)}")
     required_table_columns = {
+        "projects": {"id", "job_type", "title", "created_at", "updated_at"},
         "submission_quotes": {
             "model_identity",
             "highest_trusted_hourly_rate_usd",
@@ -401,6 +431,26 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     }
     if "ix_billing_observations_evidence_checksum" not in observation_indexes:
         raise MigrationError("migrated schema is missing billing evidence checksum index")
+    job_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "project_id" not in job_columns:
+        raise MigrationError("migrated schema jobs table is missing project_id")
+    job_indexes = {str(row[1]) for row in connection.execute("PRAGMA index_list(jobs)").fetchall()}
+    if "ix_jobs_project_id" not in job_indexes:
+        raise MigrationError("migrated schema is missing the job membership index")
+    invalid_membership = connection.execute(
+        "SELECT COUNT(*) FROM jobs LEFT JOIN projects ON projects.id = jobs.project_id "
+        "WHERE jobs.project_id IS NULL OR projects.id IS NULL "
+        "OR projects.job_type != jobs.job_type"
+    ).fetchone()
+    if invalid_membership is None or int(invalid_membership[0]) != 0:
+        raise MigrationError("migrated schema contains invalid project membership")
+    invalid_projects = connection.execute(
+        "SELECT COUNT(*) FROM projects WHERE job_type NOT IN ('original', 'cover') "
+        "OR trim(title) = '' OR length(title) > ?",
+        (PROJECT_TITLE_MAX_LENGTH,),
+    ).fetchone()
+    if invalid_projects is None or int(invalid_projects[0]) != 0:
+        raise MigrationError("migrated schema contains invalid project records")
     existing_columns = {
         str(row[1])
         for row in connection.execute("PRAGMA table_info(variation_attempts)").fetchall()
@@ -496,7 +546,9 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             f"(state={state}, path hash {report['path_hash']}); restore the verified "
             "pre-upgrade backup before retrying"
         )
-    if state == _STATE_UNKNOWN_NEWER or (state == _STATE_OLDER_VERSION and report["version"] != 4):
+    if state == _STATE_UNKNOWN_NEWER or (
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5}
+    ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
             f"which has no migration path to {CURRENT_SCHEMA_VERSION} "
@@ -533,7 +585,9 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             connection.execute("BEGIN IMMEDIATE")
             if state == _STATE_UNVERSIONED_LEGACY:
                 _cp4_ddl(connection)
-            _cp5_ddl(connection)
+            if state == _STATE_UNVERSIONED_LEGACY or report["version"] == 4:
+                _cp5_ddl(connection)
+            _cp6_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

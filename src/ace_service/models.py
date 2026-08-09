@@ -17,7 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy import Enum as SqlEnum
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, validates
 from sqlalchemy.types import TypeDecorator
 
 
@@ -127,10 +127,38 @@ class Base(DeclarativeBase):
     pass
 
 
+PROJECT_TITLE_MAX_LENGTH = 160
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_type: Mapped[JobType] = mapped_column(_enum_type(JobType), nullable=False)
+    title: Mapped[str] = mapped_column(String(PROJECT_TITLE_MAX_LENGTH), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    jobs: Mapped[list[Job]] = relationship(back_populates="project")
+
+    @validates("job_type")
+    def _keep_job_type_immutable(self, key: str, value: JobType) -> JobType:
+        del key
+        current = self.__dict__.get("job_type")
+        if current is not None and current != value:
+            raise ValueError("project job type is immutable")
+        return value
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     job_type: Mapped[JobType] = mapped_column(_enum_type(JobType), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
         _enum_type(JobStatus), nullable=False, default=JobStatus.QUEUED
@@ -162,6 +190,7 @@ class Job(Base):
         UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    project: Mapped[Project] = relationship(back_populates="jobs")
     outputs: Mapped[list[Output]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )

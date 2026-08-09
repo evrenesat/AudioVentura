@@ -109,6 +109,27 @@ def _prepare_v4_database(path: Path) -> None:
         connection.close()
 
 
+def _prepare_v5_database(path: Path) -> None:
+    """Apply the production-shaped v5 DDL and ready marker."""
+
+    import ace_service.migrations as migrations_module
+
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        migrations_module._create_schema_version_table(connection)
+        migrations_module._cp4_ddl(connection)
+        migrations_module._cp5_ddl(connection)
+        connection.execute(
+            "INSERT INTO schema_version "
+            "(singleton, version, status, started_at, completed_at) "
+            "VALUES (1, 5, 'ready', '2026-08-08T00:00:00Z', '2026-08-08T00:00:00Z')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class TestStatusClassification:
     def test_status_is_read_only_for_legacy_database(self, legacy_database_path: Path) -> None:
         report = migration_status(str(legacy_database_path))
@@ -197,6 +218,7 @@ class TestUpgrade:
             "gpu_rate_catalog",
             "runtime_calibrations",
             "billing_lease",
+            "projects",
         }
         assert _tables(legacy_database_path) == expected_tables
         assert {
@@ -218,6 +240,132 @@ class TestUpgrade:
         assert "ix_billing_observations_evidence_checksum" in _indexes(
             legacy_database_path, "billing_observations"
         )
+        assert "project_id" in _columns(legacy_database_path, "jobs")
+        assert "ix_jobs_project_id" in _indexes(legacy_database_path, "jobs")
+
+    def test_v5_to_v6_backfills_projects_and_preserves_historical_evidence(
+        self, legacy_database_path: Path
+    ) -> None:
+        _prepare_v5_database(legacy_database_path)
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            jobs = (
+                ("original-title", "original", "completed", None, "prompt ignored", "Source title"),
+                ("original-prompt", "original", "failed", None, "  Prompt title  ", None),
+                ("original-label", "original", "queued", None, "   ", None),
+                ("original-long", "original", "queued", None, "x" * 200, None),
+                ("cover-label", "cover", "failed", "https://youtu.be/a", None, None),
+            )
+            for offset, (job_id, job_type, status, source_url, prompt, source_title) in enumerate(
+                jobs
+            ):
+                timestamp = f"2026-07-0{offset + 1}T00:00:00Z"
+                connection.execute(
+                    "INSERT INTO jobs (id, job_type, status, source_url, "
+                    "sanitized_source_title, prompt, output_format, variation_count, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'mp3', 1, ?, ?)",
+                    (
+                        job_id,
+                        job_type,
+                        status,
+                        source_url,
+                        source_title,
+                        prompt,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            connection.execute(
+                "INSERT INTO variation_attempts (job_id, variation_index, status, runpod_job_id, "
+                "execution_ms, hourly_rate_usd, evidence_status, created_at, updated_at) "
+                "VALUES ('original-title', 1, 'completed', 'runpod-1', 1234, '0.75', "
+                "'recorded', '2026-07-01T00:00:00Z', '2026-07-01T01:00:00Z')"
+            )
+            connection.execute(
+                "INSERT INTO outputs (job_id, variation_index, result_index, relative_path, "
+                "mime_type, byte_size, sha256, created_at) VALUES "
+                "('original-title', 1, 0, 'result.mp3', 'audio/mpeg', 42, ?, "
+                "'2026-07-01T01:00:00Z')",
+                ("a" * 64,),
+            )
+            job_columns_before = [
+                row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            ]
+            jobs_before = connection.execute(
+                f"SELECT {', '.join(job_columns_before)} FROM jobs ORDER BY id"
+            ).fetchall()
+            attempts_before = connection.execute(
+                "SELECT * FROM variation_attempts ORDER BY id"
+            ).fetchall()
+            outputs_before = connection.execute("SELECT * FROM outputs ORDER BY id").fetchall()
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = migration_upgrade(str(legacy_database_path))
+        assert result == {
+            "path_hash": database_identity_hash(str(legacy_database_path)),
+            "state": "exact_expected",
+            "version": CURRENT_SCHEMA_VERSION,
+            "changed": True,
+        }
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            assert (
+                connection.execute(
+                    f"SELECT {', '.join(job_columns_before)} FROM jobs ORDER BY id"
+                ).fetchall()
+                == jobs_before
+            )
+            assert connection.execute(
+                "SELECT * FROM variation_attempts ORDER BY id"
+            ).fetchall() == (attempts_before)
+            assert (
+                connection.execute("SELECT * FROM outputs ORDER BY id").fetchall() == outputs_before
+            )
+            assert connection.execute("SELECT id, project_id FROM jobs ORDER BY id").fetchall() == [
+                ("cover-label", "cover-label"),
+                ("original-label", "original-label"),
+                ("original-long", "original-long"),
+                ("original-prompt", "original-prompt"),
+                ("original-title", "original-title"),
+            ]
+            assert connection.execute(
+                "SELECT id, job_type, title FROM projects ORDER BY id"
+            ).fetchall() == [
+                ("cover-label", "cover", "Cover"),
+                ("original-label", "original", "Original song"),
+                ("original-long", "original", "x" * 160),
+                ("original-prompt", "original", "Prompt title"),
+                ("original-title", "original", "Source title"),
+            ]
+        finally:
+            connection.close()
+        assert _integrity_ok(legacy_database_path)
+
+    def test_v5_upgrade_failure_rolls_back_projects_and_marks_failed(
+        self, legacy_database_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ace_service.migrations as migrations_module
+
+        _prepare_v5_database(legacy_database_path)
+        cp6_ddl = migrations_module._cp6_ddl
+
+        def injected_failure(connection: sqlite3.Connection) -> None:
+            cp6_ddl(connection)
+            raise sqlite3.OperationalError("injected v6 migration failure")
+
+        monkeypatch.setattr(migrations_module, "_cp6_ddl", injected_failure)
+        with pytest.raises(MigrationError, match="rolled back"):
+            migration_upgrade(str(legacy_database_path))
+        assert "projects" not in _tables(legacy_database_path)
+        assert "project_id" not in _columns(legacy_database_path, "jobs")
+        assert _schema_version_row(legacy_database_path) == (
+            CURRENT_SCHEMA_VERSION,
+            "migration_failed",
+        )
+        with pytest.raises(MigrationError, match="durably incomplete"):
+            migration_upgrade(str(legacy_database_path))
 
     @pytest.mark.parametrize(
         ("resource_type", "grouping_key", "is_network_volume", "source_contract"),

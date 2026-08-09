@@ -27,6 +27,7 @@ from ace_service.costs import (
 from ace_service.models import (
     ATTEMPT_UNAVAILABLE_REASONS,
     EVIDENCE_STATUSES,
+    PROJECT_TITLE_MAX_LENGTH,
     QUOTE_UNAVAILABLE_REASONS,
     BillingObservation,
     BillingProjection,
@@ -36,6 +37,7 @@ from ace_service.models import (
     JobType,
     Output,
     OutputFormat,
+    Project,
     RuntimeCalibration,
     SubmissionQuote,
     TransferCapability,
@@ -94,6 +96,119 @@ def _id_string(value: str | UUID | None) -> str:
     return str(value or uuid4())
 
 
+def _project_title(value: str) -> str:
+    title = value.strip()
+    if not title:
+        raise ValueError("project title must not be empty")
+    if len(title) > PROJECT_TITLE_MAX_LENGTH:
+        raise ValueError(f"project title must be at most {PROJECT_TITLE_MAX_LENGTH} characters")
+    return title
+
+
+def _default_project_title(
+    job_type: JobType, *, sanitized_source_title: str | None, prompt: str | None
+) -> str:
+    for candidate in (sanitized_source_title, prompt):
+        if candidate is not None and candidate.strip():
+            return candidate.strip()[:PROJECT_TITLE_MAX_LENGTH]
+    return "Original song" if job_type is JobType.ORIGINAL else "Cover"
+
+
+def create_project(
+    session: Session,
+    *,
+    job_type: JobType,
+    title: str,
+    project_id: str | UUID | None = None,
+) -> Project:
+    project = Project(
+        id=_id_string(project_id),
+        job_type=job_type,
+        title=_project_title(title),
+    )
+    session.add(project)
+    session.flush()
+    return project
+
+
+def get_project(session: Session, project_id: str | UUID) -> Project | None:
+    return session.get(Project, str(project_id))
+
+
+def list_projects(session: Session) -> list[Project]:
+    return list(session.scalars(select(Project).order_by(Project.updated_at.desc(), Project.id)))
+
+
+def rename_project(session: Session, project_id: str | UUID, title: str) -> Project:
+    project = get_project(session, project_id)
+    if project is None:
+        raise KeyError(f"unknown project: {project_id}")
+    project.title = _project_title(title)
+    project.updated_at = utc_now()
+    session.flush()
+    return project
+
+
+def list_project_jobs(session: Session, project_id: str | UUID) -> list[Job]:
+    if get_project(session, project_id) is None:
+        raise KeyError(f"unknown project: {project_id}")
+    return list(
+        session.scalars(
+            select(Job)
+            .where(Job.project_id == str(project_id))
+            .order_by(Job.created_at.desc(), Job.id.desc())
+        )
+    )
+
+
+def resolve_continuation_source(
+    session: Session, job_id: str | UUID, *, expected_job_type: JobType
+) -> Job:
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown continuation source: {job_id}")
+    project = get_project(session, job.project_id)
+    if project is None:
+        raise ValueError("continuation source is missing its project")
+    if job.job_type is not expected_job_type or project.job_type is not job.job_type:
+        raise ValueError("continuation source type does not match its project or request")
+    normalized = job.normalized_request_json
+    if (
+        not isinstance(normalized, dict)
+        or normalized.get("schema_version") != 2
+        or normalized.get("task_type") != job.job_type.value
+    ):
+        raise ValueError("continuation source is not schema-v2 compatible")
+    return job
+
+
+def _resolve_job_project(
+    session: Session,
+    *,
+    job_type: JobType,
+    project: Project | str | UUID | None,
+    sanitized_source_title: str | None,
+    prompt: str | None,
+) -> Project:
+    if project is None:
+        return create_project(
+            session,
+            job_type=job_type,
+            title=_default_project_title(
+                job_type,
+                sanitized_source_title=sanitized_source_title,
+                prompt=prompt,
+            ),
+        )
+    project_id = project.id if isinstance(project, Project) else str(project)
+    persisted = get_project(session, project_id)
+    if persisted is None:
+        raise KeyError(f"unknown project: {project_id}")
+    if persisted.job_type is not job_type:
+        raise ValueError("project job type does not match the new job")
+    return persisted
+
+
 def _token_sha256(token: str) -> str:
     if not token:
         raise ValueError("transfer token must not be empty")
@@ -129,13 +244,22 @@ def create_job(
     variation_count: int = 1,
     normalized_request_json: dict[str, Any] | None = None,
     job_id: str | UUID | None = None,
+    project: Project | str | UUID | None = None,
 ) -> Job:
     if variation_count < 1 or variation_count > 4:
         raise ValueError("variation_count must be between 1 and 4")
     if cover_strength is not None and not 0 <= cover_strength <= 1:
         raise ValueError("cover_strength must be between 0 and 1")
+    persisted_project = _resolve_job_project(
+        session,
+        job_type=job_type,
+        project=project,
+        sanitized_source_title=sanitized_source_title,
+        prompt=prompt,
+    )
     job = Job(
         id=_id_string(job_id),
+        project_id=persisted_project.id,
         job_type=job_type,
         status=JobStatus.QUEUED,
         source_url=source_url,
@@ -151,6 +275,7 @@ def create_job(
         normalized_request_json=normalized_request_json,
     )
     session.add(job)
+    persisted_project.updated_at = utc_now()
     session.flush()
     return job
 
@@ -160,6 +285,7 @@ def create_original_job(
     request: OriginalSongRequest,
     *,
     job_id: str | UUID | None = None,
+    project: Project | str | UUID | None = None,
 ) -> Job:
     """Persist one validated original-song request before it is enqueued."""
 
@@ -172,6 +298,7 @@ def create_original_job(
         variation_count=request.variation_count,
         normalized_request_json=request.to_normalized_request_json(),
         job_id=job_id,
+        project=project,
     )
 
 
@@ -181,6 +308,7 @@ def create_cover_job(
     *,
     rights_confirmation_at: datetime | None = None,
     job_id: str | UUID | None = None,
+    project: Project | str | UUID | None = None,
 ) -> Job:
     """Persist one validated cover request before home ingestion is queued."""
 
@@ -199,6 +327,7 @@ def create_cover_job(
         variation_count=request.variation_count,
         normalized_request_json=request.to_normalized_request_json(),
         job_id=job_id,
+        project=project,
     )
 
 
