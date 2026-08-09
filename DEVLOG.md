@@ -1,5 +1,141 @@
 # Development Log
 
+## 2026-08-09 (Checkpoint 4 preserved-v4 retry repair, cp04 v05)
+
+Preserved v4 endpoint and account-wide network-volume observations now retain
+their original row identity on exact post-v5 retries, including non-current
+historical values. Compatibility matching is limited to the complete native
+bucket, complete evidence, and canonical UTC fetch time; it neither hydrates
+nor rewrites immutable observation evidence. Production-shaped A@t1/B@t2
+migration regressions prove repeated retries preserve both rows, freshness,
+projection values, and endpoint/network separation. No live or paid provider
+request, deployment, external message, production-default change, home-ingest
+change, commit, or checkpoint sign-off was performed. Verification: focused
+CP4 matrix = 180 passed; full controller/worker matrix = 411 passed (five
+existing framework deprecation warnings); direct offline billing probes = 9
+passed; retained CP4 regressions = 17 passed (one existing framework
+deprecation warning). Ruff, format, mypy, and diff-check passed.
+
+## 2026-08-08 (Checkpoint 4 repair overlay, cp04 v04)
+
+Billing exact-repeat detection is now relative to the current endpoint or
+account-wide network-volume projection. Separate value and fetch-event sha256
+identities preserve A@t1 -> B@t2 -> A@t3 as three immutable changes while
+making retries of each changed event idempotent; the retained A@t1, identical
+A@t3, older B@t2 sequence still stores only A@t1/B@t2 and projects A@t3. The
+ordered additive v4-to-v5 migration adds nullable identity columns and an index
+without rewriting existing observations, rolls back injected failures, and
+refuses automatic retry after its durable failure marker. No live or paid
+provider request, deployment, external message, production-default change,
+home-ingest change, commit, or checkpoint sign-off was performed. Verification:
+focused CP4 matrix = 179 passed; full controller/worker matrix = 410 passed
+(five existing framework deprecation warnings); direct v04 offline probe groups
+= 7 passed; retained targeted regressions = 15 passed (one existing framework
+deprecation warning). Ruff, format, mypy, and diff-check passed.
+
+## 2026-08-08 (Checkpoint 4 repair overlay, cp04 v03)
+
+Focused repair of the three cp04-v02 review findings. Eligible GPU selection
+now compares validated exact decimal hourly-rate tokens, including colliding
+integer derivatives. Newer checksum-identical billing fetches advance only
+projection freshness, so older changed endpoint and network-volume evidence
+cannot regress the current projection while history remains deduplicated and
+append-only. Acceptance-time calibration matching now uses the server-owned,
+startup-validated pinned worker image digest instead of a worker schema label;
+a different digest yields `calibration_missing` and browser input cannot
+override it. No live or paid provider request, deployment, external message,
+production-default change, home-ingest change, commit, or checkpoint sign-off
+was performed. Verification: focused CP4 matrix = 174 passed; full
+controller/worker matrix = 406 passed (five existing framework deprecation
+warnings); explicit v03 offline probes = 15 passed. Ruff, format, mypy, and
+diff-check passed.
+
+## 2026-08-08 (Checkpoint 4 repair overlay, cp04 v02)
+
+Focused repair after independent rejection of cp04 v01; no live provider
+request, deployment, spending, external message, production-default change,
+home-ingest change, commit, or Checkpoint 4 sign-off.
+
+- Corrected the offline Runpod adapter to `rest.runpod.io` and the documented
+  endpoint/network-volume shapes. Strict parsing, decimal JSON, 1 MiB/row
+  bounds, grouping/duplicate checks, and fail-closed pagination behavior remain;
+  persisted observations now carry actual response bytes and bounded documented
+  storage evidence.
+- Network-volume summaries now read the latest one-row-per-native-bucket
+  projection while append-only history remains immutable. Changed and
+  out-of-order observations cannot double count or regress the current value.
+- Status-loss completion records explicit unavailable attempt evidence in the
+  same transaction, preserving durable worker model/image metadata. Newly
+  terminal CP4 paths no longer leave `pending`; migrated legacy rows retain
+  their documented pending semantics.
+- Added immutable versioned `runtime_calibrations`, exact dimension matching
+  without extrapolation, model-sensitive quote fingerprints, and exact hourly
+  USD text in catalog/quote/attempt snapshots. Catalog and calibration version
+  conflicts reject before mutation; exact repeats remain idempotent. No product
+  calibration observations were manufactured, so an empty catalog yields
+  `calibration_missing`.
+- Verification: focused CP4 matrix = 154 passed; full controller/worker matrix
+  = 399 passed (five existing framework deprecation warnings); 18 targeted
+  offline contract/state probes passed. Ruff check, Ruff format check, mypy,
+  and diff-check passed. No live or paid provider evidence was collected.
+
+## 2026-08-08 (Checkpoint 4 implementation worktree, cp04 v01)
+
+Checkpoint 4 implementation (durable cost ledger and billing reconciliation)
+in the focused `cp04-v01` worktree; no deployment, provider contact, spending,
+production-default change, commit, or Checkpoint 4 sign-off. Checkpoint 3 and
+its tests remain untouched.
+
+- Ordered SQLite migration runner (`ace_service/migrations.py`):
+  `CURRENT_SCHEMA_VERSION = 4`, read-only `migrate-status` (path hash + state
+  only; distinguishes unversioned legacy, exact, older, unknown/newer,
+  incomplete started/failed, missing, non-database, corrupt), and offline
+  `migrate-upgrade` under an exclusive sidecar `.migration.lock` flock. A
+  short transaction commits the durable `migration_started` marker, then a
+  separate exclusive transaction applies additive CP4 DDL (CREATE TABLE IF
+  NOT EXISTS + conditional `ALTER TABLE ADD COLUMN`) and records the
+  completed version; a crash leaves a visible incomplete marker and upgrade
+  refuses to guess past it. Normal startup (`create_app` production path)
+  calls `ensure_schema_readiness` and refuses every state except the exact
+  expected version; `initialize_database()` remains a foundation creator.
+- Cost-domain persistence (`models.py`, `repository.py`): immutable
+  `SubmissionQuote` (one-to-one job key, secret-free fingerprint, exact
+  micro-USD, allow-listed unavailable reason codes with CHECK pairing),
+  `VariationAttempt` execution-cost evidence columns (`pending`/`unavailable`/
+  `complete`, unavailable reasons bounded), append-only `BillingObservation`
+  with sha256 checksum idempotence plus current `BillingProjection` upsert,
+  versioned `GpuRateCatalog` with `PRICE_MAX_AGE_HOURS=24`, and the singleton
+  `BillingLease`. `record_attempt_evidence` enforces the immutable state
+  machine (exact-repeat idempotent, unavailable→complete fills missing
+  inputs, all conflicts rejected before any mutation, estimate must equal the
+  centralized half-up formula).
+- Operator-only billing boundary (`ace_service/billing_client.py`): strict
+  endpoint/network-volume parsers (bounded array, allow-listed keys,
+  duplicate/undocumented/overflow rejection, decimal-aware JSON, USD as
+  server contract value), sync `RunpodBillingClient`, database singleton
+  lease with stale recovery, read-only boundary probe, and the
+  `python -m ace_service billing-sync` command that refuses a non-exact
+  schema. No browser route calls billing and no in-process scheduler exists.
+- Quotes are captured server-side in the same transaction that accepts a
+  generation (original creation and cover confirmation; never from the form,
+  never for unconfirmed staging). Terminal polling records immutable attempt
+  evidence from Runpod `executionTime` provenance, resolved GPU aliases, and
+  the rate catalog; unknown/stale rates and missing timing record explicit
+  unavailable reasons, and zero is never invented.
+- Verification: focused CP4 matrix `tests/test_persistence.py
+  tests/test_worker.py tests/test_runpod_client.py tests/test_costs.py
+  tests/test_migrations.py tests/test_billing_sync.py` = 147 passed; full
+  `tests runpod_worker/tests` = 392 passed; `ruff check`, `ruff format
+  --check`, `mypy src runpod_worker`, and `git diff --check` all clean.
+  Review hardening: production startup preflights an existing database and
+  refuses before the foundation creator could add tables to a legacy schema
+  (regression test proves a refused legacy DB stays byte-for-byte untouched);
+  the failed-poll path records evidence before the terminal transition so the
+  transaction is all-or-nothing; the read-only status connection percent-encodes
+  the path in the SQLite URI; the lease singleton bootstraps race-free with
+  `INSERT OR IGNORE`.
+  No paid, live Runpod, deployment, or external-message evidence is claimed.
+
 ## 2026-08-08 (evidence-completion and atomic-migration repair overlay, cp03-v10)
 
 Focused, non-checkpoint repair of the two reviewed cp03 defects on top of

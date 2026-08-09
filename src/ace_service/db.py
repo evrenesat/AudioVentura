@@ -45,9 +45,40 @@ def create_database_engine(settings: ServiceSettings) -> Engine:
 
 
 def initialize_database(engine: Engine) -> None:
-    """Create all foundation tables without contacting external services."""
+    """Create all foundation tables without contacting external services.
+
+    This is a foundation creator only: it never migrates an existing schema,
+    and normal application startup refuses to serve unless the explicit
+    migration runner reports the exact expected schema version.
+    """
 
     Base.metadata.create_all(engine)
+
+
+def ensure_schema_readiness(engine: Engine) -> None:
+    """Refuse startup unless the database is at the exact expected schema version.
+
+    The check is read-only; startup never applies migrations.  Every state
+    except ``exact_expected`` (older, newer, incomplete, unversioned legacy,
+    missing, corrupt) fails closed with operator guidance.
+    """
+
+    from ace_service.migrations import CURRENT_SCHEMA_VERSION, migration_status
+
+    database = engine.url.database
+    if not database:
+        raise RuntimeError("database URL has no file path; cannot verify schema readiness")
+    report = migration_status(str(database))
+    state = report["state"]
+    if state != "exact_expected":
+        raise RuntimeError(
+            "refusing to start: database schema is not the exact expected version "
+            f"(state={state}, expected={CURRENT_SCHEMA_VERSION}, path hash "
+            f"{report['path_hash']}). Startup never migrates automatically; run "
+            "'python -m ace_service migrate-status --database <path>' for details and "
+            "'python -m ace_service migrate-upgrade --database <path>' only after a "
+            "verified pre-upgrade backup."
+        )
 
 
 def initialize_database_for_settings(settings: ServiceSettings) -> Engine:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Mapping
+from datetime import timedelta
 
 import pytest
 
@@ -17,6 +18,7 @@ from ace_service.repository import (
     persist_variation_runpod_job_id,
     prepare_variation_submission,
     set_variation_runpod_result,
+    sum_terminal_attempt_estimates,
     transition_job,
     transition_variation_attempt,
 )
@@ -338,6 +340,10 @@ def test_uncertain_submission_fails_without_automatic_resubmission(settings) -> 
             assert job is not None
             assert job.status is JobStatus.FAILED
             assert job.error_code == "uncertain_cloud_submission"
+            attempt = get_variation_attempt(session, job.id, 1)
+            assert attempt is not None and attempt.status is JobStatus.FAILED
+            assert attempt.evidence_status == "unavailable"
+            assert attempt.unavailable_reason == "worker_no_evidence"
         assert fake.submissions == []
     finally:
         engine.dispose()
@@ -500,6 +506,15 @@ def test_status_expiry_recovers_from_valid_local_upload(settings) -> None:
             assert attempt.runpod_result_json == {
                 "recovery_note": "runpod_status_unavailable_after_output"
             }
+            assert attempt.status is JobStatus.COMPLETED
+            assert attempt.evidence_status == "unavailable"
+            assert attempt.unavailable_reason == "timing_unavailable"
+            summary = sum_terminal_attempt_estimates(
+                session,
+                interval_start=attempt.completed_at - timedelta(seconds=1),
+                interval_end=attempt.completed_at + timedelta(seconds=1),
+            )
+            assert summary.partial_coverage and summary.attempts_without_cost == 1
     finally:
         engine.dispose()
 
@@ -537,6 +552,8 @@ def test_schema_v2_status_expiry_does_not_complete_from_output_alone(settings) -
             assert job.error_code == "controller_task_error"
             assert attempt is not None and attempt.status is JobStatus.FAILED
             assert attempt.runpod_result_json is None
+            assert attempt.evidence_status == "unavailable"
+            assert attempt.unavailable_reason == "worker_no_evidence"
         assert fake.submissions == []
     finally:
         engine.dispose()
@@ -623,6 +640,10 @@ def test_schema_v2_status_expiry_uses_persisted_completion_metadata(settings) ->
             attempt = get_variation_attempt(session, "job-v2-persisted-result", 1)
             assert job is not None and job.status is JobStatus.COMPLETED
             assert attempt is not None and attempt.status is JobStatus.COMPLETED
+            assert attempt.evidence_status == "unavailable"
+            assert attempt.unavailable_reason == "timing_unavailable"
+            assert attempt.model_identity == "test-model"
+            assert attempt.runtime_image_identity == "sha256:" + "d" * 64
             assert attempt.runpod_result_json["output"]["effective_seed"] == 123456
             assert (
                 attempt.runpod_result_json["recovery_note"]

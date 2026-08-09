@@ -142,6 +142,72 @@ volume identifier remain account-wide evidence and are excluded from the
 service endpoint total. Native UTC buckets are never shifted or prorated into
 local-day claims.
 
+## Checkpoint 4 cost ledger and billing reconciliation
+
+The product schema is versioned by the ordered migration runner in
+`ace_service/migrations.py` (current version 5). `migrate-status` is
+read-only (path hash + state only); `migrate-upgrade` is the only schema
+mutation, runs under an exclusive sidecar lock, commits a durable attempt
+marker before the additive DDL, and never auto-retries a crash/incomplete
+marker. Normal startup refuses every state except the exact expected version;
+`initialize_database()` stays a foundation creator.
+
+The ledger adds five record families, all through the existing SQLAlchemy
+session/repository boundary: immutable one-to-one `submission_quotes`
+(secret-free fingerprint, exact micro-USD, allow-listed unavailable reasons
+paired with null amounts), immutable `variation_attempts` execution-cost
+evidence (`pending`/`unavailable`/`complete`, half-up formula enforced
+server-side, conflicts rejected before mutation), append-only
+`billing_observations` with separate sha256 value and fetch-event identities
+plus current `billing_projections` upsert, the versioned `gpu_rate_catalog`, and immutable
+`runtime_calibrations` matched on task/profile/model/runtime/GPU/duration/output
+dimensions without extrapolation. The runtime dimension comes only from the
+controller's pinned `sha256` worker-image digest, not the browser or worker
+schema compatibility version. Catalog, quote, and attempt snapshots retain the
+validated exact hourly-USD text alongside derived micro-USD. Eligible-rate
+selection compares those exact decimal tokens before the chosen token is used
+once for half-up quote calculation; integer micro-USD derivatives are never
+selection keys, and money never passes through binary floats.
+
+An exact-repeat billing fetch is defined relative to the current projection,
+not any historical value match. If it is newer, it advances only the current
+projection's `last_updated_at`; older or equal repeats are no-ops, and changed
+older evidence remains append-only without replacing a fresher projection. A
+newer A -> B -> A return appends A at its new fetch time and projects that A;
+retrying either changed event reuses its fetch-event identity without rewriting
+or deleting earlier evidence. The v4-to-v5 migration adds nullable value
+fingerprints and their index without backfilling immutable v4 observations;
+the projection fingerprint is established lazily from matching durable evidence.
+Retries of preserved v4 events reuse the exact legacy row only when the full
+native bucket, complete evidence, and canonical fetch time match; the legacy
+observation itself remains unchanged. Endpoint and account-wide network-volume
+history use the same compatibility rule.
+
+Quotes are computed and persisted in the same transaction that accepts a
+generation (original creation and cover confirmation); an unavailable quote
+never blocks generation. Terminal polling records attempt evidence from
+Runpod `executionTime` provenance, resolves the worker-reported GPU through
+the server-owned alias map, and snapshots the trusted rate; failed attempts
+count only positive execution time, zero requires durable never-started
+proof, and unknown/stale rates record explicit unavailable reasons.
+Reconciliation sums terminal attempts by `completed_at` over half-open UTC
+intervals, reports partial coverage when any terminal attempt lacks cost, and
+preserves the signed endpoint-vs-estimate delta.
+
+The Runpod billing client targets the documented
+`https://rest.runpod.io/v1/billing` host as an operator-only synchronous boundary
+(`python -m ace_service billing-sync`), never reachable from a browser route
+and never started as an in-process scheduler. Parsing fails closed on
+undocumented shapes, pagination/continuation fields, duplicate keys, and
+overflow. It accepts the documented endpoint `time`/`timeBilledMs` fields and
+network-volume storage fields, retaining actual response byte counts. USD is
+the source-contract value; append-only account-wide network-volume observations
+feed a latest-per-native-bucket projection and are never labeled or summed as
+AudioVentura-specific spend. Older fetches cannot replace newer projections. A
+read-only boundary probe classifies interval
+inclusion/partial-hour semantics; ambiguous evidence leaves provider totals
+and reconciliation unavailable.
+
 ## Checkpoint 9 operations
 
 The controller and home agent configure UTC rotating file logs below their

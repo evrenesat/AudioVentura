@@ -15,16 +15,19 @@ from typing import Any, Protocol, cast
 from sqlalchemy import select
 
 from ace_service.config import ServiceSettings
+from ace_service.costs import resolve_gpu_alias, round_half_up_compute_cost_usd
 from ace_service.cover import CoverSourceError, finalize_cover_source, remove_cover_source
 from ace_service.db import SessionFactory
 from ace_service.home_ingest import HomeIngestError, HomeIngestService
 from ace_service.models import (
+    GpuRateCatalog,
     Job,
     JobStatus,
     JobType,
     Output,
     TransferDirection,
     VariationAttempt,
+    utc_now,
 )
 from ace_service.repository import (
     complete_variation_attempt,
@@ -35,6 +38,7 @@ from ace_service.repository import (
     get_variation_attempt,
     persist_variation_runpod_job_id,
     prepare_variation_submission,
+    record_attempt_evidence,
     recover_uncertain_submissions,
     recover_uncertain_variation_submissions,
     revoke_active_transfers,
@@ -359,6 +363,12 @@ class ControllerWorker:
                         # result was persisted. Reapply the same bounded
                         # completion projection before completing the attempt.
                         set_variation_runpod_result(session, attempt.id, v2_metadata)
+                    _ensure_terminal_evidence(
+                        session,
+                        attempt,
+                        metadata=v2_metadata,
+                        unavailable_reason="timing_unavailable",
+                    )
                     completed_job, _, parent_completed = complete_variation_attempt(
                         session,
                         attempt.id,
@@ -402,6 +412,11 @@ class ControllerWorker:
                 session.commit()
                 return
             if result.category is RunpodState.FAILED:
+                # Record evidence before the terminal transition so the whole
+                # transaction is all-or-nothing: an evidence conflict aborts
+                # while the attempt is still nonterminal and the task error
+                # handler fails the job closed without losing stored evidence.
+                _record_poll_evidence(session, attempt.id, result, None)
                 failed_job = fail_variation_attempt(
                     session,
                     attempt.id,
@@ -444,6 +459,7 @@ class ControllerWorker:
                         transition_job(session, job.id, JobStatus.GENERATING)
                 session.commit()
                 return
+            _record_poll_evidence(session, attempt.id, result, metadata)
             completed_job, _, parent_completed = complete_variation_attempt(session, attempt.id)
             if parent_completed and completed_job.job_type is JobType.COVER:
                 revoke_active_transfers(session, completed_job.id)
@@ -640,6 +656,12 @@ class ControllerWorker:
         )
         attempt = get_variation_attempt(session, job.id, job.current_variation or 1)
         if attempt is not None and attempt.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            _ensure_terminal_evidence(
+                session,
+                attempt,
+                metadata=attempt.runpod_result_json,
+                unavailable_reason="worker_no_evidence",
+            )
             transition_variation_attempt(
                 session,
                 attempt.id,
@@ -685,6 +707,12 @@ class ControllerWorker:
                 JobStatus.COMPLETED,
                 JobStatus.FAILED,
             }:
+                _ensure_terminal_evidence(
+                    session,
+                    attempt,
+                    metadata=attempt.runpod_result_json,
+                    unavailable_reason="worker_no_evidence",
+                )
                 fail_variation_attempt(
                     session,
                     attempt.id,
@@ -839,6 +867,140 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _worker_block_value(metadata: Mapping[str, Any] | None, field_name: str) -> str | None:
+    """Extract one bounded worker identity field from validated result metadata."""
+
+    if not isinstance(metadata, Mapping):
+        return None
+    worker = metadata.get("worker")
+    if not isinstance(worker, Mapping):
+        return None
+    value = worker.get(field_name)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _record_poll_evidence(
+    session: Any,
+    attempt_id: int,
+    result: RunpodStatusResult,
+    metadata: Mapping[str, Any] | None,
+) -> None:
+    """Persist immutable attempt cost evidence from one terminal poll.
+
+    A terminal attempt with positive Runpod execution time and a trusted rate
+    for the resolved GPU gets one complete immutable snapshot.  Missing
+    execution time, an unknown worker GPU, or an unknown/stale rate records an
+    explicit unavailable reason instead of inventing a number.  Zero is never
+    stored from the polling path: zero requires durable provider proof that a
+    submitted attempt never started.  Conflicting evidence raises and fails
+    the poll closed without overwriting stored evidence.
+    """
+
+    execution_ms = result.execution_ms
+    gpu_alias = _worker_block_value(metadata, "gpu")
+    canonical_gpu = resolve_gpu_alias(gpu_alias)
+    model_identity = _worker_block_value(metadata, "dit_model")
+    runtime_image_identity = _worker_block_value(metadata, "image_digest")
+    if execution_ms is None or execution_ms <= 0:
+        record_attempt_evidence(
+            session,
+            attempt_id,
+            evidence_status="unavailable",
+            actual_gpu=canonical_gpu,
+            model_identity=model_identity,
+            runtime_image_identity=runtime_image_identity,
+            execution_ms=execution_ms,
+            unavailable_reason="timing_unavailable",
+        )
+        return
+    if canonical_gpu is None:
+        reason = "worker_no_evidence" if gpu_alias is None else "rate_unknown"
+        record_attempt_evidence(
+            session,
+            attempt_id,
+            evidence_status="unavailable",
+            execution_ms=execution_ms,
+            model_identity=model_identity,
+            runtime_image_identity=runtime_image_identity,
+            unavailable_reason=reason,
+        )
+        return
+    rate_row = session.scalar(
+        select(GpuRateCatalog)
+        .where(
+            GpuRateCatalog.gpu_id == canonical_gpu,
+            GpuRateCatalog.provider == "runpod",
+        )
+        .order_by(GpuRateCatalog.calibration_version.desc())
+        .limit(1)
+    )
+    now = utc_now()
+    if rate_row is None or rate_row.expires_at <= now:
+        reason = "rate_stale" if rate_row is not None else "rate_unknown"
+        record_attempt_evidence(
+            session,
+            attempt_id,
+            evidence_status="unavailable",
+            actual_gpu=canonical_gpu,
+            model_identity=model_identity,
+            runtime_image_identity=runtime_image_identity,
+            execution_ms=execution_ms,
+            unavailable_reason=reason,
+        )
+        return
+    estimate = round_half_up_compute_cost_usd(execution_ms, rate_row.hourly_rate_usd)
+    record_attempt_evidence(
+        session,
+        attempt_id,
+        evidence_status="complete",
+        actual_gpu=canonical_gpu,
+        model_identity=model_identity,
+        runtime_image_identity=runtime_image_identity,
+        execution_ms=execution_ms,
+        hourly_rate_usd=rate_row.hourly_rate_usd,
+        hourly_rate_micro_usd=rate_row.rate_micro_usd_per_hour,
+        rate_currency="USD",
+        rate_source=rate_row.source,
+        rate_captured_at=rate_row.captured_at,
+        estimated_compute_micro_usd=estimate,
+    )
+
+
+def _ensure_terminal_evidence(
+    session: Any,
+    attempt: VariationAttempt,
+    *,
+    metadata: Mapping[str, Any] | None,
+    unavailable_reason: str,
+) -> None:
+    """Close a newly terminal pending attempt without inventing execution."""
+
+    if attempt.evidence_status != "pending":
+        return
+    model_identity = attempt.model_identity or _worker_block_value(metadata, "dit_model")
+    runtime_identity = attempt.runtime_image_identity or _worker_block_value(
+        metadata, "image_digest"
+    )
+    gpu = attempt.actual_gpu
+    if gpu is None:
+        gpu = resolve_gpu_alias(_worker_block_value(metadata, "gpu"))
+    record_attempt_evidence(
+        session,
+        attempt.id,
+        evidence_status="unavailable",
+        actual_gpu=gpu,
+        model_identity=model_identity,
+        runtime_image_identity=runtime_identity,
+        execution_ms=attempt.execution_ms,
+        hourly_rate_usd=attempt.hourly_rate_usd,
+        hourly_rate_micro_usd=attempt.hourly_rate_micro_usd,
+        rate_currency=(attempt.rate_currency if attempt.hourly_rate_usd is not None else None),
+        rate_source=attempt.rate_source,
+        rate_captured_at=attempt.rate_captured_at,
+        unavailable_reason=unavailable_reason,
+    )
 
 
 def _runpod_result_metadata(

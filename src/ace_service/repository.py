@@ -5,19 +5,39 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Literal, cast, overload
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from ace_service.costs import (
+    CostSummary,
+    NetworkVolumeSummary,
+    QuoteEstimate,
+    ReconciliationResult,
+    is_cost_fingerprint,
+    observation_checksum,
+    observation_event_checksum,
+    parse_micro_usd_decimal,
+    round_half_up_compute_cost_usd,
+)
 from ace_service.models import (
+    ATTEMPT_UNAVAILABLE_REASONS,
+    EVIDENCE_STATUSES,
+    QUOTE_UNAVAILABLE_REASONS,
+    BillingObservation,
+    BillingProjection,
+    GpuRateCatalog,
     Job,
     JobStatus,
     JobType,
     Output,
     OutputFormat,
+    RuntimeCalibration,
+    SubmissionQuote,
     TransferCapability,
     TransferDirection,
     TransferStatus,
@@ -36,6 +56,7 @@ from ace_service.state import validate_job_transition, validate_variation_transi
 
 COVER_STAGING_CANCELLED_CODE = "cover_staging_cancelled"
 COVER_STAGING_CANCELLED_MESSAGE = "Cover preparation was cancelled before confirmation."
+RUNTIME_CALIBRATION_EVIDENCE_SOURCES = frozenset({"accepted-local-measurement-v1"})
 _TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
 _NONTERMINAL_JOB_STATUSES = frozenset(JobStatus) - _TERMINAL_JOB_STATUSES
 _COVER_STAGING_STATUSES = frozenset({"awaiting_confirmation", "confirmed"})
@@ -592,6 +613,13 @@ def recover_uncertain_variation_submissions(
         )
     )
     for attempt in attempts:
+        record_attempt_evidence(
+            session,
+            attempt.id,
+            evidence_status="unavailable",
+            unavailable_reason="worker_no_evidence",
+            now=timestamp,
+        )
         transition_variation_attempt(
             session,
             attempt.id,
@@ -1020,3 +1048,1166 @@ def _utc_timestamp(value: datetime | None) -> datetime:
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("timestamps must be timezone-aware")
     return timestamp.astimezone(UTC)
+
+
+class EvidenceConflictError(ValueError):
+    """Raised when immutable attempt evidence conflicts with a stored record.
+
+    The rejection happens before any field or timestamp mutation, so the
+    stored evidence and its ``updated_at`` remain exactly as they were.
+    """
+
+
+@overload
+def _bounded_string(
+    value: Any, field_name: str, *, max_length: int, allow_none: Literal[False]
+) -> str: ...
+
+
+@overload
+def _bounded_string(
+    value: Any, field_name: str, *, max_length: int, allow_none: Literal[True]
+) -> str | None: ...
+
+
+def _bounded_string(
+    value: Any, field_name: str, *, max_length: int, allow_none: bool
+) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > max_length:
+        raise ValueError(f"{field_name} must be bounded non-empty text")
+    return value.strip()
+
+
+@overload
+def _non_negative_int(value: Any, field_name: str, *, allow_none: Literal[False]) -> int: ...
+
+
+@overload
+def _non_negative_int(value: Any, field_name: str, *, allow_none: Literal[True]) -> int | None: ...
+
+
+def _non_negative_int(value: Any, field_name: str, *, allow_none: bool) -> int | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return int(value)
+
+
+def get_submission_quote(session: Session, job_id: str | UUID) -> SubmissionQuote | None:
+    return cast(
+        SubmissionQuote | None,
+        session.scalar(select(SubmissionQuote).where(SubmissionQuote.job_id == str(job_id))),
+    )
+
+
+def _quote_persisted_values(quote: SubmissionQuote) -> tuple[Any, ...]:
+    return (
+        quote.cost_fingerprint,
+        quote.model_identity,
+        quote.profile_id,
+        quote.duration_mode,
+        quote.duration_value_seconds,
+        quote.variation_count,
+        quote.eligible_gpu_ids,
+        quote.highest_trusted_hourly_rate_micro_usd,
+        quote.highest_trusted_hourly_rate_usd,
+        quote.calibration_version,
+        quote.predicted_execution_range_ms,
+        quote.quoted_amount_micro_usd,
+        quote.quoted_range_low_micro_usd,
+        quote.quoted_range_high_micro_usd,
+        quote.currency,
+        quote.rate_source,
+        quote.rate_version,
+        quote.unavailable_reason_code,
+    )
+
+
+def create_submission_quote(
+    session: Session,
+    job_id: str | UUID,
+    estimate: QuoteEstimate,
+    *,
+    captured_at: datetime | None = None,
+) -> SubmissionQuote:
+    """Persist exactly one immutable submission quote for one job.
+
+    An identical repeat returns the stored record unchanged (idempotent); a
+    conflicting repeat raises before any mutation.  ``captured_at`` is the
+    server capture time and is not part of the idempotence comparison.
+    """
+
+    if not isinstance(estimate, QuoteEstimate):
+        raise ValueError("estimate must be a QuoteEstimate")
+    if not is_cost_fingerprint(estimate.cost_fingerprint):
+        raise ValueError("cost fingerprint must be a canonical sha256 hex digest")
+    model_identity = _bounded_string(
+        estimate.model_identity, "model_identity", max_length=256, allow_none=False
+    )
+    if not isinstance(estimate.eligible_gpu_ids, list):
+        raise ValueError("eligible_gpu_ids must be a list")
+    if not all(isinstance(gpu_id, str) and gpu_id.strip() for gpu_id in estimate.eligible_gpu_ids):
+        raise ValueError("eligible_gpu_ids must contain non-empty strings")
+    if (
+        isinstance(estimate.variation_count, bool)
+        or not isinstance(estimate.variation_count, int)
+        or not 1 <= estimate.variation_count <= 4
+    ):
+        raise ValueError("variation_count must be between 1 and 4")
+    if estimate.currency != "USD":
+        raise ValueError("quote currency must be USD")
+    if estimate.duration_mode is not None and (
+        not isinstance(estimate.duration_mode, str) or not estimate.duration_mode.strip()
+    ):
+        raise ValueError("duration_mode must be bounded text")
+    if estimate.duration_value_seconds is not None and (
+        isinstance(estimate.duration_value_seconds, bool)
+        or not isinstance(estimate.duration_value_seconds, (int, float))
+        or estimate.duration_value_seconds < 0
+    ):
+        raise ValueError("duration_value_seconds must be a non-negative number")
+    if estimate.calibration_version is not None and (
+        isinstance(estimate.calibration_version, bool)
+        or not isinstance(estimate.calibration_version, int)
+        or estimate.calibration_version < 1
+    ):
+        raise ValueError("calibration_version must be a positive integer")
+    if estimate.profile_id is not None:
+        _bounded_string(estimate.profile_id, "profile_id", max_length=128, allow_none=False)
+    if estimate.rate_source is not None:
+        _bounded_string(estimate.rate_source, "rate_source", max_length=256, allow_none=False)
+    if estimate.rate_version is not None:
+        _bounded_string(estimate.rate_version, "rate_version", max_length=64, allow_none=False)
+    if estimate.unavailable_reason_code is not None:
+        if estimate.unavailable_reason_code not in QUOTE_UNAVAILABLE_REASONS:
+            raise ValueError(
+                f"unavailable_reason_code must be one of {sorted(QUOTE_UNAVAILABLE_REASONS)}"
+            )
+    available = estimate.unavailable_reason_code is None
+    if available != (estimate.quoted_amount_micro_usd is not None):
+        raise ValueError("quote availability must pair with a quoted amount")
+    if available != (estimate.highest_trusted_hourly_rate_micro_usd is not None):
+        raise ValueError("quote availability must pair with a trusted rate")
+    if available != (estimate.highest_trusted_hourly_rate_usd is not None):
+        raise ValueError("quote availability must pair with an exact trusted rate")
+    if available and estimate.rate_source is None:
+        raise ValueError("an available quote requires a rate source")
+    if available and estimate.predicted_execution_range_ms is None:
+        raise ValueError("an available quote requires a predicted execution range")
+    amount = _non_negative_int(
+        estimate.quoted_amount_micro_usd, "quoted_amount_micro_usd", allow_none=True
+    )
+    rate = _non_negative_int(
+        estimate.highest_trusted_hourly_rate_micro_usd,
+        "highest_trusted_hourly_rate_micro_usd",
+        allow_none=True,
+    )
+    rate_usd: str | None = None
+    if estimate.highest_trusted_hourly_rate_usd is not None:
+        rate_usd, derived_rate = parse_micro_usd_decimal(
+            estimate.highest_trusted_hourly_rate_usd,
+            field_name="highest_trusted_hourly_rate_usd",
+        )
+        if derived_rate != rate:
+            raise ValueError("exact trusted rate does not match derived micro-USD rate")
+    low = _non_negative_int(
+        estimate.quoted_range_low_micro_usd, "quoted_range_low", allow_none=True
+    )
+    high = _non_negative_int(
+        estimate.quoted_range_high_micro_usd, "quoted_range_high", allow_none=True
+    )
+    if available:
+        if low is None or high is None or low > high:
+            raise ValueError("an available quote requires an ordered quoted range")
+        predicted = estimate.predicted_execution_range_ms
+        if (
+            not isinstance(predicted, (list, tuple))
+            or len(predicted) != 2
+            or isinstance(predicted[0], bool)
+            or not isinstance(predicted[0], int)
+            or isinstance(predicted[1], bool)
+            or not isinstance(predicted[1], int)
+            or predicted[0] < 0
+            or predicted[0] > predicted[1]
+        ):
+            raise ValueError("predicted_execution_range_ms must be an ordered non-negative pair")
+    elif estimate.predicted_execution_range_ms is not None:
+        raise ValueError("an unavailable quote must not carry a predicted range")
+    captured = _utc_timestamp(captured_at)
+
+    existing = get_submission_quote(session, str(job_id))
+    if existing is not None:
+        if _quote_persisted_values(existing) == (
+            estimate.cost_fingerprint,
+            model_identity,
+            estimate.profile_id,
+            estimate.duration_mode,
+            estimate.duration_value_seconds,
+            estimate.variation_count,
+            list(estimate.eligible_gpu_ids),
+            rate,
+            rate_usd,
+            estimate.calibration_version,
+            (
+                list(estimate.predicted_execution_range_ms)
+                if estimate.predicted_execution_range_ms is not None
+                else None
+            ),
+            amount,
+            low,
+            high,
+            estimate.currency,
+            estimate.rate_source,
+            estimate.rate_version,
+            estimate.unavailable_reason_code,
+        ):
+            return existing
+        raise EvidenceConflictError("conflicting submission quote for the same job")
+
+    quote = SubmissionQuote(
+        job_id=str(job_id),
+        cost_fingerprint=estimate.cost_fingerprint,
+        model_identity=model_identity,
+        profile_id=estimate.profile_id,
+        duration_mode=estimate.duration_mode,
+        duration_value_seconds=estimate.duration_value_seconds,
+        variation_count=estimate.variation_count,
+        eligible_gpu_ids=list(estimate.eligible_gpu_ids),
+        highest_trusted_hourly_rate_micro_usd=rate,
+        highest_trusted_hourly_rate_usd=rate_usd,
+        calibration_version=estimate.calibration_version,
+        predicted_execution_range_ms=(
+            list(estimate.predicted_execution_range_ms)
+            if estimate.predicted_execution_range_ms is not None
+            else None
+        ),
+        quoted_amount_micro_usd=amount,
+        quoted_range_low_micro_usd=low,
+        quoted_range_high_micro_usd=high,
+        currency=estimate.currency,
+        rate_source=estimate.rate_source,
+        rate_version=estimate.rate_version,
+        unavailable_reason_code=estimate.unavailable_reason_code,
+        captured_at=captured,
+    )
+    session.add(quote)
+    session.flush()
+    return quote
+
+
+def record_attempt_evidence(
+    session: Session,
+    attempt_id: int,
+    *,
+    evidence_status: str,
+    actual_gpu: str | None = None,
+    model_identity: str | None = None,
+    runtime_image_identity: str | None = None,
+    execution_ms: int | None = None,
+    hourly_rate_usd: str | None = None,
+    hourly_rate_micro_usd: int | None = None,
+    rate_currency: str | None = None,
+    rate_source: str | None = None,
+    rate_captured_at: datetime | None = None,
+    estimated_compute_micro_usd: int | None = None,
+    unavailable_reason: str | None = None,
+    now: datetime | None = None,
+) -> VariationAttempt:
+    """Record immutable execution-cost evidence for one variation attempt.
+
+    Transitions: ``pending`` → ``unavailable`` or ``complete``;
+    ``unavailable`` → ``complete`` only when newly received authoritative
+    evidence fills the missing inputs while every stored field stays
+    identical.  ``complete`` never changes.  Conflicting terminal/timing/GPU/
+    rate evidence raises :class:`EvidenceConflictError` before any field or
+    timestamp mutation; exact repeats are idempotent no-ops.
+    """
+
+    if evidence_status not in EVIDENCE_STATUSES:
+        raise ValueError(f"evidence_status must be one of {sorted(EVIDENCE_STATUSES)}")
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    gpu = _bounded_string(actual_gpu, "actual_gpu", max_length=128, allow_none=True)
+    model = _bounded_string(model_identity, "model_identity", max_length=256, allow_none=True)
+    runtime_image = _bounded_string(
+        runtime_image_identity, "runtime_image_identity", max_length=256, allow_none=True
+    )
+    execution = _non_negative_int(execution_ms, "execution_ms", allow_none=True)
+    rate = _non_negative_int(hourly_rate_micro_usd, "hourly_rate_micro_usd", allow_none=True)
+    rate_usd: str | None = None
+    if hourly_rate_usd is not None:
+        rate_usd, derived_rate = parse_micro_usd_decimal(
+            hourly_rate_usd, field_name="hourly_rate_usd"
+        )
+        if rate is not None and derived_rate != rate:
+            raise ValueError("hourly_rate_usd does not match hourly_rate_micro_usd")
+    elif rate is not None:
+        # Compatibility for internal callers that only held the already exact
+        # integer token before CP4 v02. New provider/catalog paths always pass
+        # the original validated decimal text.
+        rate_usd = format(Decimal(rate) / Decimal(1_000_000), "f")
+    source = _bounded_string(rate_source, "rate_source", max_length=256, allow_none=True)
+    estimate = _non_negative_int(
+        estimated_compute_micro_usd, "estimated_compute_micro_usd", allow_none=True
+    )
+    if rate_currency is not None and rate_currency != "USD":
+        raise ValueError("rate_currency must be USD")
+    if rate_captured_at is not None:
+        rate_captured_at = _utc_timestamp(rate_captured_at)
+    reason: str | None = None
+    if unavailable_reason is not None:
+        if unavailable_reason not in ATTEMPT_UNAVAILABLE_REASONS:
+            raise ValueError(
+                f"unavailable_reason must be one of {sorted(ATTEMPT_UNAVAILABLE_REASONS)}"
+            )
+        reason = unavailable_reason
+
+    supplied = (
+        gpu,
+        model,
+        runtime_image,
+        execution,
+        rate_usd,
+        rate,
+        rate_currency,
+        source,
+        rate_captured_at,
+        estimate,
+        reason,
+    )
+    if evidence_status == "pending":
+        if any(value is not None for value in supplied):
+            raise ValueError("pending evidence must not carry cost fields")
+        if attempt.evidence_status != "pending":
+            raise EvidenceConflictError("cannot regress terminal attempt evidence back to pending")
+        return attempt
+
+    if evidence_status == "complete":
+        missing = [
+            name
+            for name, value in (
+                ("actual_gpu", gpu),
+                ("execution_ms", execution),
+                ("hourly_rate_usd", rate_usd),
+                ("hourly_rate_micro_usd", rate),
+                ("rate_source", source),
+                ("rate_captured_at", rate_captured_at),
+                ("estimated_compute_micro_usd", estimate),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(f"complete evidence requires: {', '.join(missing)}")
+        if rate_currency != "USD":
+            raise ValueError("complete evidence requires rate_currency='USD'")
+        assert execution is not None and rate is not None
+        assert rate_usd is not None
+        if estimate != round_half_up_compute_cost_usd(execution, rate_usd):
+            raise ValueError(
+                "estimated_compute_micro_usd must equal the centralized half-up formula"
+            )
+    elif evidence_status == "unavailable":
+        if reason is None:
+            raise ValueError("unavailable evidence requires an unavailable reason")
+        if estimate is not None:
+            raise ValueError("unavailable evidence must not carry an estimate")
+    else:
+        if reason is not None:
+            raise ValueError("complete evidence must not carry an unavailable reason")
+    timestamp = _utc_timestamp(now)
+
+    existing_status = attempt.evidence_status
+    if existing_status == evidence_status:
+        # Exact-repeat idempotence: every field must match, including None.
+        stored = (
+            attempt.actual_gpu,
+            attempt.model_identity,
+            attempt.runtime_image_identity,
+            attempt.execution_ms,
+            attempt.hourly_rate_usd,
+            attempt.hourly_rate_micro_usd,
+            attempt.rate_currency,
+            attempt.rate_source,
+            attempt.rate_captured_at,
+            attempt.estimated_compute_micro_usd,
+            attempt.unavailable_reason,
+        )
+        if stored != supplied:
+            raise EvidenceConflictError(
+                "conflicting attempt evidence; stored immutable evidence is unchanged"
+            )
+        return attempt
+    if existing_status == "complete":
+        raise EvidenceConflictError(
+            "complete attempt evidence is immutable; conflicting evidence is rejected"
+        )
+    if existing_status == "unavailable" and evidence_status != "complete":
+        raise EvidenceConflictError("unavailable attempt evidence may only advance to complete")
+    # unavailable -> complete: stored fields must stay identical while the
+    # previously missing inputs are filled by the new authoritative evidence.
+    # The stored unavailable reason is historical context for the missing
+    # input and is cleared by completion, so it is not compared here.
+    if existing_status == "unavailable":
+        stored_partial = (
+            attempt.actual_gpu,
+            attempt.model_identity,
+            attempt.runtime_image_identity,
+            attempt.execution_ms,
+            attempt.hourly_rate_usd,
+            attempt.hourly_rate_micro_usd,
+            attempt.rate_currency,
+            attempt.rate_source,
+            attempt.rate_captured_at,
+        )
+        new_partial = (
+            gpu,
+            model,
+            runtime_image,
+            execution,
+            rate_usd,
+            rate,
+            rate_currency,
+            source,
+            rate_captured_at,
+        )
+        for stored_value, new_value in zip(stored_partial, new_partial, strict=True):
+            if stored_value is not None and stored_value != new_value:
+                raise EvidenceConflictError(
+                    "conflicting attempt evidence; stored immutable evidence is unchanged"
+                )
+
+    attempt.actual_gpu = gpu
+    attempt.model_identity = model
+    attempt.runtime_image_identity = runtime_image
+    attempt.execution_ms = execution
+    attempt.hourly_rate_usd = rate_usd
+    attempt.hourly_rate_micro_usd = rate
+    attempt.rate_currency = rate_currency
+    attempt.rate_source = source
+    attempt.rate_captured_at = rate_captured_at
+    attempt.estimated_compute_micro_usd = estimate
+    attempt.evidence_status = evidence_status
+    attempt.unavailable_reason = reason
+    attempt.updated_at = timestamp
+    session.flush()
+    return attempt
+
+
+def record_billing_observation(
+    session: Session,
+    *,
+    provider: str,
+    resource_type: str,
+    grouping_key: str,
+    bucket_start: datetime,
+    bucket_size_hours: int,
+    raw_amount: str,
+    raw_time_billed: str | None,
+    currency: str,
+    fetched_at: datetime,
+    response_size_bytes: int | None,
+    is_network_volume: bool,
+    source_contract: str,
+    documented_fields: dict[str, str] | None = None,
+) -> BillingObservation:
+    """Append one immutable provider bucket observation and upsert the projection.
+
+    An exact repeat is relative to the current projection: it never appends
+    history, a newer repeat advances only projection freshness, and an older or
+    equal repeat is a no-op. Changed evidence always appends once per fetch
+    event, including A -> B -> A, but only a fetch at least as fresh as the
+    current projection may replace its projected values.
+    """
+
+    provider_value = _bounded_string(provider, "provider", max_length=32, allow_none=False)
+    resource_type_value = _bounded_string(
+        resource_type, "resource_type", max_length=32, allow_none=False
+    )
+    grouping_key_value = _bounded_string(
+        grouping_key, "grouping_key", max_length=256, allow_none=False
+    )
+    if bucket_size_hours not in {1, 24}:
+        raise ValueError("bucket_size_hours must be 1 or 24")
+    if currency != "USD":
+        raise ValueError("billing currency must be USD")
+    bucket_start = _utc_timestamp(bucket_start)
+    fetched_at = _utc_timestamp(fetched_at)
+    if not isinstance(raw_amount, str) or not raw_amount:
+        raise ValueError("raw_amount must be non-empty decimal text")
+    if raw_time_billed is not None and (
+        not isinstance(raw_time_billed, str) or not raw_time_billed
+    ):
+        raise ValueError("raw_time_billed must be non-empty decimal text")
+    if response_size_bytes is not None and (
+        isinstance(response_size_bytes, bool)
+        or not isinstance(response_size_bytes, int)
+        or response_size_bytes < 0
+    ):
+        raise ValueError("response_size_bytes must be a non-negative integer")
+    source_contract_value = _bounded_string(
+        source_contract, "source_contract", max_length=128, allow_none=False
+    )
+    evidence_fields: dict[str, str] = {}
+    if documented_fields is not None:
+        if not isinstance(documented_fields, dict) or len(documented_fields) > 8:
+            raise ValueError("documented_fields must be a bounded object")
+        for key, value in documented_fields.items():
+            bounded_key = _bounded_string(
+                key, "documented field name", max_length=64, allow_none=False
+            )
+            bounded_value = _bounded_string(
+                value, "documented field value", max_length=256, allow_none=False
+            )
+            evidence_fields[bounded_key] = bounded_value
+    evidence_checksum = observation_checksum(
+        provider=provider_value,
+        resource_type=resource_type_value,
+        grouping_key=grouping_key_value,
+        bucket_start=bucket_start,
+        bucket_size_hours=bucket_size_hours,
+        raw_amount=raw_amount,
+        raw_time_billed=raw_time_billed,
+        currency=currency,
+        is_network_volume=is_network_volume,
+        source_contract=source_contract_value,
+        documented_fields=evidence_fields,
+    )
+    projection = session.scalar(
+        select(BillingProjection).where(
+            BillingProjection.provider == provider_value,
+            BillingProjection.resource_type == resource_type_value,
+            BillingProjection.grouping_key == grouping_key_value,
+            BillingProjection.bucket_start == bucket_start,
+            BillingProjection.bucket_size_hours == bucket_size_hours,
+            BillingProjection.currency == currency,
+        )
+    )
+
+    def matching_observation() -> BillingObservation | None:
+        return session.scalar(
+            select(BillingObservation)
+            .where(
+                BillingObservation.provider == provider_value,
+                BillingObservation.resource_type == resource_type_value,
+                BillingObservation.grouping_key == grouping_key_value,
+                BillingObservation.bucket_start == bucket_start,
+                BillingObservation.bucket_size_hours == bucket_size_hours,
+                BillingObservation.currency == currency,
+                or_(
+                    BillingObservation.evidence_checksum == evidence_checksum,
+                    and_(
+                        BillingObservation.evidence_checksum.is_(None),
+                        BillingObservation.checksum == evidence_checksum,
+                    ),
+                ),
+            )
+            .order_by(BillingObservation.fetched_at.desc(), BillingObservation.id.desc())
+            .limit(1)
+        )
+
+    def matching_legacy_event() -> BillingObservation | None:
+        legacy_rows = session.scalars(
+            select(BillingObservation).where(
+                BillingObservation.provider == provider_value,
+                BillingObservation.resource_type == resource_type_value,
+                BillingObservation.grouping_key == grouping_key_value,
+                BillingObservation.bucket_start == bucket_start,
+                BillingObservation.bucket_size_hours == bucket_size_hours,
+                BillingObservation.currency == currency,
+                BillingObservation.raw_amount == raw_amount,
+                BillingObservation.raw_time_billed == raw_time_billed,
+                BillingObservation.fetched_at == fetched_at,
+                BillingObservation.is_network_volume == (1 if is_network_volume else 0),
+                BillingObservation.source_contract == source_contract_value,
+                BillingObservation.evidence_checksum.is_(None),
+                BillingObservation.checksum == evidence_checksum,
+            )
+        )
+        for legacy_row in legacy_rows:
+            if (legacy_row.documented_fields_json or {}) == evidence_fields:
+                return legacy_row
+        return None
+
+    if projection is not None and projection.latest_evidence_checksum is None:
+        projected_rows = session.scalars(
+            select(BillingObservation)
+            .where(
+                BillingObservation.provider == provider_value,
+                BillingObservation.resource_type == resource_type_value,
+                BillingObservation.grouping_key == grouping_key_value,
+                BillingObservation.bucket_start == bucket_start,
+                BillingObservation.bucket_size_hours == bucket_size_hours,
+                BillingObservation.currency == currency,
+                BillingObservation.raw_amount == projection.latest_amount,
+                BillingObservation.raw_time_billed == projection.latest_time_billed,
+            )
+            .order_by(BillingObservation.fetched_at.desc(), BillingObservation.id.desc())
+        )
+        for projected_row in projected_rows:
+            if (projected_row.documented_fields_json or {}) == (
+                projection.latest_documented_fields_json or {}
+            ):
+                projection.latest_evidence_checksum = (
+                    projected_row.evidence_checksum or projected_row.checksum
+                )
+                break
+        if projection.latest_evidence_checksum is None:
+            raise EvidenceConflictError("billing projection has no matching immutable evidence")
+
+    checksum = observation_event_checksum(
+        evidence_checksum=evidence_checksum,
+        fetched_at=fetched_at,
+    )
+    existing = session.scalar(
+        select(BillingObservation).where(BillingObservation.checksum == checksum)
+    )
+    if existing is not None:
+        return existing
+    legacy_event = matching_legacy_event()
+    if legacy_event is not None:
+        return legacy_event
+
+    if projection is not None and projection.latest_evidence_checksum == evidence_checksum:
+        existing = matching_observation()
+        if existing is None:
+            raise EvidenceConflictError("billing projection has no matching immutable evidence")
+        if fetched_at > projection.last_updated_at:
+            projection.last_updated_at = fetched_at
+            session.flush()
+        return existing
+
+    observation = BillingObservation(
+        provider=provider_value,
+        resource_type=resource_type_value,
+        grouping_key=grouping_key_value,
+        bucket_start=bucket_start,
+        bucket_size_hours=bucket_size_hours,
+        raw_amount=raw_amount,
+        raw_time_billed=raw_time_billed,
+        currency=currency,
+        fetched_at=fetched_at,
+        response_size_bytes=response_size_bytes,
+        is_network_volume=1 if is_network_volume else 0,
+        source_contract=source_contract_value,
+        documented_fields_json=evidence_fields or None,
+        evidence_checksum=evidence_checksum,
+        checksum=checksum,
+    )
+    session.add(observation)
+    if projection is None:
+        projection = BillingProjection(
+            provider=provider_value,
+            resource_type=resource_type_value,
+            grouping_key=grouping_key_value,
+            bucket_start=bucket_start,
+            bucket_size_hours=bucket_size_hours,
+            latest_amount=raw_amount,
+            latest_time_billed=raw_time_billed,
+            currency=currency,
+            last_updated_at=fetched_at,
+            latest_documented_fields_json=evidence_fields or None,
+            latest_evidence_checksum=evidence_checksum,
+        )
+        session.add(projection)
+    elif fetched_at >= projection.last_updated_at:
+        projection.latest_amount = raw_amount
+        projection.latest_time_billed = raw_time_billed
+        projection.last_updated_at = fetched_at
+        projection.latest_documented_fields_json = evidence_fields or None
+        projection.latest_evidence_checksum = evidence_checksum
+    session.flush()
+    return observation
+
+
+def upsert_gpu_rate(
+    session: Session,
+    *,
+    gpu_id: str,
+    rate_micro_usd_per_hour: int,
+    hourly_rate_usd: str,
+    source: str,
+    calibration_version: int,
+    captured_at: datetime | None = None,
+    provider: str = "runpod",
+    currency: str = "USD",
+    price_max_age_hours: int = 24,
+) -> GpuRateCatalog:
+    """Upsert one versioned, server-owned GPU rate catalog entry."""
+
+    gpu_id_value = _bounded_string(gpu_id, "gpu_id", max_length=64, allow_none=False)
+    provider_value = _bounded_string(provider, "provider", max_length=32, allow_none=False)
+    source_value = _bounded_string(source, "source", max_length=128, allow_none=False)
+    rate_value = _non_negative_int(
+        rate_micro_usd_per_hour, "rate_micro_usd_per_hour", allow_none=False
+    )
+    rate_text, derived_rate = parse_micro_usd_decimal(hourly_rate_usd, field_name="hourly_rate_usd")
+    if derived_rate != rate_value:
+        raise ValueError("hourly_rate_usd does not match rate_micro_usd_per_hour")
+    if currency != "USD":
+        raise ValueError("rate currency must be USD")
+    if isinstance(calibration_version, bool) or not isinstance(calibration_version, int):
+        raise ValueError("calibration_version must be an integer")
+    if calibration_version < 1:
+        raise ValueError("calibration_version must be at least 1")
+    if isinstance(price_max_age_hours, bool) or not isinstance(price_max_age_hours, int):
+        raise ValueError("price_max_age_hours must be an integer")
+    if price_max_age_hours < 1:
+        raise ValueError("price_max_age_hours must be at least 1")
+    captured = _utc_timestamp(captured_at)
+    expires = captured + timedelta(hours=price_max_age_hours)
+    existing = session.scalar(
+        select(GpuRateCatalog).where(
+            GpuRateCatalog.gpu_id == gpu_id_value,
+            GpuRateCatalog.provider == provider_value,
+            GpuRateCatalog.calibration_version == calibration_version,
+        )
+    )
+    if existing is not None:
+        expected = (rate_value, rate_text, currency, source_value, captured, expires)
+        stored = (
+            existing.rate_micro_usd_per_hour,
+            existing.hourly_rate_usd,
+            existing.currency,
+            existing.source,
+            existing.captured_at,
+            existing.expires_at,
+        )
+        if stored == expected:
+            return existing
+        raise EvidenceConflictError("conflicting reuse of immutable GPU rate version")
+    row = GpuRateCatalog(
+        gpu_id=gpu_id_value,
+        provider=provider_value,
+        rate_micro_usd_per_hour=rate_value,
+        hourly_rate_usd=rate_text,
+        currency=currency,
+        source=source_value,
+        calibration_version=calibration_version,
+        captured_at=captured,
+        expires_at=expires,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def upsert_runtime_calibration(
+    session: Session,
+    *,
+    version: int,
+    task_mode: str,
+    profile_id: str,
+    model_identity: str,
+    runtime_identity: str,
+    gpu_class: str,
+    duration_mode: str,
+    duration_band_min_seconds: float,
+    duration_band_max_seconds: float,
+    output_count: int,
+    execution_low_ms: int,
+    execution_high_ms: int,
+    evidence_source: str,
+    conservative_margin: str,
+    captured_at: datetime,
+) -> RuntimeCalibration:
+    """Persist one immutable measured calibration; exact repeats are no-ops."""
+
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("calibration version must be a positive integer")
+    strings = {
+        "task_mode": (task_mode, 32),
+        "profile_id": (profile_id, 128),
+        "model_identity": (model_identity, 256),
+        "runtime_identity": (runtime_identity, 256),
+        "gpu_class": (gpu_class, 64),
+        "duration_mode": (duration_mode, 32),
+        "evidence_source": (evidence_source, 256),
+    }
+    bounded = {
+        key: _bounded_string(value, key, max_length=limit, allow_none=False)
+        for key, (value, limit) in strings.items()
+    }
+    if bounded["evidence_source"] not in RUNTIME_CALIBRATION_EVIDENCE_SOURCES:
+        raise ValueError("runtime calibration evidence_source is not accepted")
+    for name, value in (
+        ("duration_band_min_seconds", duration_band_min_seconds),
+        ("duration_band_max_seconds", duration_band_max_seconds),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"{name} must be a non-negative number")
+    if duration_band_max_seconds < duration_band_min_seconds:
+        raise ValueError("duration calibration band must be ordered")
+    if (
+        isinstance(output_count, bool)
+        or not isinstance(output_count, int)
+        or not 1 <= output_count <= 4
+    ):
+        raise ValueError("output_count must be between 1 and 4")
+    low = _non_negative_int(execution_low_ms, "execution_low_ms", allow_none=False)
+    high = _non_negative_int(execution_high_ms, "execution_high_ms", allow_none=False)
+    if low > high:
+        raise ValueError("execution range must be ordered")
+    margin, _ = parse_micro_usd_decimal(conservative_margin, field_name="conservative_margin")
+    if Decimal(margin) > Decimal("1"):
+        raise ValueError("conservative_margin must not exceed 1.0")
+    captured = _utc_timestamp(captured_at)
+    values = (
+        version,
+        bounded["task_mode"],
+        bounded["profile_id"],
+        bounded["model_identity"],
+        bounded["runtime_identity"],
+        bounded["gpu_class"],
+        bounded["duration_mode"],
+        float(duration_band_min_seconds),
+        float(duration_band_max_seconds),
+        output_count,
+        low,
+        high,
+        bounded["evidence_source"],
+        margin,
+        captured,
+    )
+    existing = session.scalar(
+        select(RuntimeCalibration).where(RuntimeCalibration.version == version)
+    )
+    if existing is not None:
+        stored = (
+            existing.version,
+            existing.task_mode,
+            existing.profile_id,
+            existing.model_identity,
+            existing.runtime_identity,
+            existing.gpu_class,
+            existing.duration_mode,
+            existing.duration_band_min_seconds,
+            existing.duration_band_max_seconds,
+            existing.output_count,
+            existing.execution_low_ms,
+            existing.execution_high_ms,
+            existing.evidence_source,
+            existing.conservative_margin,
+            existing.captured_at,
+        )
+        if stored == values:
+            return existing
+        raise EvidenceConflictError("conflicting reuse of immutable runtime calibration version")
+    row = RuntimeCalibration(
+        version=version,
+        task_mode=bounded["task_mode"],
+        profile_id=bounded["profile_id"],
+        model_identity=bounded["model_identity"],
+        runtime_identity=bounded["runtime_identity"],
+        gpu_class=bounded["gpu_class"],
+        duration_mode=bounded["duration_mode"],
+        duration_band_min_seconds=float(duration_band_min_seconds),
+        duration_band_max_seconds=float(duration_band_max_seconds),
+        output_count=output_count,
+        execution_low_ms=low,
+        execution_high_ms=high,
+        evidence_source=bounded["evidence_source"],
+        conservative_margin=margin,
+        captured_at=captured,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_matching_runtime_calibration(
+    session: Session,
+    *,
+    task_mode: str,
+    profile_id: str,
+    model_identity: str,
+    runtime_identity: str,
+    gpu_class: str,
+    duration_mode: str,
+    duration_value_seconds: float | None,
+    output_count: int,
+) -> RuntimeCalibration | None:
+    """Return the newest exact-dimension calibration without extrapolation."""
+
+    if duration_value_seconds is None:
+        return None
+    return cast(
+        RuntimeCalibration | None,
+        session.scalar(
+            select(RuntimeCalibration)
+            .where(
+                RuntimeCalibration.task_mode == task_mode,
+                RuntimeCalibration.profile_id == profile_id,
+                RuntimeCalibration.model_identity == model_identity,
+                RuntimeCalibration.runtime_identity == runtime_identity,
+                RuntimeCalibration.gpu_class == gpu_class,
+                RuntimeCalibration.duration_mode == duration_mode,
+                RuntimeCalibration.duration_band_min_seconds <= duration_value_seconds,
+                RuntimeCalibration.duration_band_max_seconds >= duration_value_seconds,
+                RuntimeCalibration.output_count == output_count,
+            )
+            .order_by(RuntimeCalibration.version.desc())
+            .limit(1)
+        ),
+    )
+
+
+def get_gpu_rate(
+    session: Session,
+    gpu_id: str,
+    *,
+    provider: str = "runpod",
+    now: datetime | None = None,
+) -> GpuRateCatalog | None:
+    """Return the freshest trusted rate for one GPU, or None when stale/missing."""
+
+    current = _utc_timestamp(now)
+    return session.scalar(
+        select(GpuRateCatalog)
+        .where(
+            GpuRateCatalog.gpu_id == gpu_id,
+            GpuRateCatalog.provider == provider,
+            GpuRateCatalog.expires_at > current,
+        )
+        .order_by(GpuRateCatalog.calibration_version.desc())
+        .limit(1)
+    )
+
+
+def get_current_gpu_rates(
+    session: Session,
+    gpu_ids: list[str],
+    *,
+    provider: str = "runpod",
+    now: datetime | None = None,
+) -> dict[str, GpuRateCatalog]:
+    """Return only the fresh trusted rates for the requested GPU IDs.
+
+    Unknown or stale eligible GPUs are simply absent; quote/estimate callers
+    must treat any missing eligible GPU as a reason to make the amount
+    unavailable rather than quoting from the cheaper known subset.
+    """
+
+    current = _utc_timestamp(now)
+    if not gpu_ids:
+        return {}
+    rows = session.scalars(
+        select(GpuRateCatalog).where(
+            GpuRateCatalog.provider == provider,
+            GpuRateCatalog.gpu_id.in_(gpu_ids),
+            GpuRateCatalog.expires_at > current,
+        )
+    )
+    rates: dict[str, GpuRateCatalog] = {}
+    for row in rows:
+        prior = rates.get(row.gpu_id)
+        if prior is None or row.calibration_version > prior.calibration_version:
+            rates[row.gpu_id] = row
+    return rates
+
+
+def get_latest_gpu_rates(
+    session: Session,
+    gpu_ids: list[str],
+    *,
+    provider: str = "runpod",
+) -> dict[str, GpuRateCatalog]:
+    """Return the latest catalog row per GPU regardless of freshness.
+
+    Callers split the result into fresh and stale sets so an unavailable
+    quote can distinguish ``rate_unknown`` from ``rate_stale``.
+    """
+
+    if not gpu_ids:
+        return {}
+    rows = session.scalars(
+        select(GpuRateCatalog).where(
+            GpuRateCatalog.provider == provider,
+            GpuRateCatalog.gpu_id.in_(gpu_ids),
+        )
+    )
+    latest: dict[str, GpuRateCatalog] = {}
+    for row in rows:
+        prior = latest.get(row.gpu_id)
+        if prior is None or row.calibration_version > prior.calibration_version:
+            latest[row.gpu_id] = row
+    return latest
+
+
+def sum_terminal_attempt_estimates(
+    session: Session,
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+) -> CostSummary:
+    """Sum terminal attempt estimates by terminal ``completed_at``.
+
+    The interval is half-open UTC ``[start, end)``.  A terminal attempt with
+    complete evidence contributes its non-null estimate (including a proven
+    zero); a terminal attempt with pending or unavailable evidence (including
+    every legacy row) reports partial coverage instead of an invented number.
+    """
+
+    start = _utc_timestamp(interval_start)
+    end = _utc_timestamp(interval_end)
+    if end < start:
+        raise ValueError("interval_end must not precede interval_start")
+    attempts = session.scalars(
+        select(VariationAttempt).where(
+            VariationAttempt.status.in_([JobStatus.COMPLETED, JobStatus.FAILED]),
+            VariationAttempt.completed_at >= start,
+            VariationAttempt.completed_at < end,
+        )
+    )
+    summed = 0
+    terminal_attempts = 0
+    with_estimate = 0
+    without_cost = 0
+    for attempt in attempts:
+        terminal_attempts += 1
+        if (
+            attempt.evidence_status == "complete"
+            and attempt.estimated_compute_micro_usd is not None
+        ):
+            summed += attempt.estimated_compute_micro_usd
+            with_estimate += 1
+        else:
+            without_cost += 1
+    return CostSummary(
+        interval_start=start,
+        interval_end=end,
+        summed_estimate_micro_usd=summed,
+        terminal_attempts=terminal_attempts,
+        attempts_with_estimate=with_estimate,
+        attempts_without_cost=without_cost,
+        partial_coverage=without_cost > 0,
+    )
+
+
+def reconcile_delta(
+    session: Session,
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+    actual_endpoint_micro_usd: int | None,
+    cutoff_at: datetime | None = None,
+    source_contract: str | None = None,
+) -> ReconciliationResult:
+    """Compute the signed endpoint reconciliation delta for one half-open interval.
+
+    ``delta = actual endpoint amount - summed terminal estimates``; negative
+    values are preserved and never clamped or relabeled as startup/idle spend.
+    Any terminal attempt without cost evidence makes coverage partial, and a
+    missing actual amount makes reconciliation unavailable.
+    """
+
+    summary = sum_terminal_attempt_estimates(
+        session, interval_start=interval_start, interval_end=interval_end
+    )
+    if actual_endpoint_micro_usd is None:
+        return ReconciliationResult(
+            interval_start=summary.interval_start,
+            interval_end=summary.interval_end,
+            actual_endpoint_micro_usd=None,
+            summed_estimates_micro_usd=None,
+            delta_micro_usd=None,
+            coverage="unavailable",
+            cutoff_at=cutoff_at,
+            source_contract=source_contract,
+        )
+    if isinstance(actual_endpoint_micro_usd, bool) or not isinstance(
+        actual_endpoint_micro_usd, int
+    ):
+        raise ValueError("actual_endpoint_micro_usd must be an integer")
+    summed = summary.summed_estimate_micro_usd
+    coverage = "partial" if summary.partial_coverage else "complete"
+    return ReconciliationResult(
+        interval_start=summary.interval_start,
+        interval_end=summary.interval_end,
+        actual_endpoint_micro_usd=actual_endpoint_micro_usd,
+        summed_estimates_micro_usd=summed,
+        delta_micro_usd=actual_endpoint_micro_usd - summed,
+        coverage=coverage,
+        cutoff_at=cutoff_at,
+        source_contract=source_contract,
+    )
+
+
+def sum_billing_projections(
+    session: Session,
+    *,
+    resource_type: str,
+    interval_start: datetime,
+    interval_end: datetime,
+    provider: str = "runpod",
+) -> int:
+    """Sum current provider buckets whose native UTC start lies in the interval.
+
+    Native provider buckets are never shifted or prorated; callers must align
+    the half-open interval with native bucket boundaries before using the
+    total (the boundary probe and reconciliation gates enforce this).
+    """
+
+    start = _utc_timestamp(interval_start)
+    end = _utc_timestamp(interval_end)
+    if end < start:
+        raise ValueError("interval_end must not precede interval_start")
+    rows = session.scalars(
+        select(BillingProjection).where(
+            BillingProjection.provider == provider,
+            BillingProjection.resource_type == resource_type,
+            BillingProjection.bucket_start >= start,
+            BillingProjection.bucket_start < end,
+        )
+    )
+
+    total = 0
+    for row in rows:
+        _, micro_usd = parse_micro_usd_decimal(row.latest_amount, field_name="latest_amount")
+        total += micro_usd
+    return total
+
+
+def sum_network_volume_observations(
+    session: Session,
+    *,
+    interval_start: datetime,
+    interval_end: datetime,
+) -> NetworkVolumeSummary:
+    """Account-wide network-volume evidence for one half-open UTC interval.
+
+    The result is deliberately separate: it is never allocated to jobs and
+    never summed into service totals without a future provider-supported
+    volume dimension.
+    """
+
+    start = _utc_timestamp(interval_start)
+    end = _utc_timestamp(interval_end)
+    if end < start:
+        raise ValueError("interval_end must not precede interval_start")
+    rows = session.scalars(
+        select(BillingProjection).where(
+            BillingProjection.provider == "runpod",
+            BillingProjection.resource_type == "network_volume",
+            BillingProjection.grouping_key == "account",
+            BillingProjection.bucket_start >= start,
+            BillingProjection.bucket_start < end,
+        )
+    )
+
+    total = 0
+    count = 0
+    for row in rows:
+        _, micro_usd = parse_micro_usd_decimal(row.latest_amount, field_name="latest_amount")
+        total += micro_usd
+        count += 1
+    return NetworkVolumeSummary(
+        interval_start=start,
+        interval_end=end,
+        summed_amount_micro_usd=total,
+        observation_count=count,
+        currency="USD",
+    )

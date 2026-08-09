@@ -27,6 +27,12 @@ from ace_service.auth import (
 )
 from ace_service.campaign import CampaignError, CampaignStore
 from ace_service.config import ServiceSettings
+from ace_service.costs import (
+    apply_conservative_margin,
+    compute_submission_quote,
+    select_highest_exact_rate_gpu,
+    utc_now,
+)
 from ace_service.cover import remove_cover_source
 from ace_service.models import (
     Job,
@@ -34,15 +40,18 @@ from ace_service.models import (
     JobType,
     Output,
     OutputFormat,
+    SubmissionQuote,
     VariationAttempt,
-    utc_now,
 )
 from ace_service.repository import (
     cancel_cover_staging,
     confirm_cover_job,
     create_cover_job,
     create_original_job,
+    create_submission_quote,
     get_job,
+    get_latest_gpu_rates,
+    get_matching_runtime_calibration,
     get_output,
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
@@ -65,6 +74,98 @@ _STATUS_LABELS = {
     JobStatus.COMPLETED: "Completed",
     JobStatus.FAILED: "Failed",
 }
+
+
+def capture_submission_quote(app: FastAPI, session: Any, job: Job) -> SubmissionQuote | None:
+    """Compute and persist the server-owned quote in the acceptance transaction.
+
+    Never accepted from the form; an unconfirmed cover staging record gets no
+    quote.  With no calibration observations or fresh rates the quote is
+    unavailable with a bounded reason and generation still proceeds.
+    """
+
+    normalized = job.normalized_request_json
+    generation: Mapping[str, Any] = {}
+    if isinstance(normalized, Mapping):
+        raw_generation = normalized.get("generation")
+        if isinstance(raw_generation, Mapping):
+            generation = raw_generation
+    profile_id = normalized.get("profile_id") if isinstance(normalized, Mapping) else None
+    duration_mode = generation.get("duration_mode")
+    duration_value = generation.get("duration_seconds")
+    eligible_gpu_ids = list(app.state.settings.eligible_gpu_ids)
+    captured_at = utc_now()
+    latest_rates = get_latest_gpu_rates(session, eligible_gpu_ids)
+    now = utc_now()
+    fresh_rates = {
+        gpu_id: row.rate_micro_usd_per_hour
+        for gpu_id, row in latest_rates.items()
+        if row.expires_at > now
+    }
+    fresh_rate_usd = {
+        gpu_id: row.hourly_rate_usd for gpu_id, row in latest_rates.items() if row.expires_at > now
+    }
+    stale_gpu_ids = {gpu_id for gpu_id, row in latest_rates.items() if row.expires_at <= now}
+    highest_gpu = (
+        select_highest_exact_rate_gpu(
+            eligible_gpu_ids=eligible_gpu_ids,
+            fresh_rates=fresh_rates,
+            fresh_rate_usd=fresh_rate_usd,
+        )
+        if fresh_rates and all(gpu_id in fresh_rates for gpu_id in eligible_gpu_ids)
+        else None
+    )
+    model_identity = app.state.settings.acestep_model
+    runtime_identity = app.state.settings.runpod_worker_runtime_identity
+    calibration = None
+    if (
+        highest_gpu is not None
+        and runtime_identity is not None
+        and isinstance(profile_id, str)
+        and isinstance(duration_mode, str)
+    ):
+        calibration = get_matching_runtime_calibration(
+            session,
+            task_mode=job.job_type.value,
+            profile_id=profile_id,
+            model_identity=model_identity,
+            runtime_identity=runtime_identity,
+            gpu_class=highest_gpu,
+            duration_mode=duration_mode,
+            duration_value_seconds=(
+                float(duration_value) if isinstance(duration_value, (int, float)) else None
+            ),
+            output_count=job.variation_count,
+        )
+    predicted_range = (
+        apply_conservative_margin(
+            (calibration.execution_low_ms, calibration.execution_high_ms),
+            calibration.conservative_margin,
+        )
+        if calibration is not None
+        else None
+    )
+    estimate = compute_submission_quote(
+        profile_id=profile_id if isinstance(profile_id, str) else None,
+        duration_mode=duration_mode if isinstance(duration_mode, str) else None,
+        duration_value_seconds=(
+            float(duration_value) if isinstance(duration_value, (int, float)) else None
+        ),
+        variation_count=job.variation_count,
+        eligible_gpu_ids=eligible_gpu_ids,
+        fresh_rates=fresh_rates,
+        fresh_rate_usd=fresh_rate_usd,
+        stale_gpu_ids=stale_gpu_ids,
+        calibration_version=calibration.version if calibration is not None else None,
+        predicted_execution_range_ms=predicted_range,
+        rate_source=(latest_rates[highest_gpu].source if highest_gpu is not None else None),
+        rate_version=(
+            str(latest_rates[highest_gpu].calibration_version) if highest_gpu is not None else None
+        ),
+        captured_at=captured_at,
+        model_identity=model_identity,
+    )
+    return create_submission_quote(session, job.id, estimate, captured_at=captured_at)
 
 
 def register_web_routes(app: FastAPI) -> None:
@@ -142,6 +243,7 @@ def register_web_routes(app: FastAPI) -> None:
             )
         with app.state.session_factory() as session:
             job = create_original_job(session, job_request)
+            capture_submission_quote(app, session, job)
             session.commit()
             job_id = job.id
         _enqueue(app, job_id)
@@ -196,6 +298,7 @@ def register_web_routes(app: FastAPI) -> None:
                 confirm_cover_job(session, job.id)
             except ValueError as exc:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            capture_submission_quote(app, session, job)
             session.commit()
         _enqueue(app, job_id)
         return RedirectResponse(f"/jobs/{job_id}", status_code=status.HTTP_303_SEE_OTHER)

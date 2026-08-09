@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,15 +14,23 @@ import ace_service.web as web_routes
 from ace_service.app import create_app
 from ace_service.config import ServiceSettings
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
-from ace_service.models import JobStatus, JobType
+from ace_service.models import JobStatus, JobType, SubmissionQuote
 from ace_service.repository import (
+    EvidenceConflictError,
     create_job,
     create_output,
     finalize_cover_job_duration,
     get_job,
+    get_submission_quote,
     transition_job,
+    upsert_gpu_rate,
+    upsert_runtime_calibration,
 )
 from ace_service.transfers import create_transfer_app
+from ace_service.web import capture_submission_quote
+
+RUNTIME_A = "sha256:" + "a" * 64
+RUNTIME_B = "sha256:" + "b" * 64
 
 
 class FakeRunpod:
@@ -354,6 +363,164 @@ def test_original_form_duration_language_validation(
         assert response.status_code == expected_status
         if expected_status == 303:
             assert len(worker.enqueued) == 1
+
+
+def test_quote_runtime_identity_config_is_bounded_and_required(
+    settings: ServiceSettings,
+) -> None:
+    with pytest.raises(ValueError, match="runpod_worker_runtime_identity is required"):
+        ServiceSettings(
+            data_root=settings.data_root,
+            service_password="test-password",
+            home_ingest_token="test-home-token",
+            runpod_api_key="test-runpod-key",
+            runpod_endpoint_id="test-endpoint",
+            eligible_gpu_ids=["L40S"],
+        )
+    for invalid in ("worker-schema-v2", "sha256:abc", "sha256:" + "g" * 64):
+        with pytest.raises(ValueError, match="exact sha256"):
+            ServiceSettings(
+                data_root=settings.data_root,
+                service_password="test-password",
+                home_ingest_token="test-home-token",
+                runpod_api_key="test-runpod-key",
+                runpod_endpoint_id="test-endpoint",
+                eligible_gpu_ids=["L40S"],
+                runpod_worker_runtime_identity=invalid,
+            )
+
+
+def test_acceptance_quote_uses_only_configured_exact_runtime_identity(
+    settings: ServiceSettings,
+) -> None:
+    runtime_settings = ServiceSettings(
+        data_root=settings.data_root,
+        service_password="test-password",
+        home_ingest_token="test-home-token",
+        runpod_api_key="test-runpod-key",
+        runpod_endpoint_id="test-endpoint",
+        eligible_gpu_ids=["L40S"],
+        runpod_worker_runtime_identity=RUNTIME_A,
+    )
+    engine = create_database_engine(runtime_settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    now = datetime.now(UTC)
+    with factory() as session:
+        upsert_gpu_rate(
+            session,
+            gpu_id="L40S",
+            rate_micro_usd_per_hour=700_000,
+            hourly_rate_usd="0.7000004",
+            source="runpod_flex_api",
+            calibration_version=1,
+            captured_at=now,
+        )
+        upsert_runtime_calibration(
+            session,
+            version=1,
+            task_mode="original",
+            profile_id="fast-beta-v1",
+            model_identity=runtime_settings.acestep_model,
+            runtime_identity=RUNTIME_A,
+            gpu_class="L40S",
+            duration_mode="custom",
+            duration_band_min_seconds=30.0,
+            duration_band_max_seconds=30.0,
+            output_count=1,
+            execution_low_ms=20_531,
+            execution_high_ms=20_531,
+            evidence_source="accepted-local-measurement-v1",
+            conservative_margin="0",
+            captured_at=now,
+        )
+        session.commit()
+
+    worker = FakeWorker()
+    app = create_app(
+        runtime_settings,
+        session_factory=factory,
+        runpod_client=FakeRunpod(),
+        home_ingest_client=FakeHome(),
+        worker=worker,
+    )
+    try:
+        with TestClient(app) as client:
+            token = _csrf(client)
+            accepted = client.post(
+                "/create",
+                auth=_auth(client),
+                data={
+                    "csrf_token": token,
+                    "description": "plain piano arrangement",
+                    "duration_mode": "custom",
+                    "duration_seconds": "30",
+                    # Browser input cannot override the server-owned identity.
+                    "runpod_worker_runtime_identity": RUNTIME_B,
+                },
+                follow_redirects=False,
+            )
+            assert accepted.status_code == 303
+            first_job_id = accepted.headers["location"].rsplit("/", 1)[-1]
+
+            with factory() as session:
+                first_job = get_job(session, first_job_id)
+                assert first_job is not None
+                first_quote = get_submission_quote(session, first_job_id)
+                assert first_quote is not None and first_quote.unavailable_reason_code is None
+                assert first_quote.calibration_version == 1
+                quote_id = first_quote.id
+                captured_at = first_quote.captured_at
+                repeated = capture_submission_quote(app, session, first_job)
+                assert repeated is not None and repeated.id == quote_id
+                assert repeated.captured_at == captured_at
+
+            changed_settings = ServiceSettings(
+                data_root=settings.data_root,
+                service_password="test-password",
+                home_ingest_token="test-home-token",
+                runpod_api_key="test-runpod-key",
+                runpod_endpoint_id="test-endpoint",
+                eligible_gpu_ids=["L40S"],
+                runpod_worker_runtime_identity=RUNTIME_B,
+            )
+            app.state.settings = changed_settings
+            with factory() as session:
+                first_job = get_job(session, first_job_id)
+                assert first_job is not None
+                with pytest.raises(EvidenceConflictError, match="conflicting submission quote"):
+                    capture_submission_quote(app, session, first_job)
+                session.rollback()
+                unchanged = get_submission_quote(session, first_job_id)
+                assert unchanged is not None
+                assert (unchanged.id, unchanged.captured_at, unchanged.calibration_version) == (
+                    quote_id,
+                    captured_at,
+                    1,
+                )
+
+            token = _csrf(client)
+            missing = client.post(
+                "/create",
+                auth=_auth(client),
+                data={
+                    "csrf_token": token,
+                    "description": "plain piano arrangement",
+                    "duration_mode": "custom",
+                    "duration_seconds": "30",
+                    "runpod_worker_runtime_identity": RUNTIME_A,
+                },
+                follow_redirects=False,
+            )
+            assert missing.status_code == 303
+            second_job_id = missing.headers["location"].rsplit("/", 1)[-1]
+            with factory() as session:
+                second_quote = get_submission_quote(session, second_job_id)
+                assert second_quote is not None
+                assert second_quote.unavailable_reason_code == "calibration_missing"
+                assert session.query(SubmissionQuote).count() == 2
+    finally:
+        engine.dispose()
 
 
 def test_status_polling_and_timing_metadata(web_app) -> None:

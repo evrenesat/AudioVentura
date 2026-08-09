@@ -288,6 +288,73 @@ and removes non-retained terminal cover sources. It never removes completed
 outputs. Logs contain job/stage/error/timing metadata but redact credentials,
 authorization headers, capability URLs, prompts, and lyrics.
 
+## Schema migration and billing sync
+
+The database schema is versioned by an ordered migration runner. Normal
+application startup never migrates: it creates the foundation tables only and
+refuses to serve unless the schema is at the exact expected version.
+
+```text
+uv run python -m ace_service migrate-status --database /srv/ace-service/data/service.db
+uv run python -m ace_service migrate-upgrade --database /srv/ace-service/data/service.db
+```
+
+`migrate-status` opens the database read-only and prints only a non-secret
+path hash and the state (unversioned legacy, exact expected version, older,
+unknown/newer, incomplete started/failed, missing, non-database, corrupt).
+`migrate-upgrade` holds an exclusive sidecar lock
+(`service.db.migration.lock`), commits a durable attempt marker in a short
+transaction, then applies the additive schema in a separate exclusive
+transaction. A crash or failure leaves a visible incomplete marker and the
+next upgrade refuses; restore the verified pre-upgrade backup instead of
+retrying. Before upgrading an existing deployment, create a SQLite-API backup
+and run `PRAGMA integrity_check` on both the source and the copy, then
+exercise legacy reads on the migrated copy before starting the new release.
+
+Runpod billing is an operator-only boundary (`billing-sync`); no browser
+route and no in-process scheduler ever calls it:
+
+```text
+uv run python -m ace_service billing-sync \
+  --database /srv/ace-service/data/service.db \
+  --start 2026-08-08T00:00:00Z --end 2026-08-09T00:00:00Z
+```
+
+It refuses a non-exact schema, holds the database singleton lease (stale
+leases are recovered), preserves native hourly UTC buckets append-only with
+an idempotent current projection, and keeps account-wide network-volume
+evidence separate from endpoint costs. A newer exact-repeat fetch advances
+projection freshness without duplicating history; older/equal repeats and
+older changed replays cannot replace that projection. Exactness is relative to
+the current projection, so A -> B -> A stores all three fetch events and the
+last A becomes current; retrying a changed event does not duplicate it. The
+additive v4-to-v5 migration preserves existing observation rows and establishes
+their projection value identity lazily. An exact retry of preserved v4 history
+reuses the original immutable row only when its complete native bucket,
+evidence, and UTC fetch time match; this applies identically to endpoint and
+account-wide network-volume history. Credentials come from
+the deployment `.env` (`RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`).
+
+The adapter uses `https://rest.runpod.io/v1/billing`, requests endpoint rows
+with exactly `bucketSize=hour`, `grouping=endpointId`, `endpointId`,
+`startTime`, and `endTime`, and rejects oversized or undocumented response
+shapes. Network-volume summaries read the latest projection for each native
+bucket; immutable older observations remain available for audit. No billing
+sync should be enabled for UI totals until the separate read-only boundary
+probe establishes interval semantics.
+
+Populate `gpu_rate_catalog` and `runtime_calibrations` only from accepted,
+timestamped operator evidence. Calibration lookup requires exact task mode,
+profile, model/runtime identity, GPU class, duration mode/band, and output
+count; out-of-band durations are not extrapolated. Set
+`RUNPOD_WORKER_RUNTIME_IDENTITY` to the deployed worker image's immutable
+`sha256:<64 hex>` digest whenever `ACE_ELIGIBLE_GPU_IDS` is configured. Startup
+rejects a missing or malformed digest, and browser fields cannot override it.
+This is an exact deployment/release identity, not `worker-schema-v2` or another
+compatibility protocol label. Version reuse is permitted only for an exact
+repeat. With no calibration for the configured digest, generation proceeds
+with an explicit `calibration_missing` quote.
+
 ## Backups and diagnosis
 
 Back up `service.db` with SQLite-aware file/database tooling and the

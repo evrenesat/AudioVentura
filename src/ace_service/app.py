@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from ace_service.db import (
     SessionFactory,
     create_database_engine,
     create_session_factory,
+    ensure_schema_readiness,
     initialize_database,
 )
 from ace_service.home_ingest import HomeIngestClient
@@ -95,7 +97,17 @@ def create_app(
     engine = None
     if session_factory is None:
         engine = create_database_engine(resolved_settings)
+        database_path = Path(engine.url.database or "")
+        if database_path.is_file():
+            # An existing database is never touched by the foundation creator:
+            # readiness must already be exact before create_all could add any
+            # table, so startup refuses instead of silently migrating.
+            ensure_schema_readiness(engine)
         initialize_database(engine)
+        # Normal startup never migrates: refuse every schema state except the
+        # exact expected version.  Tests that inject their own session factory
+        # own their schema and skip this production-path guard.
+        ensure_schema_readiness(engine)
         session_factory = create_session_factory(engine)
 
     resolved_runpod = runpod_client or RunpodClient.from_settings(resolved_settings)

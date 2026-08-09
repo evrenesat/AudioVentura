@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -24,6 +25,7 @@ _CREDENTIAL_FIELDS = (
     "runpod_api_key",
     "runpod_endpoint_id",
 )
+_WORKER_RUNTIME_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +227,13 @@ class ServiceSettings(BaseSettings):
         validation_alias=AliasChoices("ACESTEP_LM_MODEL", "acestep_lm_model"),
         min_length=1,
     )
+    runpod_worker_runtime_identity: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "RUNPOD_WORKER_RUNTIME_IDENTITY", "runpod_worker_runtime_identity"
+        ),
+        max_length=71,
+    )
     max_generation_duration_seconds: int = Field(
         default=600,
         validation_alias=AliasChoices(
@@ -294,6 +303,65 @@ class ServiceSettings(BaseSettings):
         ge=1,
         le=365,
     )
+    price_max_age_hours: int = Field(
+        default=24,
+        validation_alias=AliasChoices("PRICE_MAX_AGE_HOURS", "price_max_age_hours"),
+        ge=1,
+    )
+    eligible_gpu_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("ACE_ELIGIBLE_GPU_IDS", "eligible_gpu_ids"),
+    )
+    billing_trailing_window_hours: int = Field(
+        default=48,
+        validation_alias=AliasChoices(
+            "ACE_BILLING_TRAILING_WINDOW_HOURS", "billing_trailing_window_hours"
+        ),
+        ge=1,
+    )
+    billing_response_max_bytes: int = Field(
+        default=1_048_576,
+        validation_alias=AliasChoices(
+            "ACE_BILLING_RESPONSE_MAX_BYTES", "billing_response_max_bytes"
+        ),
+        ge=1024,
+    )
+    billing_request_timeout_seconds: float = Field(
+        default=10,
+        validation_alias=AliasChoices(
+            "ACE_BILLING_REQUEST_TIMEOUT_SECONDS", "billing_request_timeout_seconds"
+        ),
+        gt=0,
+    )
+    billing_lease_ttl_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices("ACE_BILLING_LEASE_TTL_SECONDS", "billing_lease_ttl_seconds"),
+        gt=0,
+    )
+
+    @field_validator("eligible_gpu_ids")
+    @classmethod
+    def validate_eligible_gpu_ids(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for gpu_id in value:
+            if not isinstance(gpu_id, str) or not gpu_id.strip():
+                raise ValueError("eligible GPU IDs must be non-empty strings")
+            normalized.append(gpu_id.strip())
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("eligible GPU IDs must not contain duplicates")
+        return normalized
+
+    @field_validator("runpod_worker_runtime_identity")
+    @classmethod
+    def validate_runpod_worker_runtime_identity(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not _WORKER_RUNTIME_DIGEST_RE.fullmatch(normalized):
+            raise ValueError(
+                "worker runtime identity must be an exact sha256:<64 lowercase hex> digest"
+            )
+        return normalized
 
     @field_validator("host", "transfer_host")
     @classmethod
@@ -332,6 +400,11 @@ class ServiceSettings(BaseSettings):
             value = getattr(self, field_name).strip().lower()
             if value in _PLACEHOLDERS or value.endswith(".example.invalid"):
                 raise ValueError(f"{field_name} still contains a configuration placeholder")
+
+        if self.eligible_gpu_ids and self.runpod_worker_runtime_identity is None:
+            raise ValueError(
+                "runpod_worker_runtime_identity is required when eligible GPU IDs are configured"
+            )
 
         self.data_root = self.data_root.expanduser().resolve()
         if self.evaluation_campaign_database is not None:

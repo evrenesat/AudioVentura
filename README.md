@@ -12,6 +12,32 @@ Run the controller locally with configured credentials using:
 uv run python -m ace_service
 ```
 
+The schema is versioned and never migrated at startup. Use the explicit
+commands with an explicit resolved database path (read-only status first,
+then offline upgrade under an exclusive sidecar lock after a verified backup):
+
+```text
+uv run python -m ace_service migrate-status --database /path/to/service.db
+uv run python -m ace_service migrate-upgrade --database /path/to/service.db
+```
+
+Runpod billing is an operator-only boundary with no browser route:
+
+```text
+uv run python -m ace_service billing-sync \
+  --database /path/to/service.db --start 2026-08-08T00:00:00Z --end 2026-08-09T00:00:00Z
+```
+
+The offline-verified adapter targets the documented
+`https://rest.runpod.io/v1/billing` REST host. Provider totals remain
+unavailable until interval semantics are separately proven; network-volume
+evidence is account-wide and excluded from AudioVentura endpoint totals.
+Submission quotes require fresh rates for every eligible GPU and one exact
+persisted runtime-calibration match. `RUNPOD_WORKER_RUNTIME_IDENTITY` pins the
+deployed worker image as an exact `sha256:<64 hex>` release identity; it is
+server configuration and never browser input. An empty or different-runtime
+calibration catalog truthfully produces `calibration_missing`.
+
 Operational deployment, Tailscale/proxy policy, cleanup, backups, and live
 acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
