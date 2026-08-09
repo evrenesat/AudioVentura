@@ -1005,7 +1005,7 @@ class TestWorkerPollEvidence:
             hourly_rate_usd="0.7000004",
             source="runpod_flex_api",
             calibration_version=1,
-            captured_at=FIXED_NOW - timedelta(hours=1),
+            captured_at=datetime.now(UTC) - timedelta(hours=1),
             price_max_age_hours=24,
         )
         job = create_job(session, job_type=JobType.ORIGINAL, variation_count=1)

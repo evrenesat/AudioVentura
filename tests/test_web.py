@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import sqlite3
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ import ace_service.web as web_routes
 from ace_service.app import create_app
 from ace_service.config import ServiceSettings
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
+from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, SubmissionQuote
 from ace_service.repository import (
     EvidenceConflictError,
@@ -361,6 +363,194 @@ def test_project_new_submission_without_continuation_creates_new_project(web_app
         assert job.project.jobs == [job]
 
 
+def test_projects_workspace_orders_versions_outputs_and_job_links(web_app) -> None:
+    app, factory, worker = web_app
+    with factory() as session:
+        older = create_original_job(
+            session,
+            OriginalSongRequest(description="older separate project"),
+            job_id="older-project-job",
+        )
+        first = create_original_job(
+            session,
+            OriginalSongRequest(description="initial mix prompt"),
+            job_id="project-version-one",
+        )
+        second = create_original_job(
+            session,
+            OriginalSongRequest(description="revised mix prompt"),
+            job_id="project-version-two",
+            project=first.project_id,
+        )
+        older.project.updated_at = datetime(2026, 8, 7, tzinfo=UTC)
+        first.project.updated_at = datetime(2026, 8, 9, tzinfo=UTC)
+        first.created_at = datetime(2026, 8, 8, tzinfo=UTC)
+        second.created_at = datetime(2026, 8, 9, tzinfo=UTC)
+        first.status = JobStatus.COMPLETED
+        second.status = JobStatus.FAILED
+        second.user_facing_error = "This version failed clearly."
+        output = create_output(
+            session,
+            job_id=first.id,
+            variation_index=1,
+            result_index=0,
+            relative_path=f"{first.id}/variation-01.mp3",
+            mime_type="audio/mpeg",
+            byte_size=2048,
+            sha256="b" * 64,
+        )
+        session.commit()
+        project_id = first.project_id
+        older_project_id = older.project_id
+        output_id = output.id
+
+    with TestClient(app) as client:
+        assert client.get("/projects").status_code == 401
+        projects = client.get("/projects", auth=_auth(client))
+        assert projects.status_code == 200
+        assert projects.text.index(f'href="/projects/{project_id}"') < projects.text.index(
+            f'href="/projects/{older_project_id}"'
+        )
+        assert "2 versions" in projects.text
+
+        detail = client.get(f"/projects/{project_id}", auth=_auth(client))
+        assert detail.status_code == 200
+        assert detail.text.index("revised mix prompt") < detail.text.rindex(
+            "initial mix prompt"
+        )
+        assert "Version 2" in detail.text and "Version 1" in detail.text
+        assert "This version failed clearly." in detail.text
+        assert f'src="/media/{output_id}"' in detail.text
+        assert f'href="/files/{output_id}/download"' in detail.text
+        assert detail.text.count("Continue this version") == 2
+        assert f'href="/jobs/{first.id}"' in detail.text
+        assert f'href="/jobs/{second.id}"' in detail.text
+
+        history = client.get("/jobs", auth=_auth(client))
+        job_detail = client.get(f"/jobs/{first.id}", auth=_auth(client))
+        assert f'href="/projects/{project_id}"' in history.text
+        assert f'href="/projects/{project_id}"' in job_detail.text
+        assert worker.enqueued == []
+
+
+def test_project_rename_is_bounded_escaped_authenticated_and_csrf_protected(
+    web_app,
+) -> None:
+    app, factory, worker = web_app
+    with factory() as session:
+        job = create_original_job(
+            session,
+            OriginalSongRequest(description="rename source project"),
+            job_id="rename-project-job",
+        )
+        session.commit()
+        project_id = job.project_id
+        original_title = job.project.title
+
+    with TestClient(app) as client:
+        page = client.get(f"/projects/{project_id}", auth=_auth(client))
+        assert page.status_code == 200
+        token = client.cookies.get("ace_csrf")
+        assert token
+        assert (
+            client.post(
+                f"/projects/{project_id}/rename",
+                data={"csrf_token": token, "title": "Unauthorized"},
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                f"/projects/{project_id}/rename",
+                auth=_auth(client),
+                data={"title": "Missing CSRF"},
+            ).status_code
+            == 403
+        )
+        blank = client.post(
+            f"/projects/{project_id}/rename",
+            auth=_auth(client),
+            data={"csrf_token": token, "title": "   "},
+        )
+        oversized = client.post(
+            f"/projects/{project_id}/rename",
+            auth=_auth(client),
+            data={"csrf_token": token, "title": "x" * 161},
+        )
+        assert blank.status_code == 422
+        assert oversized.status_code == 422
+        assert "must not be empty" in blank.text
+        assert "at most 160 characters" in oversized.text
+        assert (
+            client.post(
+                "/projects/missing/rename",
+                auth=_auth(client),
+                data={"csrf_token": token, "title": "Valid title"},
+            ).status_code
+            == 404
+        )
+        renamed = client.post(
+            f"/projects/{project_id}/rename",
+            auth=_auth(client),
+            data={"csrf_token": token, "title": "  <script>Renamed</script>  "},
+            follow_redirects=False,
+        )
+        assert renamed.status_code == 303
+        assert renamed.headers["location"] == f"/projects/{project_id}"
+        rendered = client.get(f"/projects/{project_id}", auth=_auth(client))
+        assert "&lt;script&gt;Renamed&lt;/script&gt;" in rendered.text
+        assert "<script>Renamed</script>" not in rendered.text
+        assert client.get("/projects/missing", auth=_auth(client)).status_code == 404
+        assert worker.enqueued == []
+
+    with factory() as session:
+        renamed_job = get_job(session, "rename-project-job")
+        assert renamed_job is not None
+        assert original_title == "rename source project"
+        assert renamed_job.project.title == "<script>Renamed</script>"
+        assert session.query(Job).count() == 1
+
+
+def test_migrated_legacy_job_is_reachable_and_readable_through_projects(
+    settings, legacy_database_path
+) -> None:
+    job_id = "migrated-project-job"
+    connection = sqlite3.connect(str(legacy_database_path))
+    try:
+        connection.execute(
+            "INSERT INTO jobs (id, job_type, status, prompt, output_format, "
+            "variation_count, created_at, updated_at) VALUES "
+            "(?, 'original', 'completed', 'migrated historical prompt', 'mp3', 1, ?, ?)",
+            (job_id, "2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    migration_upgrade(str(legacy_database_path))
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    app = create_app(
+        settings,
+        session_factory=factory,
+        runpod_client=FakeRunpod(),
+        home_ingest_client=FakeHome(),
+        worker=FakeWorker(),
+    )
+    try:
+        with TestClient(app) as client:
+            projects = client.get("/projects", auth=_auth(client))
+            assert projects.status_code == 200
+            assert f'href="/projects/{job_id}"' in projects.text
+            detail = client.get(f"/projects/{job_id}", auth=_auth(client))
+            assert detail.status_code == 200
+            assert "migrated historical prompt" in detail.text
+            assert f'href="/jobs/{job_id}"' in detail.text
+            assert "Continue this version" not in detail.text
+    finally:
+        engine.dispose()
+
+
 def test_continue_cover_reconfirms_rights_and_uses_existing_staging_flow(web_app) -> None:
     app, factory, worker = web_app
     source_request = CoverRequest(
@@ -492,8 +682,8 @@ def test_continue_rejects_missing_malformed_and_cross_type_sources(web_app) -> N
         assert malformed_detail.status_code == 200
         assert "Continue this version" not in legacy_detail.text
         assert "Continue this version" not in malformed_detail.text
-        assert f'/jobs/{legacy.id}/continue' not in legacy_detail.text
-        assert f'/jobs/{malformed.id}/continue' not in malformed_detail.text
+        assert f"/jobs/{legacy.id}/continue" not in legacy_detail.text
+        assert f"/jobs/{malformed.id}/continue" not in malformed_detail.text
         token = _csrf(client)
         valid_original = {"csrf_token": token, "description": "valid edited source"}
         for source_id, expected in (
@@ -579,7 +769,7 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(payload)
     with factory() as session:
-        create_original_job(
+        original_job = create_original_job(
             session,
             OriginalSongRequest(description="prefix-safe continuation"),
             job_id=original_job_id,
@@ -596,6 +786,7 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
         )
         session.commit()
         output_id = output.id
+        original_project_id = original_job.project_id
 
     def assert_prefixed_browser_attributes(html: str) -> None:
         values = re.findall(r'(?:href|src|action)="([^"]+)"', html)
@@ -614,6 +805,16 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
             history = client.get("/jobs", auth=_auth(client))
             assert history.status_code == 200
             assert_prefixed_browser_attributes(history.text)
+            projects = client.get("/projects", auth=_auth(client))
+            assert projects.status_code == 200
+            assert f'href="/beta/projects/{original_project_id}"' in projects.text
+            assert_prefixed_browser_attributes(projects.text)
+            project_detail = client.get(f"/projects/{original_project_id}", auth=_auth(client))
+            assert project_detail.status_code == 200
+            assert f'action="/beta/projects/{original_project_id}/rename"' in project_detail.text
+            assert f'src="/beta/media/{output_id}"' in project_detail.text
+            assert f'href="/beta/files/{output_id}/download"' in project_detail.text
+            assert_prefixed_browser_attributes(project_detail.text)
 
             original_form = client.get("/create", auth=_auth(client))
             cover_form = client.get("/cover", auth=_auth(client))
@@ -641,9 +842,7 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
             assert f'data-status-url="/beta/jobs/{original_job_id}/status"' in detail.text
             assert f'src="/beta/media/{output_id}"' in detail.text
             assert f'href="/beta/files/{output_id}/download"' in detail.text
-            assert detail.text.count(
-                f'href="/beta/jobs/{original_job_id}/continue"'
-            ) == 1
+            assert detail.text.count(f'href="/beta/jobs/{original_job_id}/continue"') == 1
             assert detail.text.count("Continue this version") == 1
             assert f'href="/jobs/{original_job_id}/continue"' not in detail.text
             assert_prefixed_browser_attributes(detail.text)

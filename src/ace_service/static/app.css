@@ -4,7 +4,7 @@ body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 sy
 a { color: var(--accent-dark); }
 .site-header { align-items: center; background: var(--card); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; padding: 1rem max(1rem, calc((100vw - 960px) / 2)); }
 .brand { color: var(--ink); font-weight: 750; text-decoration: none; }
-nav { display: flex; gap: 1rem; }
+nav { display: flex; flex-wrap: wrap; gap: 1rem; }
 nav a { font-size: .92rem; text-decoration: none; }
 .container { margin: 0 auto; max-width: 960px; padding: 2rem 1rem 4rem; }
 .hero, .section-heading, .detail-status, .job-card-top, .actions { align-items: center; display: flex; justify-content: space-between; gap: 1rem; }
@@ -21,8 +21,9 @@ h3 { font-size: 1.05rem; margin: .75rem 0 .3rem; }
 .section-heading { margin: 2rem 0 1rem; }
 .section-heading h1, .section-heading h2 { margin: 0; }
 .job-list { display: grid; gap: .75rem; }
-.job-card { background: var(--card); border: 1px solid var(--line); border-radius: .65rem; color: var(--ink); display: block; padding: 1rem; text-decoration: none; }
+.job-card { background: var(--card); border: 1px solid var(--line); border-radius: .65rem; color: var(--ink); display: block; padding: 1rem; }
 .job-card:hover { border-color: var(--accent); }
+.job-card h3 a { color: var(--ink); text-decoration: none; }
 .job-card p, .output-card span, .muted { color: var(--muted); font-size: .9rem; margin: 0; }
 .tag, .status { border-radius: 999px; display: inline-block; font-size: .75rem; font-weight: 750; padding: .15rem .55rem; }
 .tag { background: #e7f1e9; color: var(--accent-dark); }
@@ -38,4 +39,9 @@ input, textarea, select { background: white; border: 1px solid #b9c8bd; border-r
 .job-detail h1 { max-width: 28ch; }.detail-status { justify-content: flex-start; margin: 1rem 0 2rem; }.detail-grid { display: grid; gap: 2rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }.detail-grid h2 { border-bottom: 1px solid var(--line); padding-bottom: .5rem; }
 dl { display: grid; gap: .45rem 1rem; grid-template-columns: max-content 1fr; }.detail-grid dt { color: var(--muted); font-size: .9rem; }.detail-grid dd { margin: 0; overflow-wrap: anywhere; }.preformatted { white-space: pre-wrap; }
 .output-card { border-bottom: 1px solid var(--line); display: grid; gap: .55rem; padding: .75rem 0; }.output-card div { display: flex; justify-content: space-between; gap: .5rem; }.output-card audio { max-width: 100%; width: 100%; }
-@media (max-width: 680px) { .site-header { align-items: flex-start; flex-direction: column; gap: .5rem; }.hero, .section-heading { align-items: flex-start; flex-direction: column; }.actions { width: 100%; }.actions .button { flex: 1; text-align: center; }.grid.two, .detail-grid { grid-template-columns: 1fr; }.container { padding-top: 1.4rem; } }
+.project-list, .version-list { display: grid; gap: 1rem; }
+.project-card, .version-card { background: var(--card); border: 1px solid var(--line); border-radius: .65rem; color: var(--ink); padding: 1rem; }
+.project-card { text-decoration: none; }.project-card:hover { border-color: var(--accent); }.project-card h2 { margin-bottom: .35rem; overflow-wrap: anywhere; }.project-card p { margin: 0; }
+.project-header { align-items: end; display: flex; justify-content: space-between; gap: 2rem; }.project-header h1 { overflow-wrap: anywhere; }.rename-form { min-width: min(100%, 22rem); }.rename-form > div { display: flex; gap: .5rem; }.rename-form .button { white-space: nowrap; }
+.version-card { min-width: 0; overflow-wrap: anywhere; }.version-card > header, .version-actions { align-items: center; display: flex; justify-content: space-between; gap: 1rem; }.version-card h2 { margin: .25rem 0 .5rem; }.request-summary { white-space: pre-wrap; }.version-actions { margin: 1rem 0; }.version-outputs { border-top: 1px solid var(--line); margin-top: 1rem; }.version-outputs audio { max-width: 100%; width: 100%; }
+@media (max-width: 680px) { .site-header { align-items: flex-start; flex-direction: column; gap: .5rem; }.hero, .section-heading, .project-header, .version-card > header, .version-actions { align-items: flex-start; flex-direction: column; }.actions { width: 100%; }.actions .button { flex: 1; text-align: center; }.grid.two, .detail-grid { grid-template-columns: 1fr; }.rename-form { min-width: 0; width: 100%; }.rename-form > div { align-items: stretch; flex-direction: column; }.version-actions .button { text-align: center; width: 100%; }.container { padding-top: 1.4rem; } }

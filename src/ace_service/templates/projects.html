@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Projects · ACE Service{% endblock %}
+{% block content %}
+<section class="section-heading">
+  <div><p class="eyebrow">Workspace</p><h1>Your projects</h1></div>
+  <div class="actions"><a class="button" href="{{ urls.create }}">New original</a><a class="button secondary" href="{{ urls.cover }}">New cover</a></div>
+</section>
+{% if projects %}
+<div class="project-list">
+  {% for project in projects %}
+  <a class="project-card" href="{{ project.detail_url }}">
+    <div class="job-card-top"><span class="tag">{{ project.job_type_label }}</span><span class="muted">{{ project.job_count }} version{% if project.job_count != 1 %}s{% endif %}</span></div>
+    <h2>{{ project.title }}</h2>
+    <p>Updated {{ project.updated_at }}</p>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty"><p>No projects yet.</p><a href="{{ urls.create }}">Create your first song</a></div>
+{% endif %}
+{% endblock %}

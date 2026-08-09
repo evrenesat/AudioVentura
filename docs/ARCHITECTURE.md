@@ -160,12 +160,31 @@ local-day claims.
 ## Checkpoint 4 cost ledger and billing reconciliation
 
 The product schema is versioned by the ordered migration runner in
-`ace_service/migrations.py` (current version 5). `migrate-status` is
+`ace_service/migrations.py` (current version 6). `migrate-status` is
 read-only (path hash + state only); `migrate-upgrade` is the only schema
 mutation, runs under an exclusive sidecar lock, commits a durable attempt
 marker before the additive DDL, and never auto-retries a crash/incomplete
 marker. Normal startup refuses every state except the exact expected version;
 `initialize_database()` stays a foundation creator.
+
+Schema v6 adds `projects` and indexed `jobs.project_id` membership. Each
+project has one immutable job type and a bounded editable title. The explicit
+v5-to-v6 migration creates one project per historical job using the job ID as
+the project ID and derives a bounded title from the sanitized source title,
+prompt, or type label. It does not rewrite historical job, output, attempt,
+quote, billing, or transfer evidence.
+
+Projects are a presentation and grouping boundary, not a generation state
+machine. Jobs remain the sole queueing, execution, output, failure, quote,
+billing, and transfer unit. Authenticated `/projects` lists projects by latest
+activity; `/projects/{id}` renders jobs newest-first with their existing
+authenticated media/download routes. Rename is the only project mutation and
+uses the existing Basic-auth and CSRF boundary. `GET /jobs/{id}/continue`
+reconstructs editable defaults only from a complete schema-v2 request and the
+stored source/job fields. The existing create POST validates the edited values
+again and derives same-project membership from the continuation source; it
+always creates a new job. Covers still require fresh rights confirmation,
+home ingestion, detected-duration confirmation, and the ordinary queue path.
 
 The ledger adds five record families, all through the existing SQLAlchemy
 session/repository boundary: immutable one-to-one `submission_quotes`
@@ -251,6 +270,11 @@ persist jobs before enqueueing them on the single controller worker, and do not
 block original requests on home-ingest readiness. `/jobs` and the dashboard
 show durable progress and recent history. `/jobs/{id}/status` is a bounded
 JSON polling surface used by the mobile-friendly detail page.
+
+The project workspace adds no Runpod call, worker payload, cover-ingest
+shortcut, billing rule, or transfer capability behavior. It composes the
+existing durable job and authenticated output views only; the separately
+constructed public transfer application remains unchanged.
 
 Playback and downloads resolve an output by database ID, enforce controlled
 audio MIME types, reject traversal and every symlink component, and verify the

@@ -35,11 +35,13 @@ from ace_service.costs import (
 )
 from ace_service.cover import remove_cover_source
 from ace_service.models import (
+    PROJECT_TITLE_MAX_LENGTH,
     Job,
     JobStatus,
     JobType,
     Output,
     OutputFormat,
+    Project,
     SubmissionQuote,
     VariationAttempt,
 )
@@ -53,6 +55,10 @@ from ace_service.repository import (
     get_latest_gpu_rates,
     get_matching_runtime_calibration,
     get_output,
+    get_project,
+    list_project_jobs,
+    list_projects,
+    rename_project,
     resolve_continuation_source,
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
@@ -219,6 +225,7 @@ def register_web_routes(app: FastAPI) -> None:
                     "dashboard": _route_path(request, "dashboard"),
                     "create": _route_path(request, "create_form"),
                     "cover": _route_path(request, "cover_form"),
+                    "projects": _route_path(request, "projects"),
                     "jobs": _route_path(request, "jobs"),
                     "app_css": _route_path(request, "static", path="app.css"),
                     "status_js": _route_path(request, "static", path="status.js"),
@@ -395,6 +402,59 @@ def register_web_routes(app: FastAPI) -> None:
                 for job in session.scalars(select(Job).order_by(Job.created_at.desc()).limit(100))
             ]
         return render(request, "jobs.html", {"jobs": job_views})
+
+    @app.get("/projects", dependencies=[Depends(authenticated)], name="projects")
+    async def projects(request: Request) -> Response:
+        with app.state.session_factory() as session:
+            project_views = [_project_view(request, project) for project in list_projects(session)]
+        return render(request, "projects.html", {"projects": project_views})
+
+    @app.get(
+        "/projects/{project_id}",
+        dependencies=[Depends(authenticated)],
+        name="project_detail",
+    )
+    async def project_detail(request: Request, project_id: str) -> Response:
+        with app.state.session_factory() as session:
+            context = _project_detail_context(request, session, project_id)
+        return render(request, "project_detail.html", context)
+
+    @app.post(
+        "/projects/{project_id}/rename",
+        dependencies=[Depends(authenticated)],
+        name="rename_project",
+    )
+    async def rename_project_route(request: Request, project_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        title = fields.get("title", "")
+        with app.state.session_factory() as session:
+            if get_project(session, project_id) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="project not found",
+                )
+            try:
+                rename_project(session, project_id, title)
+            except ValueError as exc:
+                context = _project_detail_context(
+                    request,
+                    session,
+                    project_id,
+                    rename_title=title,
+                    rename_errors=[str(exc)],
+                )
+                return render(
+                    request,
+                    "project_detail.html",
+                    context,
+                    response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            session.commit()
+        return RedirectResponse(
+            _route_path(request, "project_detail", project_id=project_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
     @app.get(
         "/jobs/{job_id}/continue",
@@ -770,6 +830,46 @@ def _route_path(request: Request, name: str, **path_params: Any) -> str:
     return request.url_for(name, **path_params).path
 
 
+def _project_view(request: Request, project: Project) -> dict[str, Any]:
+    return {
+        "project_id": project.id,
+        "title": project.title,
+        "job_type": project.job_type.value,
+        "job_type_label": (
+            "Cover project" if project.job_type is JobType.COVER else "Original project"
+        ),
+        "job_count": len(project.jobs),
+        "created_at": _iso(project.created_at),
+        "updated_at": _iso(project.updated_at),
+        "detail_url": _route_path(request, "project_detail", project_id=project.id),
+        "rename_url": _route_path(request, "rename_project", project_id=project.id),
+    }
+
+
+def _project_detail_context(
+    request: Request,
+    session: Any,
+    project_id: str,
+    *,
+    rename_title: str | None = None,
+    rename_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    project = get_project(session, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="project not found",
+        )
+    jobs = list_project_jobs(session, project.id)
+    return {
+        "project": _project_view(request, project),
+        "versions": [_job_view(request, job) for job in jobs],
+        "rename_title": project.title if rename_title is None else rename_title,
+        "rename_errors": rename_errors or [],
+        "project_title_max_length": PROJECT_TITLE_MAX_LENGTH,
+    }
+
+
 def _job_view(request: Request, job: Job) -> dict[str, Any]:
     attempts = sorted(job.variation_attempts, key=lambda item: item.variation_index)
     outputs = sorted(job.outputs, key=lambda item: (item.variation_index, item.result_index))
@@ -834,6 +934,8 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
     }
     try:
         if job.project is not None and job.project.job_type is job.job_type:
+            view["project_title"] = job.project.title
+            view["project_url"] = _route_path(request, "project_detail", project_id=job.project.id)
             _continuation_form(job)
             view["continue_url"] = _route_path(request, "continue_job", job_id=job.id)
     except ValueError:

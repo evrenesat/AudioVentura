@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{{ project.title }} · ACE Service{% endblock %}
+{% block content %}
+<section class="project-header">
+  <div><p class="eyebrow">{{ project.job_type_label }}</p><h1>{{ project.title }}</h1><p class="muted">{{ project.job_count }} version{% if project.job_count != 1 %}s{% endif %} · updated {{ project.updated_at }}</p></div>
+  <form class="rename-form" method="post" action="{{ project.rename_url }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="project-title">Project title</label>
+    <div><input id="project-title" name="title" required maxlength="{{ project_title_max_length }}" value="{{ rename_title }}"><button class="button secondary" type="submit">Rename</button></div>
+  </form>
+</section>
+{% if rename_errors %}<div class="banner error"><strong>Project was not renamed:</strong><ul>{% for error in rename_errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
+
+<section class="section-heading"><h2>Versions</h2><a href="{{ urls.jobs }}">Operational history</a></section>
+<div class="version-list">
+  {% for job in versions %}
+  <article class="version-card">
+    <header>
+      <div><p class="eyebrow">Version {{ loop.revindex }}</p><h2>{{ job.source_title or job.prompt or 'Untitled job' }}</h2></div>
+      <span class="status status-{{ job.status }}">{{ job.status_label }}</span>
+    </header>
+    {% if job.error %}<div class="banner error">{{ job.error }}</div>{% endif %}
+    <p class="request-summary">{{ job.prompt or 'No prompt stored.' }}</p>
+    <p class="muted">Created {{ job.created_at }} · {{ job.completed_variations }}/{{ job.variation_count }} variations · {{ job.output_format|upper }} · elapsed {{ job.elapsed_seconds }} seconds</p>
+    <div class="version-actions"><a href="{{ job.detail_url }}">View operational details</a>{% if job.continue_url %}<a class="button" href="{{ job.continue_url }}">Continue this version</a>{% endif %}</div>
+    <div class="version-outputs">
+      <h3>Outputs</h3>
+      {% if job.outputs %}
+      {% for output in job.outputs %}
+      <div class="output-card">
+        <div><strong>Variation {{ output.variation_index }}</strong><span>{{ output.size_label }} · {{ output.mime_type }}</span></div>
+        <audio controls preload="metadata" src="{{ output.media_url }}">Your browser cannot play this audio.</audio>
+        <a href="{{ output.download_url }}">Download</a>
+      </div>
+      {% endfor %}
+      {% else %}<p class="muted">No outputs for this version.</p>{% endif %}
+    </div>
+  </article>
+  {% else %}<div class="empty"><p>No versions found.</p></div>{% endfor %}
+</div>
+{% endblock %}

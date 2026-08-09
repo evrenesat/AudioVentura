@@ -1,5 +1,24 @@
 # Development Log
 
+## 2026-08-09 (AudioVentura project workspace, Checkpoint 3 execution)
+
+Added authenticated project list/detail pages, CSRF-protected bounded rename,
+same-project version comparison, native audio playback/download links, and
+project navigation from existing job views. The mobile layout stacks versions
+and keeps status, failures, request summaries, operational job links, and
+compatible continuation actions visible without adding client-side state.
+Documented schema v6 backfill and the project/job boundary. This work changes
+no Runpod payload or call, cover ingestion/confirmation, billing rule, public
+transfer route, worker service, or deployment configuration. Verification is
+recorded in the Checkpoint 3 review handoff; no deployment or checkpoint commit
+was performed during implementation.
+
+Ship-mode verification repair made the trusted-rate test clock-relative instead
+of letting its fixed date expire. Full pytest and source mypy remain release
+gates. The repository's pre-existing test typing debt is tracked separately and
+does not block this server-rendered usability change; no product safety or
+billing check was disabled.
+
 ## 2026-08-09 (AudioVentura beta subpath, Checkpoint 2 execution)
 
 Added the validated `ACE_SERVICE_ROOT_PATH` ASGI setting and converted the

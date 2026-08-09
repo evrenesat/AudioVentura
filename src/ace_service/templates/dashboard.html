@@ -27,11 +27,12 @@
 {% if jobs %}
 <div class="job-list">
   {% for job in jobs %}
-  <a class="job-card" href="{{ job.detail_url }}">
+  <article class="job-card">
     <div class="job-card-top"><span class="tag">{{ job.job_type_label }}</span><span class="status status-{{ job.status }}">{{ job.status_label }}</span></div>
-    <h3>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h3>
+    <h3><a href="{{ job.detail_url }}">{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</a></h3>
     <p>{{ job.created_at }} · {{ job.completed_variations }}/{{ job.variation_count }} variations · {{ job.output_format|upper }}</p>
-  </a>
+    {% if job.project_url %}<p><a href="{{ job.project_url }}">{{ job.project_title }}</a></p>{% endif %}
+  </article>
   {% endfor %}
 </div>
 {% else %}

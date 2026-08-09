@@ -34,6 +34,15 @@ uv run python -m ace_service migrate-status --database /path/to/service.db
 uv run python -m ace_service migrate-upgrade --database /path/to/service.db
 ```
 
+Schema v6 adds lightweight projects and backfills every historical job into
+its own same-type project without rewriting generation, output, attempt,
+billing, or transfer evidence. The private UI exposes `/projects` and one
+server-rendered project page per project. A compatible schema-v2 job can
+prefill the existing original or cover form; submitting the reviewed form
+always creates a new job version in that project and never retries or mutates
+the source job. Cover continuations require fresh rights confirmation and the
+ordinary home-ingest/duration-confirmation flow.
+
 Runpod billing is an operator-only boundary with no browser route:
 
 ```text
@@ -70,6 +79,10 @@ The first release supports two workflows:
 
 1. Generate an original song from creative instructions, optional lyrics, optional musical metadata, and one to four sequential variations.
 2. Generate a cover or stylistic reinterpretation from a single public YouTube video after the home server downloads and prepares the source audio.
+
+Jobs remain the unit of queueing, execution, status, outputs, quotes, billing,
+and transfer capabilities. Projects only group same-type jobs for naming,
+continuation, and version comparison; they do not add execution state.
 
 New jobs use a strict version-2 worker payload. Original requests choose
 `direct`, `enhance`, or `auto-compose` prompting and either model-selected
