@@ -53,6 +53,7 @@ from ace_service.repository import (
     get_latest_gpu_rates,
     get_matching_runtime_calibration,
     get_output,
+    resolve_continuation_source,
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
 
@@ -238,7 +239,11 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
-        return render(request, "original_form.html", {"form": {}, "errors": []})
+        return render(
+            request,
+            "original_form.html",
+            {"form": {}, "errors": [], "continuing": False},
+        )
 
     @app.post("/create", dependencies=[Depends(authenticated)], name="create_original")
     async def create_original(request: Request) -> Response:
@@ -246,18 +251,31 @@ def register_web_routes(app: FastAPI) -> None:
         fields = await parse_form(request)
         require_csrf(request, fields)
         form = dict(fields)
-        try:
-            job_request = OriginalSongRequest(**_original_form_values(fields))
-        except ValidationError as exc:
-            errors = _validation_errors(exc)
-            return render(
-                request,
-                "original_form.html",
-                {"form": form, "errors": errors},
-                response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
         with app.state.session_factory() as session:
-            job = create_original_job(session, job_request)
+            continuation_source = _continuation_source(
+                session, fields, expected_job_type=JobType.ORIGINAL
+            )
+            project_id = continuation_source.project_id if continuation_source is not None else None
+            try:
+                job_request = OriginalSongRequest(**_original_form_values(fields))
+            except ValidationError as exc:
+                errors = _validation_errors(exc)
+                return render(
+                    request,
+                    "original_form.html",
+                    {
+                        "form": form,
+                        "errors": errors,
+                        "continuing": project_id is not None,
+                        "project_title": (
+                            continuation_source.project.title
+                            if continuation_source is not None
+                            else None
+                        ),
+                    },
+                    response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            job = create_original_job(session, job_request, project=project_id)
             capture_submission_quote(app, session, job)
             session.commit()
             job_id = job.id
@@ -273,7 +291,12 @@ def register_web_routes(app: FastAPI) -> None:
         return render(
             request,
             "cover_form.html",
-            {"form": {}, "errors": [], "readiness": readiness},
+            {
+                "form": {},
+                "errors": [],
+                "readiness": readiness,
+                "continuing": False,
+            },
         )
 
     @app.post("/cover", dependencies=[Depends(authenticated)], name="create_cover")
@@ -282,22 +305,32 @@ def register_web_routes(app: FastAPI) -> None:
         fields = await parse_form(request)
         require_csrf(request, fields)
         form = dict(fields)
-        try:
-            cover_request = CoverRequest(**_cover_form_values(fields))
-        except ValidationError as exc:
-            errors = _validation_errors(exc)
-            return render(
-                request,
-                "cover_form.html",
-                {
-                    "form": form,
-                    "errors": errors,
-                    "readiness": await _readiness(app, only={"home_ingest"}),
-                },
-                response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
         with app.state.session_factory() as session:
-            job = create_cover_job(session, cover_request)
+            continuation_source = _continuation_source(
+                session, fields, expected_job_type=JobType.COVER
+            )
+            project_id = continuation_source.project_id if continuation_source is not None else None
+            try:
+                cover_request = CoverRequest(**_cover_form_values(fields))
+            except ValidationError as exc:
+                errors = _validation_errors(exc)
+                return render(
+                    request,
+                    "cover_form.html",
+                    {
+                        "form": form,
+                        "errors": errors,
+                        "readiness": await _readiness(app, only={"home_ingest"}),
+                        "continuing": project_id is not None,
+                        "project_title": (
+                            continuation_source.project.title
+                            if continuation_source is not None
+                            else None
+                        ),
+                    },
+                    response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            job = create_cover_job(session, cover_request, project=project_id)
             session.commit()
             job_id = job.id
         _enqueue(app, job_id)
@@ -363,6 +396,53 @@ def register_web_routes(app: FastAPI) -> None:
             ]
         return render(request, "jobs.html", {"jobs": job_views})
 
+    @app.get(
+        "/jobs/{job_id}/continue",
+        dependencies=[Depends(authenticated)],
+        name="continue_job",
+    )
+    async def continue_job(request: Request, job_id: str) -> Response:
+        with app.state.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="job not found",
+                )
+            try:
+                source = resolve_continuation_source(
+                    session, job.id, expected_job_type=job.job_type
+                )
+                form = _continuation_form(source)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="job is not compatible with continuation",
+                ) from exc
+            project_title = source.project.title
+        if source.job_type is JobType.ORIGINAL:
+            return render(
+                request,
+                "original_form.html",
+                {
+                    "form": form,
+                    "errors": [],
+                    "continuing": True,
+                    "project_title": project_title,
+                },
+            )
+        return render(
+            request,
+            "cover_form.html",
+            {
+                "form": form,
+                "errors": [],
+                "readiness": await _readiness(app, only={"home_ingest"}),
+                "continuing": True,
+                "project_title": project_title,
+            },
+        )
+
     @app.get("/jobs/{job_id}", dependencies=[Depends(authenticated)], name="job_detail")
     async def job_detail(request: Request, job_id: str) -> Response:
         with app.state.session_factory() as session:
@@ -382,9 +462,7 @@ def register_web_routes(app: FastAPI) -> None:
             job = get_job(session, job_id)
             if job is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
-            return JSONResponse(
-                _job_view(request, job), headers={"Cache-Control": "no-store"}
-            )
+            return JSONResponse(_job_view(request, job), headers={"Cache-Control": "no-store"})
 
     @app.get("/media/{output_id}", dependencies=[Depends(authenticated)], name="media")
     async def media(output_id: int) -> FileResponse:
@@ -509,6 +587,149 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+def _continuation_source(
+    session: Any,
+    fields: Mapping[str, str],
+    *,
+    expected_job_type: JobType,
+) -> Job | None:
+    if "continue_from_job_id" not in fields:
+        return None
+    source_id = fields.get("continue_from_job_id", "").strip()
+    if not source_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="continuation source not found",
+        )
+    try:
+        source = resolve_continuation_source(
+            session, source_id, expected_job_type=expected_job_type
+        )
+        _continuation_form(source)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="continuation source not found",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="continuation source is incompatible",
+        ) from exc
+    return source
+
+
+def _continuation_form(job: Job) -> dict[str, Any]:
+    normalized = job.normalized_request_json
+    if not isinstance(normalized, dict):
+        raise ValueError("normalized request must be an object")
+    if normalized.get("schema_version") != 2 or normalized.get("task_type") != job.job_type.value:
+        raise ValueError("normalized request is not compatible with the job type")
+    generation = normalized.get("generation")
+    if not isinstance(generation, dict):
+        raise ValueError("normalized generation must be an object")
+    profile_id = normalized.get("profile_id")
+    if not isinstance(profile_id, str):
+        raise ValueError("normalized profile must be text")
+
+    common = {
+        "profile_id": profile_id,
+        "variation_count": job.variation_count,
+        "continue_from_job_id": job.id,
+    }
+    if job.job_type is JobType.ORIGINAL:
+        required = {
+            "prompt",
+            "lyrics",
+            "instrumental",
+            "vocal_language",
+            "prompt_mode",
+            "duration_mode",
+            "duration_seconds",
+            "bpm",
+            "key_scale",
+            "time_signature",
+            "seed",
+            "output_format",
+        }
+        if not required.issubset(generation):
+            raise ValueError("normalized original generation is incomplete")
+        request_values = {
+            "description": generation["prompt"],
+            "lyrics": generation["lyrics"],
+            "instrumental": generation["instrumental"],
+            "vocal_language": generation["vocal_language"],
+            "prompt_mode": generation["prompt_mode"],
+            "duration_mode": generation["duration_mode"],
+            "duration_seconds": generation["duration_seconds"],
+            "bpm": generation["bpm"],
+            "key_scale": generation["key_scale"],
+            "time_signature": generation["time_signature"],
+            "seed": generation["seed"],
+            "output_format": generation["output_format"],
+            "profile_id": profile_id,
+            "variation_count": job.variation_count,
+        }
+        OriginalSongRequest(**request_values)
+        return {
+            **common,
+            "description": generation["prompt"],
+            "lyrics": generation["lyrics"],
+            "instrumental": "true" if generation["instrumental"] is True else "",
+            "vocal_language": generation["vocal_language"],
+            "prompt_mode": generation["prompt_mode"],
+            "duration_mode": generation["duration_mode"],
+            "duration_seconds": generation["duration_seconds"],
+            "bpm": generation["bpm"],
+            "key_scale": generation["key_scale"],
+            "time_signature": generation["time_signature"],
+            "seed": generation["seed"],
+            "output_format": generation["output_format"],
+        }
+
+    required = {
+        "target_style",
+        "remix_guidance",
+        "lyrics",
+        "audio_cover_strength",
+        "cover_noise_strength",
+        "seed",
+        "output_format",
+    }
+    if (
+        not required.issubset(generation)
+        or not isinstance(job.source_url, str)
+        or not job.source_url.strip()
+    ):
+        raise ValueError("normalized cover generation is incomplete")
+    request_values = {
+        "youtube_url": job.source_url,
+        "target_style": generation["target_style"],
+        "remix_guidance": generation["remix_guidance"],
+        "lyrics": generation["lyrics"],
+        "audio_cover_strength": generation["audio_cover_strength"],
+        "cover_noise_strength": generation["cover_noise_strength"],
+        "seed": generation["seed"],
+        "output_format": generation["output_format"],
+        "profile_id": profile_id,
+        "variation_count": job.variation_count,
+        "rights_confirmation": True,
+    }
+    CoverRequest(**request_values)
+    return {
+        **common,
+        "youtube_url": job.source_url,
+        "target_style": generation["target_style"],
+        "remix_guidance": generation["remix_guidance"],
+        "lyrics": generation["lyrics"],
+        "audio_cover_strength": generation["audio_cover_strength"],
+        "cover_noise_strength": generation["cover_noise_strength"],
+        "seed": generation["seed"],
+        "output_format": generation["output_format"],
+        "rights_confirmation": "",
+    }
+
+
 def _optional_number(value: str | None, *, default: float | None = None) -> float | None:
     if value is None or not value.strip():
         return default
@@ -573,7 +794,7 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         target_duration = generation.get("duration_seconds", resolved.get("duration"))
     audio_cover_strength = generation.get("audio_cover_strength", job.cover_strength)
     cover_noise_strength = generation.get("cover_noise_strength")
-    return {
+    view = {
         "job_id": job.id,
         "job_type": job.job_type.value,
         "job_type_label": "Cover" if job.job_type is JobType.COVER else "Original song",
@@ -611,6 +832,13 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         "attempts": [_attempt_view(item) for item in attempts],
         "outputs": [_output_view(request, item) for item in outputs],
     }
+    try:
+        if job.project is not None and job.project.job_type is job.job_type:
+            _continuation_form(job)
+            view["continue_url"] = _route_path(request, "continue_job", job_id=job.id)
+    except ValueError:
+        pass
+    return view
 
 
 def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:

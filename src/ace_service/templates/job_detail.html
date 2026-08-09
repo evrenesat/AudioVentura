@@ -5,6 +5,7 @@
   <p class="eyebrow">{{ job.job_type_label }}</p>
   <h1>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h1>
   <div class="detail-status"><span id="job-status" class="status status-{{ job.status }}">{{ job.status_label }}</span><span id="job-progress">{{ job.completed_variations }}/{{ job.variation_count }} variations</span></div>
+  {% if job.continue_url %}<p><a class="button secondary" href="{{ job.continue_url }}">Continue this version</a></p>{% endif %}
   {% if job.error %}<div class="banner error" id="job-error">{{ job.error }}</div>{% endif %}
   {% if job.status == 'staging' and job.cover_confirmation_status == 'awaiting_confirmation' %}
   <div class="banner warning"><strong>Source ready.</strong> Detected source duration: {{ job.source_duration_seconds }} seconds. Covers retain this duration in the beta; custom cover duration is deferred.
