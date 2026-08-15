@@ -308,40 +308,9 @@ class ServiceSettings(BaseSettings):
         ge=1,
         le=365,
     )
-    price_max_age_hours: int = Field(
-        default=24,
-        validation_alias=AliasChoices("PRICE_MAX_AGE_HOURS", "price_max_age_hours"),
-        ge=1,
-    )
     eligible_gpu_ids: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("ACE_ELIGIBLE_GPU_IDS", "eligible_gpu_ids"),
-    )
-    billing_trailing_window_hours: int = Field(
-        default=48,
-        validation_alias=AliasChoices(
-            "ACE_BILLING_TRAILING_WINDOW_HOURS", "billing_trailing_window_hours"
-        ),
-        ge=1,
-    )
-    billing_response_max_bytes: int = Field(
-        default=1_048_576,
-        validation_alias=AliasChoices(
-            "ACE_BILLING_RESPONSE_MAX_BYTES", "billing_response_max_bytes"
-        ),
-        ge=1024,
-    )
-    billing_request_timeout_seconds: float = Field(
-        default=10,
-        validation_alias=AliasChoices(
-            "ACE_BILLING_REQUEST_TIMEOUT_SECONDS", "billing_request_timeout_seconds"
-        ),
-        gt=0,
-    )
-    billing_lease_ttl_seconds: int = Field(
-        default=900,
-        validation_alias=AliasChoices("ACE_BILLING_LEASE_TTL_SECONDS", "billing_lease_ttl_seconds"),
-        gt=0,
     )
 
     @field_validator("eligible_gpu_ids")
@@ -372,9 +341,7 @@ class ServiceSettings(BaseSettings):
             or not _SERVICE_ROOT_PATH_RE.fullmatch(value)
             or any(segment in {".", ".."} for segment in value.split("/"))
         ):
-            raise ValueError(
-                "service root path must be empty or a normalized absolute path prefix"
-            )
+            raise ValueError("service root path must be empty or a normalized absolute path prefix")
         return value
 
     @field_validator("runpod_worker_runtime_identity")

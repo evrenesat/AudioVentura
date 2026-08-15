@@ -60,23 +60,27 @@ and worker.
 ## Checkpoint 3 quality campaign boundary
 
 Quality evaluation is an operator process, not a browser feature. The
-`ace_service.quality_eval` CLI validates the private fixed fixture, constructs
-the frozen ordered decision tree, and uses the existing durable controller
-queue/transfer adapter for any explicitly authorized execution. Its campaign
-SQLite database is deliberately separate from the product database because the
-ordered production migration runner is a Checkpoint 4 concern. The old release
-does not need to understand the campaign tables.
+`ace_service.quality_eval` module validates the private fixed fixture,
+constructs the frozen ordered decision tree, and uses the existing durable
+controller queue/transfer adapter for any explicitly authorized execution.
+Its campaign SQLite database is deliberately separate from the product
+database because the ordered production migration runner is a Checkpoint 4
+concern. The old release does not need to understand the campaign tables.
 
-The campaign store owns reservations, runtime observations, append-only
-provider billing evidence, blinded sample mappings, score sheets, execution
-windows, durable submission intents, and the submission-maintenance gate.
-Normal `/create`, `/cover`, and cover-confirmation mutations fail closed while
-a window is active, while authenticated reads and the scoped operator campaign
-bypass remain available. The rollback readiness command checks both the
-existing v2 job lifecycle and the campaign store: active windows,
-in-flight/uncertain samples, unresolved reservations, corrupt state, or a
-missing verified edge guard block a rollback to a controller that lacks the
-durable gate.
+The campaign is quarantined during the usability recovery: the executable
+entrypoint (`python -m ace_service.quality_eval`) and the
+ordinary-submission maintenance gate are commented out with a `TODO`
+(re-enable after ordinary original and cover generation is stable). The
+campaign store, reservations, runtime observations, append-only provider
+billing evidence, blinded sample mappings, score sheets, execution windows,
+durable submission intents, and the maintenance-gate primitives remain
+implemented, importable, and unit-tested, and their data stays readable.
+Ordinary `/create`, `/cover`, and cover-confirmation mutations no longer
+consult the gate; authenticated reads are unaffected. The rollback readiness
+command checks both the existing v2 job lifecycle and the campaign store:
+active windows, in-flight/uncertain samples, unresolved reservations, corrupt
+state, or a missing verified edge guard block a rollback to a controller that
+lacks the durable gate.
 
 Worker payload contracts are validated end-to-end from the campaign store to
 the strict worker schema. The compatibility smokes and every ordinary
@@ -175,8 +179,8 @@ prompt, or type label. It does not rewrite historical job, output, attempt,
 quote, billing, or transfer evidence.
 
 Projects are a presentation and grouping boundary, not a generation state
-machine. Jobs remain the sole queueing, execution, output, failure, quote,
-billing, and transfer unit. Authenticated `/projects` lists projects by latest
+machine. Jobs remain the sole queueing, execution, output, failure, attempt,
+and transfer unit. Authenticated `/projects` lists projects by latest
 activity; `/projects/{id}` renders jobs newest-first with their existing
 authenticated media/download routes. Rename is the only project mutation and
 uses the existing Basic-auth and CSRF boundary. `GET /jobs/{id}/continue`
@@ -203,44 +207,42 @@ selection compares those exact decimal tokens before the chosen token is used
 once for half-up quote calculation; integer micro-USD derivatives are never
 selection keys, and money never passes through binary floats.
 
-An exact-repeat billing fetch is defined relative to the current projection,
-not any historical value match. If it is newer, it advances only the current
-projection's `last_updated_at`; older or equal repeats are no-ops, and changed
-older evidence remains append-only without replacing a fresher projection. A
-newer A -> B -> A return appends A at its new fetch time and projects that A;
-retrying either changed event reuses its fetch-event identity without rewriting
-or deleting earlier evidence. The v4-to-v5 migration adds nullable value
-fingerprints and their index without backfilling immutable v4 observations;
-the projection fingerprint is established lazily from matching durable evidence.
-Retries of preserved v4 events reuse the exact legacy row only when the full
-native bucket, complete evidence, and canonical fetch time match; the legacy
-observation itself remains unchanged. Endpoint and account-wide network-volume
-history use the same compatibility rule.
+Billing observations remain append-only readable history with their value
+and fetch-event identities; the `billing-sync` operator command and its
+Runpod billing client were removed from the active release, so no new
+provider billing fetch or projection update is possible. Historical
+`submission_quotes`, rate-catalog rows, and calibrations stay readable but
+are no longer captured: quote capture was removed from the normal submission
+control flow (original creation and cover confirmation), and no rate,
+calibration, quote, or billing record is consulted or created by the active
+flow.
 
-Quotes are computed and persisted in the same transaction that accepts a
-generation (original creation and cover confirmation); an unavailable quote
-never blocks generation. Terminal polling records attempt evidence from
-Runpod `executionTime` provenance, resolves the worker-reported GPU through
-the server-owned alias map, and snapshots the trusted rate; failed attempts
-count only positive execution time, zero requires durable never-started
-proof, and unknown/stale rates record explicit unavailable reasons.
-Reconciliation sums terminal attempts by `completed_at` over half-open UTC
-intervals, reports partial coverage when any terminal attempt lacks cost, and
-preserves the signed endpoint-vs-estimate delta.
+Terminal polling still records attempt evidence from Runpod `executionTime`
+provenance, resolves the worker-reported GPU through the server-owned alias
+map, and snapshots the trusted rate; failed attempts count only positive
+execution time, zero requires durable never-started proof, and unknown/stale
+rates record explicit unavailable reasons. These attempt-cost columns are the
+input to the active cost display.
 
-The Runpod billing client targets the documented
-`https://rest.runpod.io/v1/billing` host as an operator-only synchronous boundary
-(`python -m ace_service billing-sync`), never reachable from a browser route
-and never started as an in-process scheduler. Parsing fails closed on
-undocumented shapes, pagination/continuation fields, duplicate keys, and
-overflow. It accepts the documented endpoint `time`/`timeBilledMs` fields and
-network-volume storage fields, retaining actual response byte counts. USD is
-the source-contract value; append-only account-wide network-volume observations
-feed a latest-per-native-bucket projection and are never labeled or summed as
-AudioVentura-specific spend. Older fetches cannot replace newer projections. A
-read-only boundary probe classifies interval
-inclusion/partial-hour semantics; ambiguous evidence leaves provider totals
-and reconciliation unavailable.
+Cost display is a read-only informational calculation computed on read at
+the fixed `USD 0.50/GPU-hour` rate (exact integer/rational arithmetic, no
+binary float). The original and cover forms query the latest three completed
+attempt durations of the matching kind (service-wide history, joined
+`VariationAttempt` to `Job`, filtered to `status=completed`, non-null
+`completed_at`, and non-null non-negative `execution_ms`, ordered by
+`completed_at DESC, VariationAttempt.id DESC`, limited to three). Raw
+numerators are carried through each sample, the average (sum of the raw
+numerators divided by the sample count), and the per-request total (the
+unrounded average times the variation count, or the unrounded 60-second seed
+with no history); every label applies `ROUND_HALF_UP` exactly once at the
+final four-decimal USD display boundary from the raw rational value. The
+server also computes the request label for every supported variation count
+(original 1-4, cover 2-4) and the form binds the visible total to the
+selected value with no client-side money arithmetic. With no matching
+history a clearly labeled 60-second seed (`USD 0.0083` per variation) is
+shown. The estimate is never persisted
+and has no admission or generation-control role; any query/render failure
+omits it while generation continues unchanged.
 
 ## Checkpoint 9 operations
 

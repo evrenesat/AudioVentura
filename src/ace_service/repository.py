@@ -14,6 +14,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ace_service.costs import (
+    ESTIMATE_HISTORY_SAMPLE_LIMIT,
     CostSummary,
     NetworkVolumeSummary,
     QuoteEstimate,
@@ -604,6 +605,40 @@ def list_variation_attempts(session: Session, job_id: str | UUID) -> list[Variat
             select(VariationAttempt)
             .where(VariationAttempt.job_id == str(job_id))
             .order_by(VariationAttempt.variation_index)
+        )
+    )
+
+
+def recent_completed_attempt_execution_ms(
+    session: Session,
+    *,
+    job_type: JobType,
+    limit: int = ESTIMATE_HISTORY_SAMPLE_LIMIT,
+) -> list[int]:
+    """Return measured durations of the latest completed attempts of one kind.
+
+    Read-only input for the informational cost estimate; one variation attempt
+    is one sample.  Only attempts with ``status=completed``, a non-null
+    ``completed_at``, and a non-null non-negative ``execution_ms`` qualify,
+    ordered newest-first with deterministic id tie-breaking and limited to the
+    latest samples.
+    """
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    return list(
+        session.scalars(
+            select(VariationAttempt.execution_ms)
+            .join(Job, Job.id == VariationAttempt.job_id)
+            .where(
+                Job.job_type == job_type,
+                VariationAttempt.status == JobStatus.COMPLETED,
+                VariationAttempt.completed_at.is_not(None),
+                VariationAttempt.execution_ms.is_not(None),
+                VariationAttempt.execution_ms >= 0,
+            )
+            .order_by(VariationAttempt.completed_at.desc(), VariationAttempt.id.desc())
+            .limit(limit)
         )
     )
 

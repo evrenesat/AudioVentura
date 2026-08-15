@@ -4,6 +4,13 @@ This contract freezes the Checkpoint 1 evaluation inputs and scoring rules.
 It is an operator-only, fixed-input comparison contract. It does not authorize
 a paid Runpod campaign or change production defaults.
 
+> **Quarantine notice (usability recovery):** the quality campaign is
+> quarantined. Its executable entrypoint (`python -m ace_service.quality_eval`)
+> and the ordinary-submission maintenance gate are disabled with a `TODO`
+> (re-enable after ordinary original and cover generation is stable). The
+> campaign store, evaluators, profiles, campaign data, and this contract stay
+> intact and readable; nothing here is executed in the recovery.
+
 ## Private fixture
 
 The fixture is described by

@@ -27,9 +27,17 @@
     <div><label for="seed">Seed</label><input id="seed" name="seed" inputmode="numeric" value="{{ form.get('seed', '') }}"></div>
   </div>
   <div class="grid two">
-    <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+    <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}{% if estimate %} data-request-text="{{ value }} variation{{ 's' if value != 1 else '' }}: ~{{ estimate.variation_request_labels[value] }}"{% endif %}>{{ value }}</option>{% endfor %}</select></div>
     <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', 'mp3') == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
   </div>
+  {% if estimate %}
+  <div class="cost-estimate">
+    <p class="hint"><strong>Approximate cost (informational only)</strong> — {{ estimate.rate_label }}: ~{{ estimate.per_variation_label }} per variation{% if estimate.used_seed %} ({{ estimate.seed_note }}){% endif %}.</p>
+    {% if estimate.samples %}<p class="hint">Latest {{ estimate.sample_count }} completed {{ estimate.kind_label }}{% if estimate.average_label %}, average ~{{ estimate.average_label }}{% endif %}: {% for sample in estimate.samples %}~{{ sample.cost_label }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
+    <p class="hint">This request (<span id="estimate-request-text">{{ estimate.variation_count }} variation{{ 's' if estimate.variation_count != 1 else '' }}: ~{{ estimate.variation_request_labels[estimate.variation_count] }}</span>). Estimates never affect generation.</p>
+  </div>
+  {% endif %}
   <button class="button" type="submit">{% if continuing %}Generate new version{% else %}Create original{% endif %}</button>
 </form>
+{% if estimate %}<script src="{{ urls.estimate_selector_js }}" defer></script>{% endif %}
 {% endblock %}

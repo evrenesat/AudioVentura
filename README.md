@@ -43,22 +43,21 @@ always creates a new job version in that project and never retries or mutates
 the source job. Cover continuations require fresh rights confirmation and the
 ordinary home-ingest/duration-confirmation flow.
 
-Runpod billing is an operator-only boundary with no browser route:
-
-```text
-uv run python -m ace_service billing-sync \
-  --database /path/to/service.db --start 2026-08-08T00:00:00Z --end 2026-08-09T00:00:00Z
-```
-
-The offline-verified adapter targets the documented
-`https://rest.runpod.io/v1/billing` REST host. Provider totals remain
-unavailable until interval semantics are separately proven; network-volume
-evidence is account-wide and excluded from AudioVentura endpoint totals.
-Submission quotes require fresh rates for every eligible GPU and one exact
-persisted runtime-calibration match. `RUNPOD_WORKER_RUNTIME_IDENTITY` pins the
+Cost display is a read-only informational calculation at the fixed
+`USD 0.50/GPU-hour` rate: the original and cover forms show the latest three
+completed attempt durations of the matching kind (service-wide history),
+their average, and an approximate per-request estimate (average times
+variation count), or a clearly labeled 60-second seed (`USD 0.0083` per
+variation) when no matching completed history exists. Each label applies one
+half-up rounding at the final four-decimal USD display boundary from the raw
+value, and the visible request total follows the selected variation count
+(original 1–4, cover 2–4). Estimates are computed
+on read, are never persisted, and never approve, delay, reject, or cancel
+generation. Historical `submission_quotes`, rate catalogs, calibrations, and
+billing observations remain readable data but are no longer captured or
+consulted by the active flow. `RUNPOD_WORKER_RUNTIME_IDENTITY` pins the
 deployed worker image as an exact `sha256:<64 hex>` release identity; it is
-server configuration and never browser input. An empty or different-runtime
-calibration catalog truthfully produces `calibration_missing`.
+server configuration and never browser input.
 
 Operational deployment, Tailscale/proxy policy, cleanup, backups, and live
 acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
@@ -80,8 +79,8 @@ The first release supports two workflows:
 1. Generate an original song from creative instructions, optional lyrics, optional musical metadata, and one to four sequential variations.
 2. Generate a cover or stylistic reinterpretation from a single public YouTube video after the home server downloads and prepares the source audio.
 
-Jobs remain the unit of queueing, execution, status, outputs, quotes, billing,
-and transfer capabilities. Projects only group same-type jobs for naming,
+Jobs remain the unit of queueing, execution, status, outputs, attempts, and
+transfer capabilities. Projects only group same-type jobs for naming,
 continuation, and version comparison; they do not add execution state.
 
 New jobs use a strict version-2 worker payload. Original requests choose
@@ -109,18 +108,12 @@ or unconfirmed cover staging is present. A nonzero or indeterminate result
 means the v2-capable controller and worker must remain active.
 
 Checkpoint 3 quality comparisons are local operator actions, separate from
-browser requests and the product database. Validate the fixed private fixture
-without contacting Runpod with:
-
-```text
-uv run python -m ace_service.quality_eval \
-  --manifest /srv/ace-service/data/evaluations/quality-fixture-v1/manifest.json \
-  --dry-run
-```
-
-Paid execution remains blocked until the campaign has fresh rate and billing
-boundary evidence plus the separately authorized worker, controller, and edge
-rollback artifacts.
+browser requests and the product database. The quality campaign is currently
+quarantined: its executable entrypoint (`python -m ace_service.quality_eval`)
+and the ordinary-submission maintenance gate are disabled with a `TODO`
+(re-enable after ordinary original and cover generation is stable), while the
+campaign store, evaluators, profiles, and unit-testable implementation remain
+in place. Do not attempt to run the campaign CLI in this recovery.
 
 The private quality campaign keeps two distinct identities for every executed
 sample: the opaque campaign sample ID (for example `s-…`) that keys blinded

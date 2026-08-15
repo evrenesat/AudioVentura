@@ -1,5 +1,72 @@
 # Development Log
 
+## 2026-08-15 (usability recovery worktree, Checkpoint 2 execution)
+
+Recovery Checkpoint 2 (simplify active boundaries and costs) from the
+`aflow-audioventura-runpod-usability-recovery-aflow-plan-20260815-212058`
+worktree; no deployment, provider contact, paid request, or commit was
+performed, and all changes are left uncommitted for review.
+
+- Removed the `billing-sync` executable surface: the CLI parser/dispatch/
+  helper, `ace_service/billing_client.py`, the sync-only settings
+  (`ACE_BILLING_*`, `PRICE_MAX_AGE_HOURS`) in `config.py`/`.env.example`, its
+  focused test file, and the operational instructions in
+  `README.md`/`docs/OPERATIONS.md`/`docs/ARCHITECTURE.md`. A CLI regression
+  (`tests/test_main_cli.py`) proves `billing-sync` is absent from help and
+  rejected as an unknown command. Historical `billing_observations`,
+  `billing_projections`, `submission_quotes`, rate-catalog, and calibration
+  rows stay readable and migration-covered.
+- Quarantined the quality campaign: the ordinary-submission maintenance gate
+  calls in `web.py` (create original, create cover, cover confirmation) and
+  the `quality_eval` module entrypoint are commented with a `TODO`
+  (re-enable after ordinary original and cover generation is stable). The
+  campaign store, evaluators, profiles, and unit-testable implementation
+  remain intact; `python -m ace_service.quality_eval` is now a no-op.
+- Cost display is now a read-only informational calculation at the fixed
+  `USD 0.50/GPU-hour` rate (exact integer/rational arithmetic, no binary
+  float). The original and cover forms show the latest three completed
+  attempt durations of the matching kind, their average, and an approximate
+  per-request estimate (unrounded average times variation count). Every
+  label applies one `ROUND_HALF_UP` at the final four-decimal USD display
+  boundary from the raw rational value, and the visible request total is
+  bound to the selected variation count (original 1-4, cover 2-4). With no
+  history a clearly labeled 60-second seed (`USD 0.0083`) is shown. The
+  estimate is computed on read, never persisted, and any failure omits it
+  without affecting generation.
+- Quote capture and cost/quality gate calls were removed from normal
+  submission control flow; the preserved quote machinery stays importable and
+  unit-tested (runtime-identity binding, idempotence, conflict rejection).
+
+Environmental note: the private quality fixture retention deadline
+(`2026-08-15T11:20:46Z`) passed, so manifest-dependent quality tests fail
+with `fixture retention deadline has passed` even on pristine `HEAD`
+(verified via `git archive`); non-manifest quality tests and all other suites
+pass.
+
+### Checkpoint 2 review repair (cp03-v01, same worktree)
+
+Review of the Checkpoint 2 cost display found two defects, repaired here
+without any commit, deployment, provider contact, or paid request:
+
+- The four-decimal labels were derived from integer micro-USD amounts and
+  truncated with `ROUND_DOWN` (`120_000 ms` and the two-variation 60-second
+  seed both displayed `USD 0.0166` instead of `USD 0.0167`). A single exact
+  display helper (`format_exact_usd_half_up`) now applies `ROUND_HALF_UP`
+  exactly once at the final `0.0001` USD boundary from raw
+  numerator/denominator values for every sample, average, seed, and request
+  label; integer micro-USD fields stay only for preserved callers and are
+  never fed back into a label.
+- The visible “This request” total was fixed to the initially selected
+  count and omitted entirely on continuation and validation-error renders.
+  The server now computes request labels for every supported variation count
+  and renders them as per-option `data-request-text` attributes; a tiny
+  self-hosted script (`static/estimate_selector.js`, CSP-compatible) swaps
+  the label on selection with zero client-side money arithmetic. Continuation
+  and 422 renders now supply the matching estimate through one
+  `_form_estimate` helper, and a history/estimate failure still omits only
+  the estimate.
+
+
 ## 2026-08-09 (AudioVentura project workspace, Checkpoint 3 execution)
 
 Added authenticated project list/detail pages, CSRF-protected bounded rename,

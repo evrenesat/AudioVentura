@@ -37,6 +37,17 @@ from ace_service.quality_eval import (
 MANIFEST = Path("/srv/ace-service/data/evaluations/quality-fixture-v1/manifest.json")
 
 
+def test_module_entrypoint_is_quarantined(capsys) -> None:
+    """Direct module execution must be a no-op while the campaign is
+    quarantined (the ``if __name__ == "__main__"`` block is commented out)."""
+    import runpy
+
+    runpy.run_module("ace_service.quality_eval", run_name="__main__")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_dry_run_has_no_inference_call_and_reports_budget_gate(tmp_path: Path, capsys) -> None:
     if not MANIFEST.is_file():
         pytest.skip("private Checkpoint 1 fixture is not mounted")

@@ -1587,5 +1587,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+# TODO(re-enable): the quality-campaign executable entrypoint is quarantined
+# during the usability recovery. Re-enable after ordinary original and cover
+# generation is stable (owner decision #10). The campaign implementation
+# (main, EvaluationController, CampaignStore) stays importable and unit-tested;
+# only direct module execution is disabled.
+# if __name__ == "__main__":
+#     raise SystemExit(main())

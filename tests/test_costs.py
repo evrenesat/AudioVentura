@@ -10,10 +10,16 @@ import pytest
 from sqlalchemy import text
 
 from ace_service.costs import (
+    ESTIMATE_HISTORY_SAMPLE_LIMIT,
+    FIXED_GPU_HOURLY_RATE_MICRO_USD,
     MICRO_USD_PER_USD,
     MS_PER_HOUR,
+    NO_HISTORY_SEED_EXECUTION_MS,
+    build_cost_estimate_view,
     build_cost_fingerprint,
     compute_submission_quote,
+    format_exact_usd_half_up,
+    format_micro_usd,
     parse_micro_usd_decimal,
     round_half_up_compute_cost,
     round_half_up_compute_cost_usd,
@@ -26,6 +32,7 @@ from ace_service.repository import (
     create_variation_attempt,
     get_matching_runtime_calibration,
     get_submission_quote,
+    recent_completed_attempt_execution_ms,
     reconcile_delta,
     record_attempt_evidence,
     sum_terminal_attempt_estimates,
@@ -1084,3 +1091,271 @@ class TestWorkerPollEvidence:
         stored = session.get(VariationAttempt, attempt.id)
         assert stored.evidence_status == "unavailable"
         assert stored.unavailable_reason == "timing_unavailable"
+
+
+class TestReadOnlyCostEstimate:
+    """Read-only fixed-rate cost estimate: exact math, seed, and history."""
+
+    def _completed_attempt(
+        self, session, *, job_id: str, variation_index: int, execution_ms: int | None, completed_at
+    ) -> int:
+        attempt = create_variation_attempt(session, job_id=job_id, variation_index=variation_index)
+        attempt.status = JobStatus.COMPLETED
+        attempt.execution_ms = execution_ms
+        attempt.completed_at = completed_at
+        session.flush()
+        return attempt.id
+
+    def test_no_history_uses_exact_seed(self) -> None:
+        view = build_cost_estimate_view(
+            execution_ms_samples=[], variation_count=2, kind_label="covers"
+        )
+        assert view["used_seed"] is True
+        assert view["samples"] == []
+        assert view["sample_count"] == 0
+        assert view["average_micro_usd"] is None
+        assert view["average_label"] is None
+        assert view["per_variation_label"] == "USD 0.0083"
+        # 0.50 x 60s x 2 / 3600 rounded once at the end.
+        expected = round_half_up_compute_cost(
+            NO_HISTORY_SEED_EXECUTION_MS * 2, FIXED_GPU_HOURLY_RATE_MICRO_USD
+        )
+        assert view["request_estimate_micro_usd"] == expected == 16_667
+        assert view["request_estimate_label"] == "USD 0.0167"
+        assert view["approximate"] is True and view["informational"] is True
+
+    def test_seed_per_variation_label_is_fixed_and_request_rounds_once(self) -> None:
+        view = build_cost_estimate_view(execution_ms_samples=[], variation_count=3, kind_label="x")
+        assert view["per_variation_label"] == "USD 0.0083"
+        assert view["request_estimate_micro_usd"] == 25_000
+        assert view["request_estimate_label"] == "USD 0.0250"
+
+    def test_individual_samples_use_fixed_rate_half_up(self) -> None:
+        samples = [60_000, 120_000, 180_000]
+        view = build_cost_estimate_view(
+            execution_ms_samples=samples, variation_count=1, kind_label="original songs"
+        )
+        assert [sample["cost_micro_usd"] for sample in view["samples"]] == [
+            round_half_up_compute_cost(ms, FIXED_GPU_HOURLY_RATE_MICRO_USD) for ms in samples
+        ]
+        assert [sample["cost_label"] for sample in view["samples"]] == [
+            "USD 0.0083",
+            "USD 0.0167",
+            "USD 0.0250",
+        ]
+        assert view["used_seed"] is False
+
+    def test_average_uses_raw_numerators_not_rounded_displays(self) -> None:
+        # A 30s sample rounds to 4167 micro-USD and a 90s sample to 12500;
+        # the mean of those rounded values (8333.5, half-up 8334) differs from
+        # the raw-numerator average (8333.33 -> 8333).  The average must be
+        # computed from the raw numerators, not the rounded displays.
+        view = build_cost_estimate_view(
+            execution_ms_samples=[30_000, 90_000], variation_count=1, kind_label="original songs"
+        )
+        assert [sample["cost_micro_usd"] for sample in view["samples"]] == [4167, 12500]
+        assert view["average_micro_usd"] == 8333
+        assert view["average_label"] == "USD 0.0083"
+        assert view["per_variation_label"] == "USD 0.0083"
+
+    def test_request_estimate_multiplies_before_rounding(self) -> None:
+        # Per-variation raw cost is 0.1388 micro-USD (rounds to 0), but
+        # 4 x 0.1388 = 0.5555 rounds to 1 micro-USD.  Rounding per-variation
+        # first would yield 0, proving multiply-before-rounding.
+        view = build_cost_estimate_view(
+            execution_ms_samples=[1], variation_count=4, kind_label="original songs"
+        )
+        assert view["samples"][0]["cost_micro_usd"] == 0
+        assert view["request_estimate_micro_usd"] == 1
+        assert view["request_estimate_label"] == "USD 0.0000"
+
+    def test_more_than_three_samples_keeps_latest_three(self) -> None:
+        samples = [1_000, 2_000, 3_000, 4_000, 5_000]
+        view = build_cost_estimate_view(
+            execution_ms_samples=samples, variation_count=1, kind_label="original songs"
+        )
+        assert view["sample_count"] == ESTIMATE_HISTORY_SAMPLE_LIMIT
+        assert [sample["execution_ms"] for sample in view["samples"]] == [1_000, 2_000, 3_000]
+
+    def test_format_micro_usd_is_exact_four_decimal_truncation(self) -> None:
+        assert format_micro_usd(0) == "USD 0.0000"
+        assert format_micro_usd(1) == "USD 0.0000"
+        assert format_micro_usd(8333) == "USD 0.0083"
+        assert format_micro_usd(8339) == "USD 0.0083"
+        assert format_micro_usd(10_000) == "USD 0.0100"
+        assert format_micro_usd(500_000) == "USD 0.5000"
+        assert format_micro_usd(MICRO_USD_PER_USD) == "USD 1.0000"
+        for invalid in (-1, True, 1.5, "1"):
+            with pytest.raises(ValueError):
+                format_micro_usd(invalid)  # type: ignore[arg-type]
+
+    def test_exact_half_up_labels_apply_one_rounding_at_four_decimal_boundary(self) -> None:
+        # The final four-decimal USD label must come from the raw rational
+        # value with a single ROUND_HALF_UP, never from a pre-rounded integer
+        # micro-USD amount.  Boundary proofs at the fixed USD 0.50/GPU-hour
+        # rate: the seed's per-variation label stays USD 0.0083 while the
+        # 120-second and doubled-60-second totals round up to USD 0.0167.
+        rate = FIXED_GPU_HOURLY_RATE_MICRO_USD
+        assert format_exact_usd_half_up(NO_HISTORY_SEED_EXECUTION_MS * rate, MS_PER_HOUR) == (
+            "USD 0.0083"
+        )
+        assert format_exact_usd_half_up(120_000 * rate, MS_PER_HOUR) == "USD 0.0167"
+        assert format_exact_usd_half_up(60_000 * rate * 2, MS_PER_HOUR) == "USD 0.0167"
+        assert format_exact_usd_half_up(180_000 * rate, MS_PER_HOUR) == "USD 0.0250"
+        # 0.01665 USD ties round away from zero under ROUND_HALF_UP.
+        assert format_exact_usd_half_up(16_650, 1) == "USD 0.0167"
+        # Truncation would show 0.0166 for 16_667 micro-USD.
+        assert format_exact_usd_half_up(16_667, 1) == "USD 0.0167"
+        # 0.0166495 USD rounds to integer micro-USD 16650 (which truncates to
+        # 0.0166 and half-ups to 0.0167), but the exact rational labels 0.0166:
+        # the label must never be derived from the pre-rounded integer amount.
+        assert format_exact_usd_half_up(16_649_500, 1_000) == "USD 0.0166"
+        for invalid in (-1, 1.5, "1"):
+            with pytest.raises(ValueError):
+                format_exact_usd_half_up(invalid, 1)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            format_exact_usd_half_up(1, 0)
+        with pytest.raises(ValueError):
+            format_exact_usd_half_up(1, -1)
+
+    def test_view_labels_use_raw_rationals_and_seed_request_rounds_half_up(self) -> None:
+        # Two 60-second samples: raw average 0.008333..., label 0.0083; the
+        # request total multiplies before rounding (2 x 60s -> 0.0167).
+        view = build_cost_estimate_view(
+            execution_ms_samples=[60_000, 60_000], variation_count=2, kind_label="original songs"
+        )
+        assert view["average_micro_usd"] == 8333
+        assert view["average_label"] == "USD 0.0083"
+        assert view["per_variation_label"] == "USD 0.0083"
+        assert view["request_estimate_micro_usd"] == 16_667
+        assert view["request_estimate_label"] == "USD 0.0167"
+        # Seed request labels for every supported original count.
+        expected = {
+            1: "USD 0.0083",
+            2: "USD 0.0167",
+            3: "USD 0.0250",
+            4: "USD 0.0333",
+        }
+        for count, label in expected.items():
+            seed_view = build_cost_estimate_view(
+                execution_ms_samples=[], variation_count=count, kind_label="original songs"
+            )
+            assert seed_view["request_estimate_label"] == label
+
+    def test_build_estimate_rejects_invalid_inputs(self) -> None:
+        with pytest.raises(ValueError):
+            build_cost_estimate_view(execution_ms_samples=[-1], variation_count=1, kind_label="x")
+        with pytest.raises(ValueError):
+            build_cost_estimate_view(execution_ms_samples=[], variation_count=0, kind_label="x")
+        with pytest.raises(ValueError):
+            build_cost_estimate_view(execution_ms_samples=[], variation_count=5, kind_label="x")
+        with pytest.raises(ValueError):
+            build_cost_estimate_view(execution_ms_samples=["60"], variation_count=1, kind_label="x")
+
+    def test_query_separates_original_and_cover_histories(self, session) -> None:
+        original = create_job(session, job_type=JobType.ORIGINAL, variation_count=2)
+        cover = create_job(session, job_type=JobType.COVER, variation_count=1)
+        self._completed_attempt(
+            session,
+            job_id=original.id,
+            variation_index=1,
+            execution_ms=60_000,
+            completed_at=utc_dt(1),
+        )
+        self._completed_attempt(
+            session,
+            job_id=original.id,
+            variation_index=2,
+            execution_ms=120_000,
+            completed_at=utc_dt(2),
+        )
+        self._completed_attempt(
+            session,
+            job_id=cover.id,
+            variation_index=1,
+            execution_ms=180_000,
+            completed_at=utc_dt(3),
+        )
+        session.commit()
+        assert recent_completed_attempt_execution_ms(session, job_type=JobType.ORIGINAL) == [
+            120_000,
+            60_000,
+        ]
+        assert recent_completed_attempt_execution_ms(session, job_type=JobType.COVER) == [180_000]
+
+    def test_query_filters_incomplete_null_timing_and_negative_duration(self, session) -> None:
+        job = create_job(session, job_type=JobType.ORIGINAL, variation_count=4)
+        other = create_job(session, job_type=JobType.ORIGINAL, variation_count=2)
+        self._completed_attempt(
+            session,
+            job_id=job.id,
+            variation_index=1,
+            execution_ms=60_000,
+            completed_at=utc_dt(1),
+        )
+        failed = create_variation_attempt(session, job_id=job.id, variation_index=2)
+        failed.status = JobStatus.FAILED
+        failed.execution_ms = 60_000
+        failed.completed_at = utc_dt(2)
+        queued = create_variation_attempt(session, job_id=job.id, variation_index=3)
+        queued.status = JobStatus.QUEUED
+        no_duration = create_variation_attempt(session, job_id=job.id, variation_index=4)
+        no_duration.status = JobStatus.COMPLETED
+        no_duration.completed_at = utc_dt(4)
+        no_completion = create_variation_attempt(session, job_id=other.id, variation_index=1)
+        no_completion.status = JobStatus.COMPLETED
+        no_completion.execution_ms = 60_000
+        negative = create_variation_attempt(session, job_id=other.id, variation_index=2)
+        negative.status = JobStatus.COMPLETED
+        negative.execution_ms = -1
+        negative.completed_at = utc_dt(6)
+        session.flush()
+        session.commit()
+        assert recent_completed_attempt_execution_ms(session, job_type=JobType.ORIGINAL) == [60_000]
+
+    def test_query_orders_completed_at_desc_then_id_desc(self, session) -> None:
+        job = create_job(session, job_type=JobType.ORIGINAL, variation_count=4)
+        # Same completed_at: id descending decides.
+        self._completed_attempt(
+            session, job_id=job.id, variation_index=1, execution_ms=100, completed_at=utc_dt(5)
+        )
+        self._completed_attempt(
+            session, job_id=job.id, variation_index=2, execution_ms=200, completed_at=utc_dt(5)
+        )
+        self._completed_attempt(
+            session, job_id=job.id, variation_index=3, execution_ms=300, completed_at=utc_dt(5)
+        )
+        self._completed_attempt(
+            session, job_id=job.id, variation_index=4, execution_ms=400, completed_at=utc_dt(9)
+        )
+        session.commit()
+        assert recent_completed_attempt_execution_ms(
+            session, job_type=JobType.ORIGINAL, limit=4
+        ) == [400, 300, 200, 100]
+
+    def test_query_limits_to_three_and_rejects_bad_limit(self, session) -> None:
+        job = create_job(session, job_type=JobType.ORIGINAL, variation_count=4)
+        other = create_job(session, job_type=JobType.ORIGINAL, variation_count=1)
+        for index, ms in enumerate((10_000, 20_000, 30_000, 40_000), start=1):
+            self._completed_attempt(
+                session,
+                job_id=job.id,
+                variation_index=index,
+                execution_ms=ms,
+                completed_at=utc_dt(index),
+            )
+        self._completed_attempt(
+            session,
+            job_id=other.id,
+            variation_index=1,
+            execution_ms=50_000,
+            completed_at=utc_dt(5),
+        )
+        session.commit()
+        assert recent_completed_attempt_execution_ms(session, job_type=JobType.ORIGINAL) == [
+            50_000,
+            40_000,
+            30_000,
+        ]
+        with pytest.raises(ValueError):
+            recent_completed_attempt_execution_ms(session, job_type=JobType.ORIGINAL, limit=0)

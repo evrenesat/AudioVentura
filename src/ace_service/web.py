@@ -29,6 +29,7 @@ from ace_service.campaign import CampaignError, CampaignStore
 from ace_service.config import ServiceSettings
 from ace_service.costs import (
     apply_conservative_margin,
+    build_cost_estimate_view,
     compute_submission_quote,
     select_highest_exact_rate_gpu,
     utc_now,
@@ -58,6 +59,7 @@ from ace_service.repository import (
     get_project,
     list_project_jobs,
     list_projects,
+    recent_completed_attempt_execution_ms,
     rename_project,
     resolve_continuation_source,
 )
@@ -175,6 +177,68 @@ def capture_submission_quote(app: FastAPI, session: Any, job: Job) -> Submission
     return create_submission_quote(session, job.id, estimate, captured_at=captured_at)
 
 
+def _cost_estimate_view(
+    session: Any, job_type: JobType, *, variation_count: int
+) -> dict[str, Any] | None:
+    """Read-only approximate cost estimate for one request kind.
+
+    Computed on read from completed attempt history at the fixed
+    ``USD 0.50/GPU-hour`` rate.  Never persisted and never consulted by the
+    submission path; any query or computation failure is bounded to ``None``
+    so generation continues unchanged.  The returned view also carries the
+    server-computed request label for every supported variation count, so the
+    form can bind the visible total to the selected value with no client-side
+    money arithmetic.
+    """
+
+    try:
+        samples = recent_completed_attempt_execution_ms(session, job_type=job_type)
+        kind_label = "original songs" if job_type is JobType.ORIGINAL else "covers"
+        view = build_cost_estimate_view(
+            execution_ms_samples=samples,
+            variation_count=variation_count,
+            kind_label=kind_label,
+        )
+        supported_counts = list(range(1, 5) if job_type is JobType.ORIGINAL else range(2, 5))
+        view["variation_counts"] = supported_counts
+        view["variation_request_labels"] = {
+            count: build_cost_estimate_view(
+                execution_ms_samples=samples, variation_count=count, kind_label=kind_label
+            )["request_estimate_label"]
+            for count in supported_counts
+        }
+        return view
+    except Exception:
+        return None
+
+
+def _form_estimate(
+    session: Any, job_type: JobType, form: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Read-only estimate for the variation count carried by one form.
+
+    The count is read directly from the form (or the kind's default when
+    absent), so the visible estimate always matches the value the form will
+    submit — including continuation forms whose values are already typed.
+    Any missing, invalid, or out-of-range count, or any estimate failure,
+    omits only the estimate; authentication, validation, and the submission
+    transaction never depend on it.
+    """
+
+    try:
+        default = "1" if job_type is JobType.ORIGINAL else "2"
+        raw = form.get("variation_count", default)
+        if isinstance(raw, bool):
+            return None
+        variation_count = int(raw)
+        supported = (1, 2, 3, 4) if job_type is JobType.ORIGINAL else (2, 3, 4)
+        if variation_count not in supported:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return _cost_estimate_view(session, job_type, variation_count=variation_count)
+
+
 def register_web_routes(app: FastAPI) -> None:
     """Mount only private controller routes on the main app."""
 
@@ -229,6 +293,9 @@ def register_web_routes(app: FastAPI) -> None:
                     "jobs": _route_path(request, "jobs"),
                     "app_css": _route_path(request, "static", path="app.css"),
                     "status_js": _route_path(request, "static", path="status.js"),
+                    "estimate_selector_js": _route_path(
+                        request, "static", path="estimate_selector.js"
+                    ),
                 },
             },
             status_code=response_status,
@@ -246,15 +313,21 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
+        estimate = None
+        with app.state.session_factory() as session:
+            estimate = _form_estimate(session, JobType.ORIGINAL, {})
         return render(
             request,
             "original_form.html",
-            {"form": {}, "errors": [], "continuing": False},
+            {"form": {}, "errors": [], "continuing": False, "estimate": estimate},
         )
 
     @app.post("/create", dependencies=[Depends(authenticated)], name="create_original")
     async def create_original(request: Request) -> Response:
-        _assert_public_enqueue_allowed(app)
+        # TODO(re-enable): the private campaign maintenance gate is quarantined
+        # during the usability recovery; restore the call after ordinary
+        # original and cover generation is stable (owner decision #10).
+        # _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
         form = dict(fields)
@@ -279,11 +352,16 @@ def register_web_routes(app: FastAPI) -> None:
                             if continuation_source is not None
                             else None
                         ),
+                        "estimate": _form_estimate(session, JobType.ORIGINAL, fields),
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
             job = create_original_job(session, job_request, project=project_id)
-            capture_submission_quote(app, session, job)
+            # TODO(re-enable): legacy submission-quote capture is disconnected
+            # during the usability recovery; restore after ordinary original
+            # and cover generation is stable. Quotes are inert historical data
+            # and never gate generation.
+            # capture_submission_quote(app, session, job)
             session.commit()
             job_id = job.id
         _enqueue(app, job_id)
@@ -295,6 +373,9 @@ def register_web_routes(app: FastAPI) -> None:
     @app.get("/cover", dependencies=[Depends(authenticated)], name="cover_form")
     async def cover_form(request: Request) -> Response:
         readiness = await _readiness(app, only={"home_ingest"})
+        estimate = None
+        with app.state.session_factory() as session:
+            estimate = _form_estimate(session, JobType.COVER, {})
         return render(
             request,
             "cover_form.html",
@@ -303,12 +384,16 @@ def register_web_routes(app: FastAPI) -> None:
                 "errors": [],
                 "readiness": readiness,
                 "continuing": False,
+                "estimate": estimate,
             },
         )
 
     @app.post("/cover", dependencies=[Depends(authenticated)], name="create_cover")
     async def create_cover(request: Request) -> Response:
-        _assert_public_enqueue_allowed(app)
+        # TODO(re-enable): the private campaign maintenance gate is quarantined
+        # during the usability recovery; restore the call after ordinary
+        # original and cover generation is stable (owner decision #10).
+        # _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
         form = dict(fields)
@@ -334,6 +419,7 @@ def register_web_routes(app: FastAPI) -> None:
                             if continuation_source is not None
                             else None
                         ),
+                        "estimate": _form_estimate(session, JobType.COVER, fields),
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
@@ -352,7 +438,10 @@ def register_web_routes(app: FastAPI) -> None:
         name="confirm_cover",
     )
     async def confirm_cover(request: Request, job_id: str) -> Response:
-        _assert_public_enqueue_allowed(app)
+        # TODO(re-enable): the private campaign maintenance gate is quarantined
+        # during the usability recovery; restore the call after ordinary
+        # original and cover generation is stable (owner decision #10).
+        # _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
         with app.state.session_factory() as session:
@@ -363,7 +452,11 @@ def register_web_routes(app: FastAPI) -> None:
                 confirm_cover_job(session, job.id)
             except ValueError as exc:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-            capture_submission_quote(app, session, job)
+            # TODO(re-enable): legacy submission-quote capture is disconnected
+            # during the usability recovery; restore after ordinary original
+            # and cover generation is stable. Quotes are inert historical data
+            # and never gate generation.
+            # capture_submission_quote(app, session, job)
             session.commit()
         _enqueue(app, job_id)
         return RedirectResponse(
@@ -480,6 +573,9 @@ def register_web_routes(app: FastAPI) -> None:
                     detail="job is not compatible with continuation",
                 ) from exc
             project_title = source.project.title
+        estimate = None
+        with app.state.session_factory() as session:
+            estimate = _form_estimate(session, source.job_type, form)
         if source.job_type is JobType.ORIGINAL:
             return render(
                 request,
@@ -489,6 +585,7 @@ def register_web_routes(app: FastAPI) -> None:
                     "errors": [],
                     "continuing": True,
                     "project_title": project_title,
+                    "estimate": estimate,
                 },
             )
         return render(
@@ -500,6 +597,7 @@ def register_web_routes(app: FastAPI) -> None:
                 "readiness": await _readiness(app, only={"home_ingest"}),
                 "continuing": True,
                 "project_title": project_title,
+                "estimate": estimate,
             },
         )
 

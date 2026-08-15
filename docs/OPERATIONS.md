@@ -41,8 +41,15 @@ design.
 
 ## Quality campaign dry-run and gate
 
-Run the Checkpoint 3 dry-run from the application release with the private
-fixture mounted:
+The quality campaign is quarantined during the usability recovery. Its
+executable entrypoint (`python -m ace_service.quality_eval`) and the
+ordinary-submission maintenance gate are disabled with a `TODO`: re-enable
+after ordinary original and cover generation is stable. The campaign store,
+evaluators, profiles, and campaign data remain in place and unit-testable;
+do not run any campaign CLI mode in this recovery.
+
+When the campaign is re-enabled, run the Checkpoint 3 dry-run from the
+application release with the private fixture mounted:
 
 ```text
 uv run python -m ace_service.quality_eval \
@@ -288,7 +295,7 @@ and removes non-retained terminal cover sources. It never removes completed
 outputs. Logs contain job/stage/error/timing metadata but redact credentials,
 authorization headers, capability URLs, prompts, and lyrics.
 
-## Schema migration and billing sync
+## Schema migration and cost display
 
 The database schema is versioned by an ordered migration runner. Normal
 application startup never migrates: it creates the foundation tables only and
@@ -311,37 +318,19 @@ retrying. Before upgrading an existing deployment, create a SQLite-API backup
 and run `PRAGMA integrity_check` on both the source and the copy, then
 exercise legacy reads on the migrated copy before starting the new release.
 
-Runpod billing is an operator-only boundary (`billing-sync`); no browser
-route and no in-process scheduler ever calls it:
-
-```text
-uv run python -m ace_service billing-sync \
-  --database /srv/ace-service/data/service.db \
-  --start 2026-08-08T00:00:00Z --end 2026-08-09T00:00:00Z
-```
-
-It refuses a non-exact schema, holds the database singleton lease (stale
-leases are recovered), preserves native hourly UTC buckets append-only with
-an idempotent current projection, and keeps account-wide network-volume
-evidence separate from endpoint costs. A newer exact-repeat fetch advances
-projection freshness without duplicating history; older/equal repeats and
-older changed replays cannot replace that projection. Exactness is relative to
-the current projection, so A -> B -> A stores all three fetch events and the
-last A becomes current; retrying a changed event does not duplicate it. The
-additive v4-to-v5 migration preserves existing observation rows and establishes
-their projection value identity lazily. An exact retry of preserved v4 history
-reuses the original immutable row only when its complete native bucket,
-evidence, and UTC fetch time match; this applies identically to endpoint and
-account-wide network-volume history. Credentials come from
-the deployment `.env` (`RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`).
-
-The adapter uses `https://rest.runpod.io/v1/billing`, requests endpoint rows
-with exactly `bucketSize=hour`, `grouping=endpointId`, `endpointId`,
-`startTime`, and `endTime`, and rejects oversized or undocumented response
-shapes. Network-volume summaries read the latest projection for each native
-bucket; immutable older observations remain available for audit. No billing
-sync should be enabled for UI totals until the separate read-only boundary
-probe establishes interval semantics.
+The `billing-sync` operator command and its Runpod billing client were removed
+from this release; historical `billing_observations`, `billing_projections`,
+`submission_quotes`, rate-catalog, and calibration rows remain readable data
+and are preserved by every migration. Cost display is now a read-only
+informational calculation at the fixed `USD 0.50/GPU-hour` rate, computed on
+read from the latest three completed attempt durations of the matching kind
+(separate original and cover histories). Every label applies one half-up
+rounding at the final four-decimal USD display boundary, and the visible
+request total follows the selected variation count. It never approves,
+delays, rejects, retries, or cancels generation, and no
+quote/calibration/rate record is created for it. With no matching completed
+history it shows a clearly labeled 60-second seed (`USD 0.0083` per
+variation).
 
 Populate `gpu_rate_catalog` and `runtime_calibrations` only from accepted,
 timestamped operator evidence. Calibration lookup requires exact task mode,
@@ -352,8 +341,9 @@ count; out-of-band durations are not extrapolated. Set
 rejects a missing or malformed digest, and browser fields cannot override it.
 This is an exact deployment/release identity, not `worker-schema-v2` or another
 compatibility protocol label. Version reuse is permitted only for an exact
-repeat. With no calibration for the configured digest, generation proceeds
-with an explicit `calibration_missing` quote.
+repeat. These records no longer gate or quote generation: the active cost
+display is the fixed-rate read-only estimate described above, and the
+historical rate/calibration rows stay readable for audit.
 
 ## Backups and diagnosis
 

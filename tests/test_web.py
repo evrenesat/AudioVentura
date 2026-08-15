@@ -25,6 +25,7 @@ from ace_service.repository import (
     create_job,
     create_original_job,
     create_output,
+    create_variation_attempt,
     finalize_cover_job_duration,
     get_job,
     get_submission_quote,
@@ -155,7 +156,7 @@ def _selected_value(html: str, name: str) -> str:
         re.DOTALL,
     )
     assert select_match is not None
-    option_match = re.search(r'<option value="([^"]+)" selected>', select_match.group(1))
+    option_match = re.search(r'<option value="([^"]+)" selected[ >]', select_match.group(1))
     assert option_match is not None
     return option_match.group(1)
 
@@ -301,7 +302,9 @@ def test_continue_original_edits_create_one_same_project_version(web_app) -> Non
             == created.normalized_request_json["generation"]
         )
         assert session.query(Job).count() == 2
-        assert get_submission_quote(session, new_id) is not None
+        # Quote capture is disconnected from the acceptance transaction in the
+        # usability recovery; no submission-quote record is created.
+        assert get_submission_quote(session, new_id) is None
 
 
 def test_continue_validation_preserves_edits_source_and_csrf(web_app) -> None:
@@ -415,9 +418,7 @@ def test_projects_workspace_orders_versions_outputs_and_job_links(web_app) -> No
 
         detail = client.get(f"/projects/{project_id}", auth=_auth(client))
         assert detail.status_code == 200
-        assert detail.text.index("revised mix prompt") < detail.text.rindex(
-            "initial mix prompt"
-        )
+        assert detail.text.index("revised mix prompt") < detail.text.rindex("initial mix prompt")
         assert "Version 2" in detail.text and "Version 1" in detail.text
         assert "This version failed clearly." in detail.text
         assert f'src="/media/{output_id}"' in detail.text
@@ -640,7 +641,9 @@ def test_continue_cover_reconfirms_rights_and_uses_existing_staging_flow(web_app
         assert confirmed.status_code == 303
         assert worker.enqueued == [new_id]
         with factory() as session:
-            assert get_submission_quote(session, new_id) is not None
+            # Quote capture is disconnected from the acceptance transaction in
+            # the usability recovery; cover confirmation creates no quote.
+            assert get_submission_quote(session, new_id) is None
 
 
 def test_continue_rejects_missing_malformed_and_cross_type_sources(web_app) -> None:
@@ -716,7 +719,9 @@ def test_continue_rejects_missing_malformed_and_cross_type_sources(web_app) -> N
         assert session.query(SubmissionQuote).count() == 0
 
 
-def test_continue_campaign_gate_blocks_submission_without_creation(web_app, monkeypatch) -> None:
+def test_continue_submission_cannot_reach_campaign_gate(web_app, monkeypatch) -> None:
+    """The campaign maintenance gate is quarantined: even when it would raise,
+    an ordinary original submission is accepted and enqueued unchanged."""
     app, factory, worker = web_app
     with factory() as session:
         source = create_original_job(
@@ -741,9 +746,219 @@ def test_continue_campaign_gate_blocks_submission_without_creation(web_app, monk
                 "continue_from_job_id": source_id,
                 "description": "valid campaign edit",
             },
+            follow_redirects=False,
         )
-        assert response.status_code == 503
+        assert response.status_code == 303
+        new_id = response.headers["location"].rsplit("/", 1)[-1]
+        assert worker.enqueued == [new_id]
+    with factory() as session:
+        assert session.query(Job).count() == 2
+
+
+def test_form_shows_seed_estimate_without_history(web_app) -> None:
+    app, _, _ = web_app
+    with TestClient(app) as client:
+        for path in ("/create", "/cover"):
+            response = client.get(path, auth=_auth(client))
+            assert response.status_code == 200
+            assert "Approximate cost (informational only)" in response.text
+            assert "USD 0.50/GPU-hour" in response.text
+            assert "USD 0.0083" in response.text
+            assert "60-second seed" in response.text
+
+
+def test_form_estimate_uses_separate_original_and_cover_history(web_app) -> None:
+    app, factory, _ = web_app
+    with factory() as session:
+        original = create_original_job(session, OriginalSongRequest(description="done original"))
+        cover = create_cover_job(
+            session,
+            CoverRequest(
+                youtube_url="https://www.youtube.com/watch?v=abc123",
+                target_style="dreamy synthwave",
+                rights_confirmation=True,
+            ),
+        )
+        original_attempt = create_variation_attempt(session, job_id=original.id, variation_index=1)
+        original_attempt.status = JobStatus.COMPLETED
+        original_attempt.execution_ms = 60_000
+        original_attempt.completed_at = datetime.now(UTC)
+        cover_attempt = create_variation_attempt(session, job_id=cover.id, variation_index=1)
+        cover_attempt.status = JobStatus.COMPLETED
+        cover_attempt.execution_ms = 120_000
+        cover_attempt.completed_at = datetime.now(UTC)
+        session.commit()
+    with TestClient(app) as client:
+        original_page = client.get("/create", auth=_auth(client))
+        assert "USD 0.0083" in original_page.text  # one original sample
+        assert "60-second seed" not in original_page.text
+        cover_page = client.get("/cover", auth=_auth(client))
+        assert "USD 0.0167" in cover_page.text  # one cover sample at 120s
+        assert "60-second seed" not in cover_page.text
+
+
+def test_form_selector_binds_request_total_to_selected_count(web_app) -> None:
+    app, _, _ = web_app
+    with TestClient(app) as client:
+        original_page = client.get("/create", auth=_auth(client))
+        assert original_page.status_code == 200
+        assert "1 variation: ~USD 0.0083" in original_page.text
+        for text in (
+            'data-request-text="1 variation: ~USD 0.0083"',
+            'data-request-text="2 variations: ~USD 0.0167"',
+            'data-request-text="3 variations: ~USD 0.0250"',
+            'data-request-text="4 variations: ~USD 0.0333"',
+        ):
+            assert text in original_page.text
+        cover_page = client.get("/cover", auth=_auth(client))
+        assert cover_page.status_code == 200
+        assert "2 variations: ~USD 0.0167" in cover_page.text
+        for text in (
+            'data-request-text="2 variations: ~USD 0.0167"',
+            'data-request-text="3 variations: ~USD 0.0250"',
+            'data-request-text="4 variations: ~USD 0.0333"',
+        ):
+            assert text in cover_page.text
+
+
+def test_continuation_forms_show_matching_request_estimate(web_app) -> None:
+    app, factory, _ = web_app
+    with factory() as session:
+        original = create_original_job(
+            session, _rich_original_request(), job_id="estimate-original"
+        )
+        cover = create_cover_job(
+            session,
+            CoverRequest(
+                youtube_url="https://www.youtube.com/watch?v=abc123",
+                target_style="dreamy synthwave",
+                variation_count=4,
+                rights_confirmation=True,
+            ),
+            job_id="estimate-cover",
+        )
+        session.commit()
+        original_id = original.id
+        cover_id = cover.id
+    with TestClient(app) as client:
+        original_form = client.get(f"/jobs/{original_id}/continue", auth=_auth(client))
+        assert original_form.status_code == 200
+        assert _selected_value(original_form.text, "variation_count") == "3"
+        assert "3 variations: ~USD 0.0250" in original_form.text
+        cover_form = client.get(f"/jobs/{cover_id}/continue", auth=_auth(client))
+        assert cover_form.status_code == 200
+        assert _selected_value(cover_form.text, "variation_count") == "4"
+        assert "4 variations: ~USD 0.0333" in cover_form.text
+
+
+def test_422_rerender_retains_selection_and_shows_matching_estimate(web_app) -> None:
+    app, factory, worker = web_app
+    with TestClient(app) as client:
+        token = _csrf(client)
+        rejected = client.post(
+            "/create",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "description": "ab",  # below the 3-character minimum
+                "variation_count": "4",
+            },
+        )
+        assert rejected.status_code == 422
+        assert _selected_value(rejected.text, "variation_count") == "4"
+        assert "4 variations: ~USD 0.0333" in rejected.text
         assert worker.enqueued == []
+        cover_token = _csrf(client, "/cover")
+        rejected_cover = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": cover_token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "variation_count": "2",
+                # rights_confirmation omitted -> validation error
+            },
+        )
+        assert rejected_cover.status_code == 422
+        assert _selected_value(rejected_cover.text, "variation_count") == "2"
+        assert "2 variations: ~USD 0.0167" in rejected_cover.text
+        assert worker.enqueued == []
+        # A crafted count below the cover minimum is itself invalid; the 422
+        # re-render must omit the estimate instead of erroring on a missing
+        # per-count label.
+        invalid_count = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": cover_token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "variation_count": "1",
+            },
+        )
+        assert invalid_count.status_code == 422
+        assert "Approximate cost" not in invalid_count.text
+        assert worker.enqueued == []
+
+
+def test_estimate_failure_omits_only_estimate_on_continuation_and_422(web_app, monkeypatch) -> None:
+    app, factory, worker = web_app
+    with factory() as session:
+        source = create_original_job(
+            session, _rich_original_request(), job_id="estimate-fail-source"
+        )
+        session.commit()
+        source_id = source.id
+
+    def explode(_session, **kwargs):
+        raise RuntimeError("estimate database failure")
+
+    monkeypatch.setattr(web_routes, "recent_completed_attempt_execution_ms", explode)
+    with TestClient(app) as client:
+        continued = client.get(f"/jobs/{source_id}/continue", auth=_auth(client))
+        assert continued.status_code == 200
+        assert "Approximate cost" not in continued.text
+        assert _selected_value(continued.text, "variation_count") == "3"
+        token = _csrf(client)
+        rejected = client.post(
+            "/create",
+            auth=_auth(client),
+            data={"csrf_token": token, "description": "ab", "variation_count": "4"},
+        )
+        assert rejected.status_code == 422
+        assert "Approximate cost" not in rejected.text
+        assert _selected_value(rejected.text, "variation_count") == "4"
+        accepted = client.post(
+            "/create",
+            auth=_auth(client),
+            data={"csrf_token": token, "description": "still generated"},
+            follow_redirects=False,
+        )
+        assert accepted.status_code == 303
+        assert worker.enqueued == [accepted.headers["location"].rsplit("/", 1)[-1]]
+
+
+def test_estimate_failure_omits_block_and_submission_continues(web_app, monkeypatch) -> None:
+    app, factory, worker = web_app
+
+    def explode(_session, **kwargs):
+        raise RuntimeError("estimate database failure")
+
+    monkeypatch.setattr(web_routes, "recent_completed_attempt_execution_ms", explode)
+    with TestClient(app) as client:
+        token = _csrf(client)
+        form_page = client.get("/create", auth=_auth(client))
+        assert form_page.status_code == 200
+        assert "Approximate cost" not in form_page.text
+        accepted = client.post(
+            "/create",
+            auth=_auth(client),
+            data={"csrf_token": token, "description": "still generated"},
+            follow_redirects=False,
+        )
+        assert accepted.status_code == 303
+        assert len(worker.enqueued) == 1
     with factory() as session:
         assert session.query(Job).count() == 1
 
@@ -1133,7 +1348,7 @@ def test_quote_runtime_identity_config_is_bounded_and_required(
             )
 
 
-def test_acceptance_quote_uses_only_configured_exact_runtime_identity(
+def test_quote_capture_disconnected_but_preserved_machinery_stays_bounded(
     settings: ServiceSettings,
 ) -> None:
     runtime_settings = ServiceSettings(
@@ -1209,7 +1424,11 @@ def test_acceptance_quote_uses_only_configured_exact_runtime_identity(
             with factory() as session:
                 first_job = get_job(session, first_job_id)
                 assert first_job is not None
-                first_quote = get_submission_quote(session, first_job_id)
+                # The acceptance transaction no longer captures a quote.
+                assert get_submission_quote(session, first_job_id) is None
+                # The preserved capture path uses only the configured
+                # server-owned runtime identity; the browser field is ignored.
+                first_quote = capture_submission_quote(app, session, first_job)
                 assert first_quote is not None and first_quote.unavailable_reason_code is None
                 assert first_quote.calibration_version == 1
                 quote_id = first_quote.id
@@ -1217,6 +1436,7 @@ def test_acceptance_quote_uses_only_configured_exact_runtime_identity(
                 repeated = capture_submission_quote(app, session, first_job)
                 assert repeated is not None and repeated.id == quote_id
                 assert repeated.captured_at == captured_at
+                session.commit()
 
             changed_settings = ServiceSettings(
                 data_root=settings.data_root,
@@ -1258,7 +1478,12 @@ def test_acceptance_quote_uses_only_configured_exact_runtime_identity(
             assert missing.status_code == 303
             second_job_id = missing.headers["location"].rsplit("/", 1)[-1]
             with factory() as session:
-                second_quote = get_submission_quote(session, second_job_id)
+                # The acceptance transaction creates no quote; the preserved
+                # capture path still records the bounded unavailable reason.
+                assert get_submission_quote(session, second_job_id) is None
+                second_job = get_job(session, second_job_id)
+                assert second_job is not None
+                second_quote = capture_submission_quote(app, session, second_job)
                 assert second_quote is not None
                 assert second_quote.unavailable_reason_code == "calibration_missing"
                 assert session.query(SubmissionQuote).count() == 2

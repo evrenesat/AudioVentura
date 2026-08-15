@@ -10,16 +10,23 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 MICRO_USD_PER_USD = 1_000_000
 MS_PER_HOUR = 3_600_000
-PRICE_MAX_AGE_HOURS = 24
 MAX_AMOUNT_MICRO_USD = 10**15
+
+# Read-only approximate cost display (owner decisions #5-#9).  The rate is a
+# fixed exact integer micro-USD value; the display never gates, persists, or
+# controls generation.
+FIXED_GPU_HOURLY_RATE_MICRO_USD = 500_000  # USD 0.50/GPU-hour
+NO_HISTORY_SEED_EXECUTION_MS = 60_000  # 60-second seed per variation
+ESTIMATE_HISTORY_SAMPLE_LIMIT = 3
+_ESTIMATE_DISPLAY_QUANTUM = Decimal("0.0001")  # 4-decimal USD presentation
 
 _DECIMAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -425,3 +432,114 @@ def select_highest_exact_rate_gpu(
             raise ValueError("exact hourly USD rate does not match derived micro-USD rate")
         exact_rates[gpu_id] = Decimal(exact_token)
     return max(eligible_gpu_ids, key=exact_rates.__getitem__)
+
+
+def format_micro_usd(micro_usd: int) -> str:
+    """Present an integer micro-USD amount as fixed 4-decimal USD text.
+
+    Kept for preserved integer micro-USD fields; informational estimate
+    labels never pass through here.  The integer micro-USD value is already
+    rounded by the centralized half-up formula; this presentation truncates
+    at four decimal places so the preserved display never inflates an amount.
+    No binary float is used.
+    """
+
+    if isinstance(micro_usd, bool) or not isinstance(micro_usd, int) or micro_usd < 0:
+        raise ValueError("micro_usd must be a non-negative integer")
+    amount = Decimal(micro_usd) / Decimal(MICRO_USD_PER_USD)
+    return f"USD {amount.quantize(_ESTIMATE_DISPLAY_QUANTUM, rounding=ROUND_DOWN)}"
+
+
+def format_exact_usd_half_up(numerator: int, denominator: int) -> str:
+    """Present an exact rational micro-USD amount as fixed 4-decimal USD text.
+
+    This is the single final display boundary: ``ROUND_HALF_UP`` is applied
+    exactly once when quantizing the raw numerator/denominator value to
+    ``0.0001`` USD.  A pre-rounded integer micro-USD amount is never routed
+    back through a four-decimal label, so the label cannot disagree with the
+    exact rational value.  No binary float is used.
+    """
+
+    if isinstance(numerator, bool) or not isinstance(numerator, int) or numerator < 0:
+        raise ValueError("numerator must be a non-negative integer")
+    if isinstance(denominator, bool) or not isinstance(denominator, int) or denominator <= 0:
+        raise ValueError("denominator must be a positive integer")
+    amount = Decimal(numerator) / Decimal(denominator) / Decimal(MICRO_USD_PER_USD)
+    return f"USD {amount.quantize(_ESTIMATE_DISPLAY_QUANTUM, rounding=ROUND_HALF_UP)}"
+
+
+def build_cost_estimate_view(
+    *,
+    execution_ms_samples: Sequence[int],
+    variation_count: int,
+    kind_label: str,
+) -> dict[str, Any]:
+    """Compute the read-only approximate estimate view from attempt durations.
+
+    Pure integer/rational arithmetic at the fixed ``USD 0.50/GPU-hour`` rate;
+    binary float never enters.  Raw numerators are carried through every
+    sample, the average (sum of the raw sample numerators divided by the
+    sample count, never from rounded display strings), and the request total
+    (the unrounded average, or the unrounded 60-second seed with no history,
+    multiplied by the variation count).  Each label applies ``ROUND_HALF_UP``
+    exactly once at the final four-decimal USD display boundary; integer
+    micro-USD fields are preserved for callers that need them and are never
+    fed back into a label.  The seed is never blended into partial history
+    and nothing here is persisted.
+    """
+
+    if isinstance(variation_count, bool) or not isinstance(variation_count, int):
+        raise ValueError("variation_count must be an integer")
+    if variation_count < 1 or variation_count > 4:
+        raise ValueError("variation_count must be between 1 and 4")
+    samples_ms = list(execution_ms_samples)[:ESTIMATE_HISTORY_SAMPLE_LIMIT]
+    samples: list[dict[str, Any]] = []
+    numerator_sum = 0
+    for execution_ms in samples_ms:
+        if isinstance(execution_ms, bool) or not isinstance(execution_ms, int) or execution_ms < 0:
+            raise ValueError("execution_ms samples must be non-negative integers")
+        numerator = execution_ms * FIXED_GPU_HOURLY_RATE_MICRO_USD
+        numerator_sum += numerator
+        cost_micro_usd = (numerator + MS_PER_HOUR // 2) // MS_PER_HOUR
+        samples.append(
+            {
+                "execution_ms": execution_ms,
+                "cost_micro_usd": cost_micro_usd,
+                "cost_label": format_exact_usd_half_up(numerator, MS_PER_HOUR),
+            }
+        )
+    sample_count = len(samples)
+    if sample_count == 0:
+        used_seed = True
+        seed_note = "no completed history of this kind yet — using a 60-second seed"
+        average_micro_usd: int | None = None
+        average_label: str | None = None
+        seed_numerator = NO_HISTORY_SEED_EXECUTION_MS * FIXED_GPU_HOURLY_RATE_MICRO_USD
+        per_variation_label = format_exact_usd_half_up(seed_numerator, MS_PER_HOUR)
+        request_numerator = seed_numerator * variation_count
+        request_denominator = MS_PER_HOUR
+    else:
+        used_seed = False
+        seed_note = None
+        request_denominator = sample_count * MS_PER_HOUR
+        average_micro_usd = (numerator_sum + request_denominator // 2) // request_denominator
+        average_label = format_exact_usd_half_up(numerator_sum, request_denominator)
+        per_variation_label = average_label
+        request_numerator = numerator_sum * variation_count
+    request_micro_usd = (request_numerator + request_denominator // 2) // request_denominator
+    return {
+        "approximate": True,
+        "informational": True,
+        "rate_label": "USD 0.50/GPU-hour",
+        "kind_label": kind_label,
+        "variation_count": variation_count,
+        "used_seed": used_seed,
+        "seed_note": seed_note,
+        "samples": samples,
+        "sample_count": sample_count,
+        "average_micro_usd": average_micro_usd,
+        "average_label": average_label,
+        "per_variation_label": per_variation_label,
+        "request_estimate_micro_usd": request_micro_usd,
+        "request_estimate_label": format_exact_usd_half_up(request_numerator, request_denominator),
+    }
