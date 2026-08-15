@@ -199,7 +199,7 @@ def _cost_estimate_view(
             variation_count=variation_count,
             kind_label=kind_label,
         )
-        supported_counts = list(range(1, 5) if job_type is JobType.ORIGINAL else range(2, 5))
+        supported_counts = list(range(1, 5))
         view["variation_counts"] = supported_counts
         view["variation_request_labels"] = {
             count: build_cost_estimate_view(
@@ -226,12 +226,11 @@ def _form_estimate(
     """
 
     try:
-        default = "1" if job_type is JobType.ORIGINAL else "2"
-        raw = form.get("variation_count", default)
+        raw = form.get("variation_count", "1")
         if isinstance(raw, bool):
             return None
         variation_count = int(raw)
-        supported = (1, 2, 3, 4) if job_type is JobType.ORIGINAL else (2, 3, 4)
+        supported = (1, 2, 3, 4)
         if variation_count not in supported:
             return None
     except (TypeError, ValueError):
@@ -738,7 +737,7 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
         "profile_id": fields.get("profile_id", "fast-beta-v1"),
         "audio_cover_strength": _optional_number(fields.get("audio_cover_strength"), default=0.65),
         "cover_noise_strength": _optional_number(fields.get("cover_noise_strength"), default=0.0),
-        "variation_count": _required_int(fields.get("variation_count", "2")),
+        "variation_count": _required_int(fields.get("variation_count", "1")),
         "seed": _optional_int(fields.get("seed")),
         "output_format": fields.get("output_format", OutputFormat.MP3.value),
         "rights_confirmation": fields.get("rights_confirmation") in {"1", "true", "on", "yes"},

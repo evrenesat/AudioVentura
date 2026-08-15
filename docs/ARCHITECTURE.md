@@ -31,17 +31,21 @@ conflicting or vague duration language is rejected without mutating the
 structured value. The final caption/lyrics remain bounded at 511/4095
 characters without truncation.
 
-Cover preparation is a two-phase flow: home ingest probes and persists the
-source duration, the controller enters `staging`, and the UI displays the
-detected duration and requires confirmation before issuing Runpod capabilities.
-The source duration becomes the exact ACE-Step duration. Covers retain
-independent `audio_cover_strength` and `cover_noise_strength` values, run two
-to four variations sequentially, and persist the returned effective seed and
-bounded worker result metadata, including output duration/tolerance and build
-identity, in existing JSON fields. An awaiting-confirmation cover may be
-cancelled once through the authenticated CSRF-protected UI; its prepared
-source is removed after the failed state commits. Status polling reloads the
-detail page once when the server-rendered confirmation form becomes available.
+Cover preparation is one-submit: home ingest probes and persists the
+source duration, the controller enters `staging` and immediately consumes the
+already-persisted initial rights confirmation in the same transaction, so the
+durable row is `cover_staging.status=confirmed` before any Runpod capability
+is issued. The source duration becomes the exact ACE-Step duration. Covers
+retain independent `audio_cover_strength` and `cover_noise_strength` values,
+run one to four variations sequentially (both forms default to one), and
+persist the returned effective seed and bounded worker result metadata,
+including output duration/tolerance and build identity, in existing JSON
+fields. Only legacy rows whose durable state is exactly
+`cover_staging.status=awaiting_confirmation` may be confirmed or cancelled
+once through the authenticated CSRF-protected UI; its prepared source is
+removed after the failed state commits. New rows never commit the awaiting
+state and never render or require the route. Status polling reloads the
+detail page once when a legacy confirmation form becomes available.
 Enhance and auto-compose use bounded LM lyrics as effective lyrics only when
 the submitted lyrics are empty; supplied lyrics remain exact. The controller
 projects the same bounded profile, input/effective values, generated metadata,
@@ -188,7 +192,7 @@ reconstructs editable defaults only from a complete schema-v2 request and the
 stored source/job fields. The existing create POST validates the edited values
 again and derives same-project membership from the continuation source; it
 always creates a new job. Covers still require fresh rights confirmation,
-home ingestion, detected-duration confirmation, and the ordinary queue path.
+home ingestion, and the ordinary one-submit queue path.
 
 The ledger adds five record families, all through the existing SQLAlchemy
 session/repository boundary: immutable one-to-one `submission_quotes`
@@ -306,14 +310,20 @@ network, and waits for the metadata response after SFTP has uploaded
 
 Hetzner verifies the home-reported positive byte size and SHA-256 against the
 `.part` file, atomically renames it to `source.mp3`, and persists the returned
-title, canonical URL, duration, checksum, and size. The controller records the
-source duration and enters `staging`; the authenticated UI must confirm the
-detected duration before the worker issues one source-download capability and
-one output-upload capability and submits the cover payload to Runpod. The
-payload contains the composed style caption, optional exact lyrics,
-independent cover controls, source checksum/size, exact source duration, and
-signed URLs; it contains no audio bytes or YouTube credentials. The same
-staging page can cancel before confirmation, with no Runpod enqueue; the
+title, canonical URL, duration, checksum, and size. The controller then runs
+one database transaction that finalizes the normalized source duration,
+transitions `ingesting -> staging`, and reuses `confirm_cover_job` to consume
+the already-persisted initial rights confirmation, so the durable row carries
+`cover_staging.status=confirmed` plus `confirmed_at` before any external
+submission. A missing `rights_confirmation_at` fails the cover closed before
+the transaction. Only after that commit does the worker issue one
+source-download capability and one output-upload capability and submit the
+cover payload to Runpod. The payload contains the composed style caption,
+optional exact lyrics, independent cover controls, source checksum/size,
+exact source duration, and signed URLs; it contains no audio bytes or YouTube
+credentials. Legacy rows that durably committed
+`cover_staging.status=awaiting_confirmation` keep the authenticated one-time
+confirm/cancel staging page, which never enqueues without confirmation; the
 prepared source is removed after cancellation commits.
 
 After a valid output is accepted, or after a terminal cover failure, issued

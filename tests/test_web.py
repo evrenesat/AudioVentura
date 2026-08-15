@@ -21,6 +21,7 @@ from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, SubmissionQuote
 from ace_service.repository import (
     EvidenceConflictError,
+    confirm_cover_job,
     create_cover_job,
     create_job,
     create_original_job,
@@ -812,13 +813,108 @@ def test_form_selector_binds_request_total_to_selected_count(web_app) -> None:
             assert text in original_page.text
         cover_page = client.get("/cover", auth=_auth(client))
         assert cover_page.status_code == 200
-        assert "2 variations: ~USD 0.0167" in cover_page.text
+        assert "1 variation: ~USD 0.0083" in cover_page.text
         for text in (
+            'data-request-text="1 variation: ~USD 0.0083"',
             'data-request-text="2 variations: ~USD 0.0167"',
             'data-request-text="3 variations: ~USD 0.0250"',
             'data-request-text="4 variations: ~USD 0.0333"',
         ):
             assert text in cover_page.text
+
+
+def test_cover_form_defaults_to_one_variation_and_persists_explicit_counts(web_app) -> None:
+    app, factory, worker = web_app
+    with TestClient(app) as client:
+        page = client.get("/cover", auth=_auth(client))
+        assert page.status_code == 200
+        assert _selected_value(page.text, "variation_count") == "1"
+
+        token = _csrf(client, "/cover")
+        created = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "rights_confirmation": "true",
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        job_id = created.headers["location"].rsplit("/", 1)[-1]
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.variation_count == 1
+            assert job.rights_confirmation_at is not None
+
+        worker.enqueued.clear()
+        token = _csrf(client, "/cover")
+        created_four = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "rights_confirmation": "true",
+                "variation_count": "4",
+            },
+            follow_redirects=False,
+        )
+        assert created_four.status_code == 303
+        job_id_four = created_four.headers["location"].rsplit("/", 1)[-1]
+        with factory() as session:
+            job = get_job(session, job_id_four)
+            assert job is not None and job.variation_count == 4
+
+
+def test_new_flow_confirmed_cover_has_no_second_confirmation_ui(web_app) -> None:
+    """A new-flow cover that durably committed `confirmed` staging must not
+    render the legacy confirm/cancel UI and must reject the one-time route."""
+
+    app, factory, worker = web_app
+    with TestClient(app) as client:
+        token = _csrf(client, "/cover")
+        created = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "rights_confirmation": "true",
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        job_id = created.headers["location"].rsplit("/", 1)[-1]
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
+            transition_job(session, job.id, JobStatus.STAGING)
+            confirm_cover_job(session, job.id)
+            session.commit()
+
+        detail = client.get(f"/jobs/{job_id}", auth=_auth(client))
+        assert detail.status_code == 200
+        assert "data-cover-confirmation-form" not in detail.text
+        assert "Confirm and generate" not in detail.text
+        status_response = client.get(f"/jobs/{job_id}/status", auth=_auth(client))
+        assert status_response.json()["cover_confirmation_status"] == "confirmed"
+
+        confirm_token = client.cookies.get("ace_csrf")
+        assert confirm_token
+        replay = client.post(
+            f"/cover/{job_id}/confirm",
+            auth=_auth(client),
+            data={"csrf_token": confirm_token},
+        )
+        assert replay.status_code == 409
+        assert worker.enqueued == [job_id]
 
 
 def test_continuation_forms_show_matching_request_estimate(web_app) -> None:
@@ -884,9 +980,10 @@ def test_422_rerender_retains_selection_and_shows_matching_estimate(web_app) -> 
         assert _selected_value(rejected_cover.text, "variation_count") == "2"
         assert "2 variations: ~USD 0.0167" in rejected_cover.text
         assert worker.enqueued == []
-        # A crafted count below the cover minimum is itself invalid; the 422
-        # re-render must omit the estimate instead of erroring on a missing
-        # per-count label.
+        # A crafted out-of-range count is itself invalid; the 422 re-render
+        # must omit the estimate instead of erroring on a missing per-count
+        # label. Count 1 is now the valid default, so a cover rejected only
+        # for the missing rights checkbox keeps its estimate.
         invalid_count = client.post(
             "/cover",
             auth=_auth(client),
@@ -894,11 +991,26 @@ def test_422_rerender_retains_selection_and_shows_matching_estimate(web_app) -> 
                 "csrf_token": cover_token,
                 "youtube_url": "https://www.youtube.com/watch?v=abc123",
                 "target_style": "dreamy synthwave",
-                "variation_count": "1",
+                "variation_count": "5",
             },
         )
         assert invalid_count.status_code == 422
         assert "Approximate cost" not in invalid_count.text
+        assert worker.enqueued == []
+        single_default = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": cover_token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": "dreamy synthwave",
+                "variation_count": "1",
+                # rights_confirmation omitted -> validation error
+            },
+        )
+        assert single_default.status_code == 422
+        assert _selected_value(single_default.text, "variation_count") == "1"
+        assert "1 variation: ~USD 0.0083" in single_default.text
         assert worker.enqueued == []
 
 

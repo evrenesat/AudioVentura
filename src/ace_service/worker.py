@@ -31,6 +31,7 @@ from ace_service.models import (
 )
 from ace_service.repository import (
     complete_variation_attempt,
+    confirm_cover_job,
     create_variation_attempt,
     fail_variation_attempt,
     finalize_cover_job_duration,
@@ -468,7 +469,7 @@ class ControllerWorker:
                 remove_cover_source(self.settings, job_id)
 
     async def _prepare_cover(self, job_id: str) -> None:
-        """Run home preparation, verify SFTP output, then submit the cover."""
+        """Run home preparation, atomically stage a confirmed cover, then submit."""
 
         started = time.monotonic()
         LOGGER.info(
@@ -515,15 +516,26 @@ class ControllerWorker:
                 and normalized.get("schema_version") == WORKER_SCHEMA_VERSION
             )
             if is_v2:
+                # The initial rights checkbox is the only user authorization
+                # for a new cover. Fail closed when it was not durably
+                # persisted, then consume it in the same transaction that
+                # freezes the prepared source, so no Runpod submission can
+                # precede a durable confirmed-staging state.
+                if job.rights_confirmation_at is None:
+                    raise HomeIngestError(
+                        "rights_confirmation_missing",
+                        "the cover request is missing its rights confirmation",
+                    )
                 finalize_cover_job_duration(session, job.id, prepared.duration_seconds)
+                transition_job(session, job.id, JobStatus.STAGING)
+                confirm_cover_job(session, job.id)
             else:
                 # Legacy rows retain their schema and their submitted-era
                 # behavior; only the relational source duration is updated.
                 job.source_duration = prepared.duration_seconds
-            transition_job(session, job.id, JobStatus.STAGING)
+                transition_job(session, job.id, JobStatus.STAGING)
             session.commit()
-        if not is_v2:
-            await self._submit_variation(job_id, 1)
+        await self._submit_variation(job_id, 1)
         LOGGER.info(
             "job=%s stage=staging component=controller elapsed_ms=%d",
             job_id,

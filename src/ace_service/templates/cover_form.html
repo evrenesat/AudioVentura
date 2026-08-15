@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}New cover · ACE Service{% endblock %}
 {% block content %}
-<section class="form-header"><p class="eyebrow">Cover / reinterpretation</p><h1>{% if continuing %}New version of {{ project_title }}{% else %}Bring a source, change the weather.{% endif %}</h1><p>The home server privately prepares the YouTube audio first. No Runpod generation is submitted until you confirm the detected source duration.</p></section>
+<section class="form-header"><p class="eyebrow">Cover / reinterpretation</p><h1>{% if continuing %}New version of {{ project_title }}{% else %}Bring a source, change the weather.{% endif %}</h1><p>The home server privately prepares the YouTube audio first. Ticking the rights box is the only authorization: generation proceeds automatically after preparation.</p></section>
 {% if not readiness.components.home_ingest.ok %}<div class="banner warning" role="status">Home ingest is currently unavailable. You can still submit; the job will report its preparation state safely.</div>{% endif %}
 {% if errors %}<div class="banner error"><strong>Check your request:</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
 <form method="post" action="{{ urls.cover }}" class="form-card">
@@ -20,7 +20,7 @@
   <div class="grid two">
     <div><label for="audio_cover_strength">Reference-audio influence</label><input id="audio_cover_strength" name="audio_cover_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('audio_cover_strength', '0.65') }}"><p class="hint">ACE name: <code>audio_cover_strength</code>. Lower values favor stronger style transfer.</p></div>
     <div><label for="cover_noise_strength">Source/noise retention</label><input id="cover_noise_strength" name="cover_noise_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('cover_noise_strength', '0.0') }}"><p class="hint">ACE name: <code>cover_noise_strength</code>. Higher values stay closer to source melody and structure.</p></div>
-    <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(2, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '2')|string == value|string %} selected{% endif %}{% if estimate %} data-request-text="{{ value }} variations: ~{{ estimate.variation_request_labels[value] }}"{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+    <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}{% if estimate %} data-request-text="{{ value }} variation{{ 's' if value != 1 else '' }}: ~{{ estimate.variation_request_labels[value] }}"{% endif %}>{{ value }}</option>{% endfor %}</select></div>
     <div><label for="seed">Seed <span class="hint">optional</span></label><input id="seed" name="seed" inputmode="numeric" value="{{ form.get('seed', '') }}"></div>
     <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', 'mp3') == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
   </div>
@@ -29,10 +29,10 @@
   <div class="cost-estimate">
     <p class="hint"><strong>Approximate cost (informational only)</strong> — {{ estimate.rate_label }}: ~{{ estimate.per_variation_label }} per variation{% if estimate.used_seed %} ({{ estimate.seed_note }}){% endif %}.</p>
     {% if estimate.samples %}<p class="hint">Latest {{ estimate.sample_count }} completed {{ estimate.kind_label }}{% if estimate.average_label %}, average ~{{ estimate.average_label }}{% endif %}: {% for sample in estimate.samples %}~{{ sample.cost_label }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
-    <p class="hint">This request (<span id="estimate-request-text">{{ estimate.variation_count }} variations: ~{{ estimate.variation_request_labels[estimate.variation_count] }}</span>). Estimates never affect generation.</p>
+    <p class="hint">This request (<span id="estimate-request-text">{{ estimate.variation_count }} variation{{ 's' if estimate.variation_count != 1 else '' }}: ~{{ estimate.variation_request_labels[estimate.variation_count] }}</span>). Estimates never affect generation.</p>
   </div>
   {% endif %}
-  <button class="button" type="submit">{% if continuing %}Generate new version{% else %}Prepare cover source{% endif %}</button>
+  <button class="button" type="submit">{% if continuing %}Generate new version{% else %}Prepare and generate cover{% endif %}</button>
 </form>
 {% if estimate %}<script src="{{ urls.estimate_selector_js }}" defer></script>{% endif %}
 {% endblock %}

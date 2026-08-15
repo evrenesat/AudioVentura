@@ -1,5 +1,45 @@
 # Development Log
 
+## 2026-08-15 (usability recovery worktree, Checkpoint 3 execution)
+
+Recovery Checkpoint 3 (make normal generation one-submit) from the
+`aflow-audioventura-runpod-usability-recovery-aflow-plan-20260815-212058`
+worktree; no deployment, provider contact, paid request, or commit was
+performed, and all changes are left uncommitted for review.
+
+- Both request models, server-side missing-form defaults, and HTML selected
+  values now default to one variation; explicit 1-4 validation, submitted
+  values after a 422 re-render, and continuation/edit values from existing
+  jobs are preserved. The cover form selector, estimate labels, and request
+  totals now cover counts 1-4 with correct singular/plural wording.
+- New covers are one-submit: `_prepare_cover` requires the durably persisted
+  initial rights confirmation (non-null `rights_confirmation_at`, failing
+  closed otherwise), then in one database transaction persists the canonical
+  source metadata/checksum/size, finalizes the normalized source duration,
+  transitions `INGESTING -> STAGING`, and reuses `confirm_cover_job` so the
+  committed state is `cover_staging.status=confirmed` plus `confirmed_at`
+  before any Runpod submission. Only after that commit does it continue
+  through the existing serialized `_submit_variation` path (per-variation
+  nonce, durable attempt, at most one provider request ID). No column,
+  migration, new staging status, or parallel flow marker was added, and no
+  web request or legacy submission quote is constructed.
+- The authenticated `/cover/{job_id}/confirm` and `/cancel` routes remain
+  exactly as before (auth, CSRF, single-use transition) and are now reachable
+  only for legacy rows whose durable state is `JobStatus.STAGING` plus
+  `cover_staging.status=awaiting_confirmation`; new rows never commit that
+  state and never render the confirm/cancel UI. Startup recovery still
+  enqueues only `confirmed` staged rows, leaves legacy awaiting rows
+  untouched, fails uncommitted `INGESTING` rows closed without repeating home
+  extraction, and never resubmits a nonce-only uncertain submission.
+- Added fake-transport tests: default 1 / explicit 2-4 / validation-value
+  retention, one-submit success, the exact atomic confirmed-staging state
+  (status, both timestamps, canonical source metadata and finalized duration
+  observed by the fake Runpod at submit time), crash before and after the
+  confirmed-staging commit, extraction and persistence failure, restart and
+  nonce uncertainty, legacy awaiting-confirmation compatibility, missing
+  rights fail-closed, and absence of the second-confirmation UI on
+  new-flow detail pages. No test contacts Runpod or submits a paid request.
+
 ## 2026-08-15 (usability recovery worktree, Checkpoint 2 execution)
 
 Recovery Checkpoint 2 (simplify active boundaries and costs) from the

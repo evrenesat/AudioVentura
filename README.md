@@ -41,7 +41,7 @@ server-rendered project page per project. A compatible schema-v2 job can
 prefill the existing original or cover form; submitting the reviewed form
 always creates a new job version in that project and never retries or mutates
 the source job. Cover continuations require fresh rights confirmation and the
-ordinary home-ingest/duration-confirmation flow.
+ordinary one-submit home-ingest flow.
 
 Cost display is a read-only informational calculation at the fixed
 `USD 0.50/GPU-hour` rate: the original and cover forms show the latest three
@@ -51,7 +51,7 @@ variation count), or a clearly labeled 60-second seed (`USD 0.0083` per
 variation) when no matching completed history exists. Each label applies one
 half-up rounding at the final four-decimal USD display boundary from the raw
 value, and the visible request total follows the selected variation count
-(original 1–4, cover 2–4). Estimates are computed
+(both forms default to one and allow 1–4). Estimates are computed
 on read, are never persisted, and never approve, delay, reject, or cancel
 generation. Historical `submission_quotes`, rate catalogs, calibrations, and
 billing observations remain readable data but are no longer captured or
@@ -88,10 +88,14 @@ New jobs use a strict version-2 worker payload. Original requests choose
 duration (`auto`, sent as `-1.0`) or an explicit 10-600 second custom value.
 The final caption and lyrics are bounded at 511 and 4095 characters. Cover
 requests expose ACE-Step's independent `audio_cover_strength` and
-`cover_noise_strength` controls, retain the probed source duration, and stage
-for browser confirmation before any Runpod submission. The staged cover page
-can confirm or cancel preparation, and asynchronous status polling reloads it
-once when confirmation becomes available. Two to four cover variations run
+`cover_noise_strength` controls and retain the probed source duration. The
+initial rights checkbox is the only authorization: after the home server
+prepares the source, the controller atomically persists the finalized source,
+checksum, size, and duration with `cover_staging.status=confirmed` and
+continues through the serialized Runpod path in the same pass — no second
+confirmation click. Legacy rows that durably committed
+`cover_staging.status=awaiting_confirmation` keep the authenticated one-time
+confirm/cancel route. One to four cover variations run
 sequentially; a supplied seed advances deterministically. Duration prose is
 accepted only when bounded numeric seconds/minutes match an explicit custom
 duration; it never changes the structured value.

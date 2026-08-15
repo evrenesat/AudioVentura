@@ -319,7 +319,7 @@ class CoverRequest(BaseModel):
     lyrics: str | None = Field(default=None, max_length=20_000)
     audio_cover_strength: float | None = None
     cover_noise_strength: float | None = None
-    variation_count: StrictInt = Field(default=2, ge=2, le=4)
+    variation_count: StrictInt = Field(default=1, ge=1, le=4)
     seed: StrictInt | None = Field(default=None, ge=0, le=MAX_SEED)
     profile_id: str = FAST_PROFILE_ID
     output_format: OutputFormat = OutputFormat.MP3

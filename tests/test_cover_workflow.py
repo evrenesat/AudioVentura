@@ -286,30 +286,8 @@ def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(setti
                 "max_source_bytes": settings.transfer_max_source_bytes,
             }
         ]
-        assert len(runpod.payloads) == 0
-        with factory() as session:
-            staged = get_job(session, job_id)
-            assert staged is not None and staged.status is JobStatus.STAGING
-            assert staged.source_duration == 42.0
-            assert staged.normalized_request_json["source_duration_seconds"] == 42.0
-            assert staged.normalized_request_json["resolved_target_duration_seconds"] == 42.0
-            confirm_cover_job(session, job_id)
-            session.commit()
-
-        async def generate() -> None:
-            worker = ControllerWorker(
-                settings,
-                factory,
-                runpod,
-                home_ingest_client=home,
-                poll_interval_seconds=0,
-            )
-            await worker.start()
-            worker.enqueue(job_id)
-            await worker.wait_idle()
-            await worker.stop()
-
-        _run(generate())
+        # One submit per variation; preparation and confirmation are part of
+        # the same worker pass, so the cover never waits for a second click.
         assert len(runpod.payloads) == 2
         payload = runpod.payloads[0]
         assert payload["task_type"] == "cover"
@@ -327,11 +305,20 @@ def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(setti
             assert job.normalized_request_json["generation"]["audio_cover_strength"] == 0.55
             assert job.normalized_request_json["generation"]["cover_noise_strength"] == 0.25
             assert job.normalized_request_json["generation"]["duration"] == 42.0
-            assert job.normalized_request_json["cover_staging"]["status"] == "confirmed"
+            # The new flow commits exactly the confirmed staging state:
+            # never `awaiting_confirmation`, always `confirmed` with both
+            # timestamps and the canonical source metadata in one transaction.
+            staging = job.normalized_request_json["cover_staging"]
+            assert staging["status"] == "confirmed"
+            assert isinstance(staging.get("confirmed_at"), str)
+            assert isinstance(staging.get("staged_at"), str)
             assert job.sanitized_source_title == "Safe title"
             assert job.source_url == "https://www.youtube.com/watch?v=abc123"
             assert job.source_byte_size == len(b"prepared source")
             assert job.source_sha256 == hashlib.sha256(b"prepared source").hexdigest()
+            assert job.source_duration == 42.0
+            assert job.normalized_request_json["source_duration_seconds"] == 42.0
+            assert job.normalized_request_json["resolved_target_duration_seconds"] == 42.0
             assert [transfer.status for transfer in job.transfers].count(
                 TransferStatus.CONSUMED
             ) == 2
@@ -342,6 +329,320 @@ def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(setti
         output = settings.paths.outputs / job_id / "variation-01.mp3"
         assert output.read_bytes() == b"generated cover"
         assert (settings.paths.outputs / job_id / "variation-02.mp3").is_file()
+    finally:
+        engine.dispose()
+
+
+def test_cover_submit_never_precedes_confirmed_staging_commit(settings) -> None:
+    """Prove the Runpod boundary is crossed only after `confirmed` is durable."""
+
+    engine, factory = _database(settings)
+    try:
+        job_id = _create_cover(settings, factory)
+        home = _FakeHome(settings)
+        from ace_service.transfers import create_transfer_app
+
+        transfer_app = create_transfer_app(settings, session_factory=factory)
+
+        class _StagingAwareRunpod(_CoverRunpod):
+            async def submit(
+                self, payload: Mapping[str, object], execution_timeout_ms: int, ttl_ms: int
+            ) -> str:
+                # A fresh session observes the exact durable state at the
+                # moment the fake Runpod would accept the request.
+                with factory() as session:
+                    job = get_job(session, str(payload["job_id"]))
+                    assert job is not None
+                    staging = dict((job.normalized_request_json or {}).get("cover_staging") or {})
+                    assert staging.get("status") == "confirmed", (
+                        "Runpod submit must never precede the confirmed-staging commit"
+                    )
+                    assert staging.get("confirmed_at"), "confirmed_at must be durable"
+                    assert staging.get("status") != "awaiting_confirmation"
+                    assert job.source_sha256 is not None
+                    assert job.source_byte_size is not None
+                    assert job.source_duration == 42.0
+                    assert job.status is not JobStatus.STAGING
+                return await super().submit(payload, execution_timeout_ms, ttl_ms)
+
+        runpod = _StagingAwareRunpod(settings, factory, transfer_app)
+
+        async def scenario() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                runpod,
+                home_ingest_client=home,
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        assert len(runpod.payloads) == 1
+        assert len(runpod.submissions) == 1
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.status is JobStatus.COMPLETED
+            assert job.normalized_request_json["cover_staging"]["status"] == "confirmed"
+    finally:
+        engine.dispose()
+
+
+def test_cover_crash_before_confirmed_staging_commit_fails_closed(settings) -> None:
+    """A crash before the metadata/staging/confirmation transaction commits
+    must never submit and must fail closed without repeating home extraction."""
+
+    engine, factory = _database(settings)
+    try:
+        job_id = _create_cover(settings, factory)
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            session.commit()
+        # The prepared file exists (finalize_cover_source ran) but the
+        # transaction with canonical metadata never committed.
+        source = settings.paths.incoming / job_id / "source.mp3"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"prepared source")
+
+        class NoRunpod:
+            async def submit(self, payload, execution_timeout_ms, ttl_ms):
+                raise AssertionError("crash-before-commit cover must not reach Runpod")
+
+            async def status(self, runpod_job_id):
+                raise AssertionError("crash-before-commit cover must not poll Runpod")
+
+        async def scenario() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                NoRunpod(),
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.status is JobStatus.FAILED
+            assert job.error_code == "ingest_interrupted"
+            # No source metadata was inferred from the file after rollback.
+            assert job.source_sha256 is None
+            assert job.source_byte_size is None
+            assert job.source_url == "https://www.youtube.com/watch?v=abc123"
+        # Terminal cleanup removed the prepared source.
+        assert not (settings.paths.incoming / job_id).exists()
+    finally:
+        engine.dispose()
+
+
+def test_cover_confirmed_staging_resumes_submission_after_restart(settings) -> None:
+    """After the confirmed-staging commit but before submit, startup resumes
+    the staged cover through the ordinary serialized path."""
+
+    engine, factory = _database(settings)
+    try:
+        job_id = _create_cover(settings, factory)
+        source = b"prepared source"
+        source_path = settings.paths.incoming / job_id / "source.mp3"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(source)
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
+            transition_job(session, job.id, JobStatus.STAGING)
+            confirm_cover_job(session, job.id)
+            job.source_byte_size = len(source)
+            job.source_sha256 = hashlib.sha256(source).hexdigest()
+            session.commit()
+
+        from ace_service.transfers import create_transfer_app
+
+        transfer_app = create_transfer_app(settings, session_factory=factory)
+        runpod = _CoverRunpod(settings, factory, transfer_app)
+
+        async def scenario() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                runpod,
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.status is JobStatus.COMPLETED
+            assert job.normalized_request_json["cover_staging"]["status"] == "confirmed"
+        assert runpod.submissions == ["cover-runpod-1"]
+        assert len(runpod.payloads) == 1
+    finally:
+        engine.dispose()
+
+
+def test_legacy_awaiting_confirmation_cover_is_left_untouched_on_startup(settings) -> None:
+    """Legacy durable `awaiting_confirmation` rows must never auto-confirm
+    and must never be submitted by startup."""
+
+    engine, factory = _database(settings)
+    try:
+        job_id = _create_cover(settings, factory)
+        source = b"prepared source"
+        source_path = settings.paths.incoming / job_id / "source.mp3"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(source)
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
+            transition_job(session, job.id, JobStatus.STAGING)
+            job.source_byte_size = len(source)
+            job.source_sha256 = hashlib.sha256(source).hexdigest()
+            session.commit()
+
+        class NoRunpod:
+            async def submit(self, payload, execution_timeout_ms, ttl_ms):
+                raise AssertionError("awaiting cover must not auto-submit")
+
+            async def status(self, runpod_job_id):
+                raise AssertionError("awaiting cover must not poll")
+
+        async def scenario() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                NoRunpod(),
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.status is JobStatus.STAGING
+            assert job.normalized_request_json["cover_staging"]["status"] == (
+                "awaiting_confirmation"
+            )
+        # The legacy row and its prepared source stay in place for the
+        # authenticated one-time confirmation/cancel route.
+        assert source_path.exists()
+    finally:
+        engine.dispose()
+
+
+def test_cover_missing_rights_confirmation_fails_closed_before_submit(settings) -> None:
+    """The persisted initial rights confirmation is mandatory; without it the
+    cover fails closed before any Runpod submission."""
+
+    engine, factory = _database(settings)
+    try:
+        request = CoverRequest(
+            youtube_url="https://www.youtube.com/watch?v=abc123",
+            target_style="dreamy synthwave",
+            rights_confirmation=True,
+        )
+        with factory() as session:
+            job = create_cover_job(session, request, job_id="job-no-rights")
+            job.rights_confirmation_at = None
+            session.commit()
+            job_id = job.id
+        home = _FakeHome(settings)
+
+        class NoRunpod:
+            async def submit(self, payload, execution_timeout_ms, ttl_ms):
+                raise AssertionError("rights-missing cover must not reach Runpod")
+
+            async def status(self, runpod_job_id):
+                raise AssertionError("rights-missing cover must not poll Runpod")
+
+        async def scenario() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                NoRunpod(),
+                home_ingest_client=home,
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.status is JobStatus.FAILED
+            assert job.error_code == "rights_confirmation_missing"
+            staging = (job.normalized_request_json or {}).get("cover_staging") or {}
+            assert staging.get("status") != "confirmed"
+    finally:
+        engine.dispose()
+
+
+def test_cover_uncertain_submission_is_never_resubmitted(settings) -> None:
+    """After the nonce commit, an uncertain submission is failed closed and
+    the same nonce is never submitted twice."""
+
+    engine, factory = _database(settings)
+    try:
+        job_id = _create_cover(settings, factory)
+        source = b"prepared source"
+        source_path = settings.paths.incoming / job_id / "source.mp3"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(source)
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None
+            transition_job(session, job.id, JobStatus.INGESTING)
+            finalize_cover_job_duration(session, job.id, 42.0)
+            transition_job(session, job.id, JobStatus.STAGING)
+            confirm_cover_job(session, job.id)
+            job.source_byte_size = len(source)
+            job.source_sha256 = hashlib.sha256(source).hexdigest()
+            _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+            assert nonce
+            assert attempt.submission_nonce == nonce
+            session.commit()
+
+        class NoRunpod:
+            async def submit(self, payload, execution_timeout_ms, ttl_ms):
+                raise AssertionError("uncertain cover must not be resubmitted")
+
+            async def status(self, runpod_job_id):
+                raise AssertionError("uncertain cover must not poll")
+
+        async def scenario() -> None:
+            worker = ControllerWorker(
+                settings,
+                factory,
+                NoRunpod(),
+                poll_interval_seconds=0,
+            )
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            job = get_job(session, job_id)
+            assert job is not None and job.status is JobStatus.FAILED
+            assert job.error_code == "uncertain_cloud_submission"
+            attempt = get_variation_attempt(session, job_id, 1)
+            assert attempt is not None and attempt.status is JobStatus.FAILED
+            assert attempt.submission_nonce is not None
+            assert attempt.runpod_job_id is None
     finally:
         engine.dispose()
 
