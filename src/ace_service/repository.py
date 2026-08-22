@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -180,7 +181,48 @@ def resolve_continuation_source(
         or normalized.get("task_type") != job.job_type.value
     ):
         raise ValueError("continuation source is not schema-v2 compatible")
+    if job.job_type is JobType.COVER:
+        resolve_cover_continuation_output(job)
     return job
+
+
+def resolve_cover_continuation_output(job: Job) -> tuple[Output, float]:
+    """Return the first reusable completed MP3 output and its measured duration."""
+
+    if job.job_type is not JobType.COVER or job.status is not JobStatus.COMPLETED:
+        raise ValueError("cover continuation requires a completed source job")
+    outputs = sorted(
+        (
+            output
+            for output in job.outputs
+            if output.result_index == 0
+            and output.mime_type == "audio/mpeg"
+            and output.relative_path.endswith(".mp3")
+        ),
+        key=lambda output: (output.variation_index, output.id),
+    )
+    if not outputs:
+        raise ValueError("cover continuation requires a completed MP3 output")
+    output = outputs[0]
+    attempt = next(
+        (
+            item
+            for item in job.variation_attempts
+            if item.variation_index == output.variation_index and item.status is JobStatus.COMPLETED
+        ),
+        None,
+    )
+    result = attempt.runpod_result_json if attempt is not None else None
+    result_output = result.get("output") if isinstance(result, dict) else None
+    duration = result_output.get("duration_seconds") if isinstance(result_output, dict) else None
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(float(duration))
+        or float(duration) <= 0
+    ):
+        raise ValueError("cover continuation output has no measured duration")
+    return output, float(duration)
 
 
 def _resolve_job_project(
@@ -344,18 +386,20 @@ def finalize_cover_job_duration(
         raise ValueError("only cover jobs have a source duration")
     if job.normalized_request_json is None:
         raise ValueError("cover job is missing its normalized request")
-    job.normalized_request_json = finalize_cover_normalized_request(
+    finalized = finalize_cover_normalized_request(
         job.normalized_request_json, source_duration_seconds
     )
+    job.normalized_request_json = finalized
     duration = float(source_duration_seconds)
+    target_duration = float(finalized["resolved_target_duration_seconds"])
     job.source_duration = duration
     result = dict(job.runpod_result_json or {})
     result.update(
         {
             "schema_version": 2,
             "source_duration_seconds": duration,
-            "resolved_target_duration_seconds": duration,
-            "ace_duration_seconds": duration,
+            "resolved_target_duration_seconds": target_duration,
+            "ace_duration_seconds": target_duration,
         }
     )
     job.runpod_result_json = result

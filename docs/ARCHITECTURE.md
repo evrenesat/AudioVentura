@@ -35,8 +35,9 @@ Cover preparation is one-submit: home ingest probes and persists the
 source duration, the controller enters `staging` and immediately consumes the
 already-persisted initial rights confirmation in the same transaction, so the
 durable row is `cover_staging.status=confirmed` before any Runpod capability
-is issued. The source duration becomes the exact ACE-Step duration. Covers
-retain independent `audio_cover_strength` and `cover_noise_strength` values,
+is issued. Source mode uses the measured source duration as the ACE-Step
+target; custom mode preserves a separate explicit 10-600 second target.
+Covers retain independent `audio_cover_strength` and `cover_noise_strength` values,
 run one to four variations sequentially (both forms default to one), and
 persist the returned effective seed and bounded worker result metadata,
 including output duration/tolerance and build identity, in existing JSON
@@ -191,8 +192,11 @@ uses the existing Basic-auth and CSRF boundary. `GET /jobs/{id}/continue`
 reconstructs editable defaults only from a complete schema-v2 request and the
 stored source/job fields. The existing create POST validates the edited values
 again and derives same-project membership from the continuation source; it
-always creates a new job. Covers still require fresh rights confirmation,
-home ingestion, and the ordinary one-submit queue path.
+always creates a new job. Cover continuation requires a completed schema-v2
+MP3 output with measured duration evidence. The controller verifies its
+recorded path, size, checksum, type, and physical containment; copies it
+atomically into the new job's incoming source; commits confirmed staging; and
+enters the ordinary serialized cloud queue without home ingest or YouTube.
 
 The ledger adds five record families, all through the existing SQLAlchemy
 session/repository boundary: immutable one-to-one `submission_quotes`
@@ -300,9 +304,9 @@ preparation or generation.
 ## Checkpoint 7 cover workflow
 
 `CoverRequest` validates one approved single-video YouTube URL, required rights
-confirmation, bounded style/guidance text, optional replacement lyrics, and
-the independent ACE cover controls before `create_cover_job` persists the
-metadata-only request.
+confirmation, bounded style/guidance text, optional replacement lyrics,
+source/custom duration, and the independent ACE cover controls before
+`create_cover_job` persists the metadata-only request.
 The serialized controller worker changes a queued cover to `ingesting`, calls
 the bearer-authenticated home-ingest endpoint over the configured private
 network, and waits for the metadata response after SFTP has uploaded
@@ -320,11 +324,18 @@ the transaction. Only after that commit does the worker issue one
 source-download capability and one output-upload capability and submit the
 cover payload to Runpod. The payload contains the composed style caption,
 optional exact lyrics, independent cover controls, source checksum/size,
-exact source duration, and signed URLs; it contains no audio bytes or YouTube
+measured source duration, resolved target duration, and signed URLs; it
+contains no audio bytes or YouTube
 credentials. Legacy rows that durably committed
 `cover_staging.status=awaiting_confirmation` keep the authenticated one-time
 confirm/cancel staging page, which never enqueues without confirmation; the
 prepared source is removed after cancellation commits.
+
+For a continuation, the selected completed MP3 output replaces the home-ingest
+step. Its measured output duration becomes the new source duration while the
+new request may independently select a custom target. Failed jobs, incomplete
+jobs, non-MP3 outputs, missing files, and mismatched size/checksum evidence are
+not reusable and cannot cross the Runpod boundary.
 
 After a valid output is accepted, or after a terminal cover failure, issued
 capabilities are revoked. Non-retained source files are removed from Hetzner

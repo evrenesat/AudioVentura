@@ -34,7 +34,12 @@ from ace_service.costs import (
     select_highest_exact_rate_gpu,
     utc_now,
 )
-from ace_service.cover import remove_cover_source
+from ace_service.cover import (
+    CoverSourceError,
+    discard_staged_cover_source,
+    remove_cover_source,
+    stage_cover_continuation_source,
+)
 from ace_service.models import (
     PROJECT_TITLE_MAX_LENGTH,
     Job,
@@ -52,6 +57,7 @@ from ace_service.repository import (
     create_cover_job,
     create_original_job,
     create_submission_quote,
+    finalize_cover_job_duration,
     get_job,
     get_latest_gpu_rates,
     get_matching_runtime_calibration,
@@ -62,6 +68,8 @@ from ace_service.repository import (
     recent_completed_attempt_execution_ms,
     rename_project,
     resolve_continuation_source,
+    resolve_cover_continuation_output,
+    transition_job,
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
 
@@ -401,8 +409,11 @@ def register_web_routes(app: FastAPI) -> None:
                 session, fields, expected_job_type=JobType.COVER
             )
             project_id = continuation_source.project_id if continuation_source is not None else None
+            request_values = _cover_form_values(fields)
+            if continuation_source is not None:
+                request_values["youtube_url"] = continuation_source.source_url
             try:
-                cover_request = CoverRequest(**_cover_form_values(fields))
+                cover_request = CoverRequest(**request_values)
             except ValidationError as exc:
                 errors = _validation_errors(exc)
                 return render(
@@ -423,8 +434,56 @@ def register_web_routes(app: FastAPI) -> None:
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
             job = create_cover_job(session, cover_request, project=project_id)
-            session.commit()
             job_id = job.id
+            if continuation_source is not None:
+                try:
+                    source_output, source_duration = resolve_cover_continuation_output(
+                        continuation_source
+                    )
+                    prepared = stage_cover_continuation_source(
+                        app.state.settings,
+                        continuation_source,
+                        source_output,
+                        source_duration_seconds=source_duration,
+                        target_job_id=job.id,
+                    )
+                    transition_job(session, job.id, JobStatus.INGESTING)
+                    job.source_url = prepared.canonical_url
+                    job.sanitized_source_title = prepared.title
+                    job.source_sha256 = prepared.prepared_sha256
+                    job.source_byte_size = prepared.prepared_bytes
+                    finalize_cover_job_duration(session, job.id, prepared.duration_seconds)
+                    transition_job(session, job.id, JobStatus.STAGING)
+                    confirm_cover_job(session, job.id)
+                    normalized = dict(job.normalized_request_json or {})
+                    normalized["continuation_source"] = {
+                        "job_id": continuation_source.id,
+                        "output_id": source_output.id,
+                    }
+                    job.normalized_request_json = normalized
+                    session.commit()
+                except CoverSourceError as exc:
+                    session.rollback()
+                    discard_staged_cover_source(app.state.settings, job_id)
+                    return render(
+                        request,
+                        "cover_form.html",
+                        {
+                            "form": form,
+                            "errors": [exc.message],
+                            "readiness": await _readiness(app, only={"home_ingest"}),
+                            "continuing": True,
+                            "project_title": continuation_source.project.title,
+                            "estimate": _form_estimate(session, JobType.COVER, fields),
+                        },
+                        response_status=status.HTTP_409_CONFLICT,
+                    )
+                except Exception:
+                    session.rollback()
+                    discard_staged_cover_source(app.state.settings, job_id)
+                    raise
+            else:
+                session.commit()
         _enqueue(app, job_id)
         return RedirectResponse(
             _route_path(request, "job_detail", job_id=job_id),
@@ -737,6 +796,8 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
         "profile_id": fields.get("profile_id", "fast-beta-v1"),
         "audio_cover_strength": _optional_number(fields.get("audio_cover_strength"), default=0.65),
         "cover_noise_strength": _optional_number(fields.get("cover_noise_strength"), default=0.0),
+        "duration_mode": fields.get("duration_mode", "source"),
+        "duration_seconds": _optional_number(fields.get("duration_seconds")),
         "variation_count": _required_int(fields.get("variation_count", "1")),
         "seed": _optional_int(fields.get("seed")),
         "output_format": fields.get("output_format", OutputFormat.MP3.value),
@@ -850,6 +911,8 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         "lyrics",
         "audio_cover_strength",
         "cover_noise_strength",
+        "duration_mode",
+        "duration_seconds",
         "seed",
         "output_format",
     }
@@ -859,6 +922,7 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         or not job.source_url.strip()
     ):
         raise ValueError("normalized cover generation is incomplete")
+    resolve_cover_continuation_output(job)
     request_values = {
         "youtube_url": job.source_url,
         "target_style": generation["target_style"],
@@ -866,6 +930,10 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         "lyrics": generation["lyrics"],
         "audio_cover_strength": generation["audio_cover_strength"],
         "cover_noise_strength": generation["cover_noise_strength"],
+        "duration_mode": generation["duration_mode"],
+        "duration_seconds": (
+            generation["duration_seconds"] if generation["duration_mode"] == "custom" else None
+        ),
         "seed": generation["seed"],
         "output_format": generation["output_format"],
         "profile_id": profile_id,
@@ -881,6 +949,10 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         "lyrics": generation["lyrics"],
         "audio_cover_strength": generation["audio_cover_strength"],
         "cover_noise_strength": generation["cover_noise_strength"],
+        "duration_mode": generation["duration_mode"],
+        "duration_seconds": (
+            generation["duration_seconds"] if generation["duration_mode"] == "custom" else None
+        ),
         "seed": generation["seed"],
         "output_format": generation["output_format"],
         "rights_confirmation": "",

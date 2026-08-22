@@ -207,6 +207,38 @@ def test_v2_cover_requires_confirmed_source_duration_metadata() -> None:
         WorkerRequest.from_mapping(payload, allowed_transfer_host="transfer.example.test")
 
 
+def test_v2_cover_accepts_custom_target_distinct_from_source_duration() -> None:
+    payload = _v2_payload("cover")
+    resolved = payload["resolved_parameters"]
+    generation = payload["generation"]
+    assert isinstance(resolved, dict)
+    assert isinstance(generation, dict)
+    resolved.update(
+        {
+            "duration_mode": "custom",
+            "duration": 60.0,
+            "target_duration_seconds": 60.0,
+        }
+    )
+    generation.update(
+        {
+            "duration_mode": "custom",
+            "duration": 60.0,
+            "duration_seconds": 60.0,
+        }
+    )
+    payload["resolved_target_duration_seconds"] = 60.0
+    payload["ace_duration_seconds"] = 60.0
+
+    request = WorkerRequest.from_mapping(payload, allowed_transfer_host="transfer.example.test")
+
+    assert request.resolved_parameters is not None
+    assert request.resolved_parameters["source_duration_seconds"] == 42.0
+    assert request.resolved_parameters["target_duration_seconds"] == 60.0
+    assert request.generation.duration_mode == "custom"
+    assert request.generation.duration == 60.0
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

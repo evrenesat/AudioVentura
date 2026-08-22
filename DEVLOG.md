@@ -1,5 +1,21 @@
 # Development Log
 
+## 2026-08-22 (cover continuation and duration recovery)
+
+- Diagnosed production job `543b832e-342e-45b3-a8a6-861d45b28c1c`: the cover
+  continuation copied only the historical YouTube URL and request parameters,
+  so it created a fresh ingest and failed before any Runpod attempt.
+- Cover continuation now requires a completed schema-v2 MP3 output with
+  measured duration evidence, verifies its path/size/checksum, stages it
+  locally for the new job, and commits confirmed staging without contacting
+  home ingest or YouTube. Failed/no-output jobs no longer expose continuation.
+- Cover requests now expose source/custom duration in the UI and preserve the
+  measured source duration separately from the 10-600 second generation
+  target through the worker payload and status view.
+- Added an explicit two-submission paid UI smoke that exercises one initial
+  YouTube cover and one local-output continuation while keeping credentials in
+  the protected target environment.
+
 ## 2026-08-15 (usability recovery worktree, Checkpoint 3 execution)
 
 Recovery Checkpoint 3 (make normal generation one-submit) from the

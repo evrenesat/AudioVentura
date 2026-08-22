@@ -370,6 +370,22 @@ lyrics, or private keys into an issue or log message.
 
 ## Smoke and acceptance procedure
 
+The repeatable paid browser smoke is deliberately excluded from normal pytest
+discovery. Run it only on the target with `/etc/audioventura/controller.env`
+loaded into the process and an explicit two-submission authorization:
+
+```text
+python tests/live_paid_ui_e2e.py \
+  --allow-paid --max-paid-submissions 2 \
+  --youtube-url 'https://www.youtube.com/watch?v=VIDEO_ID' \
+  --prompt 'approved prompt'
+```
+
+It stops on the first failure, reports only non-secret job/project identities,
+and covers authenticated pages, both duration controls, initial cover ingest,
+completed-output continuation without a YouTube field, status polling,
+projects, playback, and bounded downloads.
+
 Run these checks against the deployed services, recording UTC timestamps and
 the non-secret endpoint/image identifiers:
 

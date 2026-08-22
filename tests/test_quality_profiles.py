@@ -11,7 +11,7 @@ from ace_service.quality_profiles import (
     resolve_profile,
     resolve_prompt_mode,
 )
-from ace_service.schemas import CoverRequest
+from ace_service.schemas import CoverRequest, finalize_cover_normalized_request
 
 
 def test_profile_catalog_and_resolved_values_are_immutable() -> None:
@@ -60,3 +60,45 @@ def test_quality_profile_defaults_are_used_when_cover_controls_are_omitted() -> 
     normalized = request.to_normalized_request_json()
     assert normalized["resolved_parameters"]["audio_cover_strength"] == 0.65
     assert normalized["resolved_parameters"]["cover_noise_strength"] == 0.20
+
+
+def test_cover_custom_duration_remains_distinct_from_measured_source_duration() -> None:
+    request = CoverRequest(
+        youtube_url="https://www.youtube.com/watch?v=abc123",
+        target_style="energetic acoustic pop-rock",
+        duration_mode="custom",
+        duration_seconds=60,
+        rights_confirmation=True,
+    )
+
+    pending = request.to_normalized_request_json()
+    assert pending["generation"]["duration_mode"] == "custom"
+    assert pending["generation"]["duration_seconds"] == 60.0
+    assert "source_duration_seconds" not in pending["resolved_parameters"]
+
+    finalized = finalize_cover_normalized_request(pending, 28.0)
+    assert finalized["source_duration_seconds"] == 28.0
+    assert finalized["resolved_target_duration_seconds"] == 60.0
+    assert finalized["resolved_parameters"]["source_duration_seconds"] == 28.0
+    assert finalized["resolved_parameters"]["target_duration_seconds"] == 60.0
+    assert finalized["generation"]["duration_seconds"] == 60.0
+
+
+def test_cover_duration_language_must_match_custom_duration() -> None:
+    request = CoverRequest(
+        youtube_url="https://www.youtube.com/watch?v=abc123",
+        target_style="energetic 60-second acoustic pop-rock",
+        duration_mode="custom",
+        duration_seconds=60,
+        rights_confirmation=True,
+    )
+    assert request.duration_seconds == 60
+
+    with pytest.raises(ValueError, match="must match"):
+        CoverRequest(
+            youtube_url="https://www.youtube.com/watch?v=abc123",
+            target_style="energetic 45-second acoustic pop-rock",
+            duration_mode="custom",
+            duration_seconds=60,
+            rights_confirmation=True,
+        )

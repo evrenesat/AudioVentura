@@ -31,6 +31,7 @@ from ace_service.repository import (
     get_job,
     get_submission_quote,
     transition_job,
+    transition_variation_attempt,
     upsert_gpu_rate,
     upsert_runtime_calibration,
 )
@@ -553,7 +554,7 @@ def test_migrated_legacy_job_is_reachable_and_readable_through_projects(
         engine.dispose()
 
 
-def test_continue_cover_reconfirms_rights_and_uses_existing_staging_flow(web_app) -> None:
+def test_continue_cover_reuses_completed_output_without_youtube_ingest(web_app) -> None:
     app, factory, worker = web_app
     source_request = CoverRequest(
         youtube_url="https://www.youtube.com/watch?v=abc123",
@@ -562,30 +563,61 @@ def test_continue_cover_reconfirms_rights_and_uses_existing_staging_flow(web_app
         lyrics="replacement words",
         audio_cover_strength=0.41,
         cover_noise_strength=0.22,
-        variation_count=3,
+        duration_mode="custom",
+        duration_seconds=60,
+        variation_count=1,
         seed=55,
-        output_format="flac",
+        output_format="mp3",
         rights_confirmation=True,
     )
+    source_bytes = b"completed reusable mp3 output"
     with factory() as session:
         source = create_cover_job(session, source_request, job_id="cover-prefill-source")
+        transition_job(session, source.id, JobStatus.INGESTING)
+        finalize_cover_job_duration(session, source.id, 28.0)
+        transition_job(session, source.id, JobStatus.STAGING)
+        confirm_cover_job(session, source.id)
+        transition_job(session, source.id, JobStatus.CLOUD_QUEUED)
+        transition_job(session, source.id, JobStatus.GENERATING)
+        attempt = create_variation_attempt(session, job_id=source.id, variation_index=1)
+        transition_variation_attempt(session, attempt.id, JobStatus.CLOUD_QUEUED)
+        transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
+        transition_variation_attempt(session, attempt.id, JobStatus.COMPLETED)
+        attempt.runpod_result_json = {"output": {"duration_seconds": 60.0}}
+        relative_path = f"{source.id}/variation-01.mp3"
+        output_path = app.state.settings.paths.outputs / relative_path
+        output_path.parent.mkdir(parents=True)
+        output_path.write_bytes(source_bytes)
+        source_output = create_output(
+            session,
+            job_id=source.id,
+            variation_index=1,
+            result_index=0,
+            relative_path=relative_path,
+            mime_type="audio/mpeg",
+            byte_size=len(source_bytes),
+            sha256=hashlib.sha256(source_bytes).hexdigest(),
+        )
+        transition_job(session, source.id, JobStatus.COMPLETED)
         session.commit()
         source_id = source.id
+        source_output_id = source_output.id
         project_id = source.project_id
 
     with TestClient(app) as client:
         form = client.get(f"/jobs/{source_id}/continue", auth=_auth(client))
         assert form.status_code == 200
-        assert 'value="https://www.youtube.com/watch?v=abc123"' in _input_tag(
-            form.text, "youtube_url"
-        )
+        assert 'name="youtube_url"' not in form.text
+        assert "YouTube is not contacted again" in form.text
         assert _textarea_value(form.text, "target_style") == "dreamy synthwave"
         assert _textarea_value(form.text, "remix_guidance") == "wider drums"
         assert _textarea_value(form.text, "lyrics") == "replacement words"
         assert 'value="0.41"' in _input_tag(form.text, "audio_cover_strength")
         assert 'value="0.22"' in _input_tag(form.text, "cover_noise_strength")
-        assert _selected_value(form.text, "variation_count") == "3"
-        assert _selected_value(form.text, "output_format") == "flac"
+        assert _selected_value(form.text, "duration_mode") == "custom"
+        assert 'value="60.0"' in _input_tag(form.text, "duration_seconds")
+        assert _selected_value(form.text, "variation_count") == "1"
+        assert _selected_value(form.text, "output_format") == "mp3"
         assert "checked" not in _input_tag(form.text, "rights_confirmation")
         assert worker.enqueued == []
         token = client.cookies.get("ace_csrf")
@@ -593,15 +625,16 @@ def test_continue_cover_reconfirms_rights_and_uses_existing_staging_flow(web_app
         edited = {
             "csrf_token": token,
             "continue_from_job_id": source_id,
-            "youtube_url": "https://www.youtube.com/watch?v=xyz789",
             "target_style": "acoustic chamber pop",
             "remix_guidance": "soft percussion",
             "lyrics": "edited lyrics",
             "audio_cover_strength": "0.5",
             "cover_noise_strength": "0.1",
-            "variation_count": "4",
+            "duration_mode": "custom",
+            "duration_seconds": "55",
+            "variation_count": "1",
             "seed": "88",
-            "output_format": "wav",
+            "output_format": "mp3",
         }
         missing_rights = client.post("/cover", auth=_auth(client), data=edited)
         assert missing_rights.status_code == 422
@@ -621,30 +654,27 @@ def test_continue_cover_reconfirms_rights_and_uses_existing_staging_flow(web_app
             source = get_job(session, source_id)
             assert created is not None and source is not None
             assert created.project_id == project_id
-            assert created.source_url == "https://www.youtube.com/watch?v=xyz789"
+            assert created.status is JobStatus.STAGING
+            assert created.source_url == "https://www.youtube.com/watch?v=abc123"
+            assert created.source_duration == 60.0
+            assert created.source_byte_size == len(source_bytes)
+            assert created.source_sha256 == hashlib.sha256(source_bytes).hexdigest()
             assert created.normalized_request_json["generation"]["target_style"] == (
                 "acoustic chamber pop"
             )
-            assert source.normalized_request_json == source_request.to_normalized_request_json()
+            assert created.normalized_request_json["generation"]["duration_mode"] == "custom"
+            assert created.normalized_request_json["resolved_target_duration_seconds"] == 55.0
+            assert created.normalized_request_json["continuation_source"] == {
+                "job_id": source_id,
+                "output_id": source_output_id,
+            }
+            assert created.normalized_request_json["cover_staging"]["status"] == "confirmed"
+            assert source.status is JobStatus.COMPLETED
+            assert "continuation_source" not in source.normalized_request_json
             assert get_submission_quote(session, new_id) is None
-            transition_job(session, new_id, JobStatus.INGESTING)
-            finalize_cover_job_duration(session, new_id, 43.0)
-            transition_job(session, new_id, JobStatus.STAGING)
-            session.commit()
-
-        worker.enqueued.clear()
-        confirmed = client.post(
-            f"/cover/{new_id}/confirm",
-            auth=_auth(client),
-            data={"csrf_token": token},
-            follow_redirects=False,
+        assert (app.state.settings.paths.incoming / new_id / "source.mp3").read_bytes() == (
+            source_bytes
         )
-        assert confirmed.status_code == 303
-        assert worker.enqueued == [new_id]
-        with factory() as session:
-            # Quote capture is disconnected from the acceptance transaction in
-            # the usability recovery; cover confirmation creates no quote.
-            assert get_submission_quote(session, new_id) is None
 
 
 def test_continue_rejects_missing_malformed_and_cross_type_sources(web_app) -> None:
@@ -933,6 +963,33 @@ def test_continuation_forms_show_matching_request_estimate(web_app) -> None:
             ),
             job_id="estimate-cover",
         )
+        transition_job(session, cover.id, JobStatus.INGESTING)
+        finalize_cover_job_duration(session, cover.id, 42.0)
+        transition_job(session, cover.id, JobStatus.STAGING)
+        confirm_cover_job(session, cover.id)
+        transition_job(session, cover.id, JobStatus.CLOUD_QUEUED)
+        transition_job(session, cover.id, JobStatus.GENERATING)
+        attempt = create_variation_attempt(session, job_id=cover.id, variation_index=1)
+        transition_variation_attempt(session, attempt.id, JobStatus.CLOUD_QUEUED)
+        transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
+        transition_variation_attempt(session, attempt.id, JobStatus.COMPLETED)
+        attempt.runpod_result_json = {"output": {"duration_seconds": 42.0}}
+        relative_path = f"{cover.id}/variation-01.mp3"
+        output_bytes = b"estimate continuation output"
+        output_path = app.state.settings.paths.outputs / relative_path
+        output_path.parent.mkdir(parents=True)
+        output_path.write_bytes(output_bytes)
+        create_output(
+            session,
+            job_id=cover.id,
+            variation_index=1,
+            result_index=0,
+            relative_path=relative_path,
+            mime_type="audio/mpeg",
+            byte_size=len(output_bytes),
+            sha256=hashlib.sha256(output_bytes).hexdigest(),
+        )
+        transition_job(session, cover.id, JobStatus.COMPLETED)
         session.commit()
         original_id = original.id
         cover_id = cover.id
@@ -1433,6 +1490,45 @@ def test_original_form_duration_language_validation(
         assert response.status_code == expected_status
         if expected_status == 303:
             assert len(worker.enqueued) == 1
+
+
+@pytest.mark.parametrize(
+    ("target_style", "duration_mode", "duration_seconds", "expected_status"),
+    [
+        ("an energetic 60-second acoustic cover", "custom", "60", 303),
+        ("an energetic 45-second acoustic cover", "custom", "60", 422),
+        ("make this cover longer", "custom", "60", 422),
+        ("plain energetic acoustic cover", "source", "", 303),
+        ("plain energetic acoustic cover", "source", "60", 422),
+        ("plain energetic acoustic cover", "custom", "", 422),
+    ],
+)
+def test_cover_form_duration_validation(
+    web_app,
+    target_style: str,
+    duration_mode: str,
+    duration_seconds: str,
+    expected_status: int,
+) -> None:
+    app, _factory, worker = web_app
+    with TestClient(app) as client:
+        token = _csrf(client, "/cover")
+        response = client.post(
+            "/cover",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "youtube_url": "https://www.youtube.com/watch?v=abc123",
+                "target_style": target_style,
+                "duration_mode": duration_mode,
+                "duration_seconds": duration_seconds,
+                "rights_confirmation": "true",
+            },
+            follow_redirects=False,
+        )
+
+        assert response.status_code == expected_status
+        assert len(worker.enqueued) == (1 if expected_status == 303 else 0)
 
 
 def test_quote_runtime_identity_config_is_bounded_and_required(

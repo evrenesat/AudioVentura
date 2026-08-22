@@ -40,8 +40,9 @@ billing, or transfer evidence. The private UI exposes `/projects` and one
 server-rendered project page per project. A compatible schema-v2 job can
 prefill the existing original or cover form; submitting the reviewed form
 always creates a new job version in that project and never retries or mutates
-the source job. Cover continuations require fresh rights confirmation and the
-ordinary one-submit home-ingest flow.
+the source job. A cover continuation is available only from a completed
+schema-v2 MP3 output. It requires fresh rights confirmation, integrity-checks
+and stages that durable output locally, and never contacts YouTube again.
 
 Cost display is a read-only informational calculation at the fixed
 `USD 0.50/GPU-hour` rate: the original and cover forms show the latest three
@@ -88,7 +89,9 @@ New jobs use a strict version-2 worker payload. Original requests choose
 duration (`auto`, sent as `-1.0`) or an explicit 10-600 second custom value.
 The final caption and lyrics are bounded at 511 and 4095 characters. Cover
 requests expose ACE-Step's independent `audio_cover_strength` and
-`cover_noise_strength` controls and retain the probed source duration. The
+`cover_noise_strength` controls and choose either the probed source duration
+or an explicit 10-600 second custom target. The measured source duration and
+generation target remain separate durable values. The
 initial rights checkbox is the only authorization: after the home server
 prepares the source, the controller atomically persists the finalized source,
 checksum, size, and duration with `cover_staging.status=confirmed` and
@@ -99,6 +102,11 @@ confirm/cancel route. One to four cover variations run
 sequentially; a supplied seed advances deterministically. Duration prose is
 accepted only when bounded numeric seconds/minutes match an explicit custom
 duration; it never changes the structured value.
+
+The opt-in `tests/live_paid_ui_e2e.py` smoke submits exactly one new YouTube
+cover and one local-output continuation, one variation each. It is excluded
+from normal pytest discovery, requires protected credentials plus
+`--allow-paid`, and enforces an exact two-submission budget.
 
 Immediately before starting a schema-v1 controller rollback, run the local
 read-only gate against the configured database:

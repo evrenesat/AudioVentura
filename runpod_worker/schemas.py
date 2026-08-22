@@ -263,8 +263,8 @@ def _parse_v2_duration_metadata(
         _bounded_float(payload[names[1]], names[1], 0.000001, 600.0),
         _bounded_float(payload[names[2]], names[2], 0.000001, 600.0),
     )
-    if not values[0] == values[1] == values[2]:
-        raise SchemaError("cover duration metadata must agree")
+    if values[1] != values[2]:
+        raise SchemaError("cover target and ACE duration metadata must agree")
     return values
 
 
@@ -424,8 +424,8 @@ def _parse_generation_v2(
         raise SchemaError("generation prompt_mode does not match resolved parameters")
     duration_mode = payload.get("duration_mode")
     if task_type == "cover":
-        if duration_mode != "source":
-            raise SchemaError("cover duration_mode must be source")
+        if duration_mode not in {"source", "custom"}:
+            raise SchemaError("cover duration_mode must be source or custom")
     elif duration_mode not in {"auto", "custom"}:
         raise SchemaError("original duration_mode must be auto or custom")
     if duration_mode != resolved["duration_mode"]:
@@ -450,9 +450,13 @@ def _parse_generation_v2(
                 raise SchemaError("custom duration seconds do not match the resolved duration")
     else:
         if duration_value is None or duration_value <= 0:
-            raise SchemaError("cover duration must be finalized from the source")
+            raise SchemaError("cover duration must be finalized")
         if duration_seconds is None or duration_seconds != duration_value:
             raise SchemaError("cover duration seconds do not match the resolved duration")
+        if duration_mode == "source" and duration_value != resolved["source_duration_seconds"]:
+            raise SchemaError("source-mode cover duration must match the source")
+        if duration_mode == "custom" and not 10 <= duration_value <= 600:
+            raise SchemaError("custom cover duration must be 10-600 seconds")
     if duration_value != resolved["duration"]:
         raise SchemaError("generation duration does not match resolved parameters")
     bpm = _optional_bounded_int(payload.get("bpm"), "bpm", 30, 300)
@@ -574,8 +578,8 @@ def _parse_resolved_parameters(
     if prompt_mode not in PROMPT_MODES:
         raise SchemaError("resolved prompt_mode is not supported")
     duration_mode = payload.get("duration_mode")
-    if task_type == "cover" and duration_mode != "source":
-        raise SchemaError("resolved cover duration_mode must be source")
+    if task_type == "cover" and duration_mode not in {"source", "custom"}:
+        raise SchemaError("resolved cover duration_mode must be source or custom")
     if task_type == "original" and duration_mode not in {"auto", "custom"}:
         raise SchemaError("resolved original duration_mode is not supported")
     caption = payload.get("caption")
@@ -627,6 +631,15 @@ def _parse_resolved_parameters(
     for name in ("source_duration_seconds", "target_duration_seconds"):
         if name in payload:
             _bounded_float(payload[name], name, 0.000001, 600)
+    if task_type == "cover":
+        source_duration = float(payload["source_duration_seconds"])
+        target_duration = float(payload["target_duration_seconds"])
+        if float(duration) != target_duration:
+            raise SchemaError("resolved cover duration must match its target duration")
+        if duration_mode == "source" and source_duration != target_duration:
+            raise SchemaError("resolved source-mode cover duration must match the source")
+        if duration_mode == "custom" and not 10 <= target_duration <= 600:
+            raise SchemaError("resolved custom cover duration must be 10-600 seconds")
     return dict(payload)
 
 

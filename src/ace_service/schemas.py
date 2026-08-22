@@ -319,6 +319,8 @@ class CoverRequest(BaseModel):
     lyrics: str | None = Field(default=None, max_length=20_000)
     audio_cover_strength: float | None = None
     cover_noise_strength: float | None = None
+    duration_mode: Literal["source", "custom"] = "source"
+    duration_seconds: float | None = None
     variation_count: StrictInt = Field(default=1, ge=1, le=4)
     seed: StrictInt | None = Field(default=None, ge=0, le=MAX_SEED)
     profile_id: str = FAST_PROFILE_ID
@@ -366,19 +368,48 @@ class CoverRequest(BaseModel):
             raise ValueError("rights_confirmation must be true")
         return value
 
+    @field_validator("duration_seconds", mode="before")
+    @classmethod
+    def duration_must_be_finite_number(cls, value: Any) -> Any:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("duration_seconds must be a finite number")
+        if value is not None and not math.isfinite(float(value)):
+            raise ValueError("duration_seconds must be a finite number")
+        return value
+
     @model_validator(mode="after")
     def effective_prompt_is_bounded(self) -> CoverRequest:
         try:
             resolve_profile(self.profile_id)
             effective_prompt = self.effective_prompt
             validate_lyrics(self.lyrics)
+            if self.duration_mode == "source":
+                if self.duration_seconds is not None:
+                    raise ValueError("Source duration must not include custom seconds")
+            else:
+                validate_duration(self.duration_mode, self.duration_seconds)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         if contains_duration_language(effective_prompt):
-            raise ValueError(
-                "custom cover duration is deferred; remove duration-changing language "
-                "from the cover guidance"
-            )
+            explicit_durations = explicit_duration_seconds(effective_prompt)
+            if (
+                self.duration_mode != "custom"
+                or self.duration_seconds is None
+                or not explicit_durations
+                or has_vague_duration_language(effective_prompt)
+                or any(
+                    not math.isclose(
+                        duration,
+                        self.duration_seconds,
+                        rel_tol=0.0,
+                        abs_tol=1e-6,
+                    )
+                    for duration in explicit_durations
+                )
+            ):
+                raise ValueError(
+                    "duration-like language must match the selected Custom duration in seconds"
+                )
         if self.seed is not None and self.seed + self.variation_count - 1 > MAX_SEED:
             raise ValueError("seed progression exceeds the supported integer range")
         return self
@@ -417,7 +448,9 @@ class CoverRequest(BaseModel):
     ) -> dict[str, Any]:
         """Return the metadata-only cover shape accepted by the Runpod worker."""
 
-        if source_duration_seconds is not None:
+        if self.duration_mode == "custom":
+            ace_duration = validate_duration("custom", self.duration_seconds)
+        elif source_duration_seconds is not None:
             ace_duration = validate_duration(
                 "source", float(source_duration_seconds), allow_source=True
             )
@@ -427,7 +460,7 @@ class CoverRequest(BaseModel):
             self.profile_id,
             task_type="cover",
             prompt_mode="direct",
-            duration_mode="source",
+            duration_mode=self.duration_mode,
             duration=ace_duration,
             caption=self.effective_prompt,
             lyrics=self.lyrics,
@@ -438,8 +471,9 @@ class CoverRequest(BaseModel):
         )
         if source_duration_seconds is None:
             resolved_parameters.pop("source_duration_seconds", None)
-            resolved_parameters.pop("target_duration_seconds", None)
-            resolved_parameters["duration"] = None
+            if self.duration_mode == "source":
+                resolved_parameters.pop("target_duration_seconds", None)
+                resolved_parameters["duration"] = None
         generation: dict[str, Any] = {
             "prompt": self.effective_prompt,
             "target_style": self.target_style,
@@ -448,9 +482,13 @@ class CoverRequest(BaseModel):
             "instrumental": False,
             "vocal_language": "en",
             "prompt_mode": "direct",
-            "duration_mode": "source",
-            "duration_seconds": source_duration_seconds,
-            "duration": source_duration_seconds,
+            "duration_mode": self.duration_mode,
+            "duration_seconds": (
+                self.duration_seconds if self.duration_mode == "custom" else source_duration_seconds
+            ),
+            "duration": (
+                self.duration_seconds if self.duration_mode == "custom" else source_duration_seconds
+            ),
             "audio_cover_strength": self.effective_audio_cover_strength,
             "cover_noise_strength": self.effective_cover_noise_strength,
             "seed": self.seed,
@@ -478,7 +516,7 @@ def finalize_cover_normalized_request(
         or source_duration_seconds <= 0
     ):
         raise ValueError("source duration must be a finite positive number")
-    duration = validate_duration("source", float(source_duration_seconds), allow_source=True)
+    source_duration = validate_duration("source", float(source_duration_seconds), allow_source=True)
     value = deepcopy(normalized_request)
     if value.get("schema_version") != WORKER_SCHEMA_VERSION:
         raise ValueError("only schema-v2 cover requests can be finalized")
@@ -486,14 +524,23 @@ def finalize_cover_normalized_request(
     resolved = value.get("resolved_parameters")
     if not isinstance(generation, dict) or not isinstance(resolved, dict):
         raise ValueError("cover request is missing its resolved parameters")
-    generation["duration_seconds"] = duration
-    generation["duration"] = duration
-    resolved["duration"] = duration
-    resolved["source_duration_seconds"] = duration
-    resolved["target_duration_seconds"] = duration
-    value["source_duration_seconds"] = duration
-    value["resolved_target_duration_seconds"] = duration
-    value["ace_duration_seconds"] = duration
+    duration_mode = generation.get("duration_mode")
+    if duration_mode == "source":
+        target_duration = source_duration
+        generation["duration_seconds"] = target_duration
+        generation["duration"] = target_duration
+    elif duration_mode == "custom":
+        target_duration = validate_duration("custom", generation.get("duration_seconds"))
+        generation["duration"] = target_duration
+    else:
+        raise ValueError("cover request has an invalid duration mode")
+    resolved["duration_mode"] = duration_mode
+    resolved["duration"] = target_duration
+    resolved["source_duration_seconds"] = source_duration
+    resolved["target_duration_seconds"] = target_duration
+    value["source_duration_seconds"] = source_duration
+    value["resolved_target_duration_seconds"] = target_duration
+    value["ace_duration_seconds"] = target_duration
     return value
 
 
