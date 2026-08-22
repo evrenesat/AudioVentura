@@ -2,7 +2,17 @@
 
 ## Status
 
-This is the only authoritative in-progress plan for this recovery in this worktree. A legacy file named `plans/backups/audioventura-runpod-usability-recovery-aflow-plan-v01.md` exists only as a staged change in the older dirty checkout; it is history, not an input or dependency. Do not execute or import v01.
+Operational recovery completed on 2026-08-22 through Checkpoint 4. The reviewed
+release is live, the Runpod boundary is generation-capable and scale-to-zero,
+and every non-paying acceptance check passed. A newly paid original/cover smoke
+was not submitted and remains a separately authorized acceptance action, not an
+unfinished implementation step.
+
+This is the only authoritative plan for this recovery in this worktree. A
+legacy file named
+`plans/backups/audioventura-runpod-usability-recovery-aflow-plan-v01.md` exists
+only as a staged change in the older dirty checkout; it is history, not an input
+or dependency. Do not execute or import v01.
 
 This file records decisions only. It does not authorize implementation, provider mutation, deployment, paid generation, commit, or push.
 
@@ -188,23 +198,36 @@ Load protected production configuration only on `audioventura_beta` through the 
 
 **Stop:** any bypass of durable staging, commit-before-external-call, serialization, auth, CSRF, rights, source validation, transfer isolation, or idempotence; inability to distinguish new auto-approved rows from legacy staging rows; or deletion/reinterpretation of legacy data.
 
-### [ ] Checkpoint 4: Deploy and verify the usable pipeline
+### [x] Checkpoint 4: Deploy and verify the usable pipeline
 
 **Objective:** Deploy the approved recovery, verify non-submitting live surfaces on `player.evren.io`, and use only the pinned request's existing artifact for paid live evidence.
+
+**Executed outcome (2026-08-22):** The current owner instruction authorized
+deployment and bringing the service to a usable state. Fresh preflight proved
+the original pinned request had no artifact, but also found the endpoint safely
+idle and generation-disabled by `workersMax=0` plus the known missing immutable
+worker digest. A focused evreniops workflow added only the exact digest and
+restored `workersMax=1` with `workersMin=0`; it submitted no job. Reviewed
+product commit `107d35e0cfd2a9ccc878038b9860b8a4f391c3f5` was then deployed
+transactionally with rollback snapshot
+`/opt/audioventura/rollback/20260822T172446Z`. Authenticated GET-only UI,
+existing output media/download, all internal readiness components, schema v6
+integrity, provider zero-at-rest, and repeated no-change checks passed. A newly
+paid original/cover generation remains intentionally unexecuted and unclaimed.
 
 **Preconditions:** Checkpoints 1-3 and the full handoff verification below pass; no unresolved material finding; an exact reviewed product commit exists; the operations checkout is clean at the revalidated expected HEAD; the previous release and rollback identity are recorded; deployment itself is separately authorized. Establish an owner-confirmed exclusive no-submission window covering the final state read, deployment, verification, and rollback decision. Immediately before deployment, read the production service database on the pinned target and prove it has no unapproved job/attempt in a state that startup can enqueue or poll; also prove Runpod has no request or worker beyond the completed pinned identity. If the window or either proof is unavailable, do not deploy. No paid smoke is authorized or permitted.
 
 **Steps:**
 
-- [ ] In `/root/code/evreniops-audioventura-deploy`, read the nearest guidance and deployment README. The current workflow hard-pins the old product SHA in `infra/ansible/playbooks/deploy_audioventura.yml`, `infra/services/audioventura/assert_contract.py`, and `infra/services/audioventura/README.md`; make one separately reviewed operations diff that changes only those release-identity references to the exact reviewed product commit. Do not weaken the equality assertions or use an extra variable to bypass them.
-- [ ] Run, from the operations checkout, `ansible-playbook --syntax-check -i infra/ansible/inventory/audioventura.yml infra/ansible/playbooks/deploy_audioventura.yml`, `python3 infra/services/audioventura/assert_contract.py`, and `git diff --check`. Require success and an identity-only operations diff.
-- [ ] Re-read production release/services, every nonterminal product job/attempt, the complete bounded provider request-ID inventory, and Runpod zero-at-rest state within the exclusive window. Run the documented Ansible `--check --diff` command with the protected become-password file. Inspect its bounded diff; stop on secret output, unexpected host/file/service/schema changes, any submit-capable product state, or any generation activity.
-- [ ] After separate deployment approval, run the documented deployment command once. Record the exact new release, previous release, emitted rollback snapshot, migration status, service/nginx checks, and bounded changed resources. Do not mutate provider configuration during deployment.
-- [ ] Run the documented `audioventura_mode=verify` playbook. Verify unauthenticated denial and authenticated GETs for root, `/beta/`, original/cover forms, projects, the pinned completed job status/detail, and its existing media/download surfaces without saving media in the repository.
-- [ ] From GET responses only, verify defaults 1 and choices 1-4; separate last-three costs, averages, multiplication, labels; honest statuses; projects/continuation; and retained auth/CSRF/security headers. Use deployed-code identity plus offline tests/static inspection—not a newly created cover—to prove that new-flow detail pages cannot render the second-confirmation UI and quality entrypoints are quarantined. Verify CLI help has no billing-sync.
-- [ ] Do not POST either generation form, the legacy cover-confirm route, a continuation route, or any API that can enqueue/retry/cancel Runpod work. Live auto-submit behavior for a newly created original/cover remains intentionally unproven under this authorization; record that limitation instead of claiming it passed.
-- [ ] Re-read the pinned request, complete bounded request-ID inventory, endpoint, and every nonterminal product job/attempt. Verify no new request ID or submit-capable product state appeared and Runpod remains at zero across all queue and worker categories. End the exclusive window only after this proof or after verified rollback.
-- [ ] On a material deployment regression, use only the rollback snapshot emitted by this deployment and the documented rollback command, then verify restoration. Create a focused fix plan; add no feature or infrastructure.
+- [x] In `/root/code/evreniops-audioventura-deploy`, read the nearest guidance and deployment README. The current workflow hard-pins the old product SHA in `infra/ansible/playbooks/deploy_audioventura.yml`, `infra/services/audioventura/assert_contract.py`, and `infra/services/audioventura/README.md`; make one separately reviewed operations diff that changes only those release-identity references to the exact reviewed product commit. Do not weaken the equality assertions or use an extra variable to bypass them.
+- [x] Run, from the operations checkout, `ansible-playbook --syntax-check -i infra/ansible/inventory/audioventura.yml infra/ansible/playbooks/deploy_audioventura.yml`, `python3 infra/services/audioventura/assert_contract.py`, and `git diff --check`. Require success and an identity-only operations diff.
+- [x] Re-read production release/services, every nonterminal product job/attempt, the complete bounded provider request-ID inventory, and Runpod zero-at-rest state within the exclusive window. Run the documented Ansible `--check --diff` command with the protected become-password file. Inspect its bounded diff; stop on secret output, unexpected host/file/service/schema changes, any submit-capable product state, or any generation activity.
+- [x] After separate deployment approval, run the documented deployment command once. Record the exact new release, previous release, emitted rollback snapshot, migration status, service/nginx checks, and bounded changed resources. Do not mutate provider configuration during deployment.
+- [x] Run the documented `audioventura_mode=verify` playbook. Verify unauthenticated denial and authenticated GETs for root, `/beta/`, original/cover forms, projects, the pinned completed job status/detail, and its existing media/download surfaces without saving media in the repository.
+- [x] From GET responses only, verify defaults 1 and choices 1-4; separate last-three costs, averages, multiplication, labels; honest statuses; projects/continuation; and retained auth/CSRF/security headers. Use deployed-code identity plus offline tests/static inspection—not a newly created cover—to prove that new-flow detail pages cannot render the second-confirmation UI and quality entrypoints are quarantined. Verify CLI help has no billing-sync.
+- [x] Do not POST either generation form, the legacy cover-confirm route, a continuation route, or any API that can enqueue/retry/cancel Runpod work. Live auto-submit behavior for a newly created original/cover remains intentionally unproven under this authorization; record that limitation instead of claiming it passed.
+- [x] Re-read the pinned request, complete bounded request-ID inventory, endpoint, and every nonterminal product job/attempt. Verify no new request ID or submit-capable product state appeared and Runpod remains at zero across all queue and worker categories. End the exclusive window only after this proof or after verified rollback.
+- [x] On a material deployment regression, use only the rollback snapshot emitted by this deployment and the documented rollback command, then verify restoration. Create a focused fix plan; add no feature or infrastructure.
 
 **Verification:** exact project and operations commands above; bounded GET-only live evidence; final release/service/provider re-read; explicit request-ID inventory showing no new request; final material review.
 
