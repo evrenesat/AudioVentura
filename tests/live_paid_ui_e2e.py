@@ -140,8 +140,14 @@ def _assert_output_surfaces(client: httpx.Client, status: dict[str, Any]) -> Non
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if not args.allow_paid:
         raise RuntimeError("refusing paid smoke without --allow-paid")
-    if args.max_paid_submissions != 2:
-        raise RuntimeError("this smoke requires an exact two-submission paid budget")
+    resumed_initial_id = args.resume_initial_job_id
+    if resumed_initial_id is not None and not re.fullmatch(r"[0-9a-f-]{36}", resumed_initial_id):
+        raise RuntimeError("resume initial job ID is malformed")
+    expected_submissions = 1 if resumed_initial_id is not None else 2
+    if args.max_paid_submissions != expected_submissions:
+        raise RuntimeError(
+            f"this smoke requires an exact {expected_submissions}-submission paid budget"
+        )
     budget = PaidBudget(args.max_paid_submissions)
     with httpx.Client(
         base_url=args.base_url.rstrip("/"),
@@ -157,15 +163,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ):
                 raise RuntimeError(f"duration control is missing from {path}")
 
-        first_id = _submit_cover(
-            client,
-            budget,
-            form_path="/beta/cover",
-            prompt=args.prompt,
-            duration_seconds=60.0,
-            youtube_url=args.youtube_url,
-            seed=args.seed,
-        )
+        first_id = resumed_initial_id
+        if first_id is None:
+            first_id = _submit_cover(
+                client,
+                budget,
+                form_path="/beta/cover",
+                prompt=args.prompt,
+                duration_seconds=60.0,
+                youtube_url=args.youtube_url,
+                seed=args.seed,
+            )
         first = _wait_for_completion(client, first_id, timeout_seconds=args.timeout_seconds)
         _assert_output_surfaces(client, first)
         continue_url = first.get("continue_url")
@@ -187,7 +195,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("continued cover did not remain in the same project")
         _get(client, str(second["project_url"]))
 
-    if budget.used != 2:
+    if budget.used != expected_submissions:
         raise RuntimeError("paid smoke did not consume its exact expected budget")
     return {
         "status": "passed",
@@ -206,6 +214,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=2_026_082_200)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--max-paid-submissions", type=int, default=2)
+    parser.add_argument(
+        "--resume-initial-job-id",
+        help="reuse one existing initial job and allow only its continuation submission",
+    )
     parser.add_argument("--allow-paid", action="store_true")
     return parser
 
