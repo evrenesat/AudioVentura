@@ -388,7 +388,7 @@ chooses another available snapshot, contacts Hugging Face, or falls back to
 the former `/runpod-volume/checkpoints` layout. The snapshot's pinned
 `bundle-manifest.json` digest, ACE-Step source identity, two upstream source
 commits, four component mappings, complete checkpoint file set, individual
-sizes, and 25,253,688,079-byte total must all validate before ACE-Step imports.
+sizes, and 25,253,680,505-byte total must all validate before ACE-Step imports.
 Cache file symlinks may resolve only within that model repository's cache
 root. The resulting checkpoints path is exported to ACE-Step only after this
 gate passes, and completion metadata carries the aggregate repo, destination

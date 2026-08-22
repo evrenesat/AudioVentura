@@ -2,6 +2,12 @@
 
 ## 2026-08-22 (revision-pinned cached-model product runtime)
 
+- Live worker logs proved bundle revision 1 contained two DiT Python files
+  from the upstream model repository that differed from the pinned ACE-Step
+  v0.1.8 runtime. ACE-Step therefore attempted an auto-sync into Runpod's
+  read-only cached snapshot and failed. Bundle revision 2 replaces exactly
+  those files with the pinned runtime copies and updates the manifest total;
+  the worker's fail-closed byte receipt now matches that immutable release.
 - Replaced the Runpod worker's network-volume checkpoint fallback with a
   fail-closed Hugging Face cached-snapshot contract: exact repo/commit/tag and
   manifest identities, fixed upstream revisions and ACE-Step source, complete

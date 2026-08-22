@@ -25,8 +25,8 @@ from runpod_worker.runtime import (
 
 TEST_IMAGE_DIGEST = "sha256:" + "b" * 64
 TEST_MODEL_REPO = "evrenesat/audioventura-ace-step-v0.1.8"
-TEST_MODEL_REVISION = "6f196b2c116474c43a96fc8331ebcd2057e18eef"
-TEST_MODEL_TAG = "av-v0.1.8-bundle-1"
+TEST_MODEL_REVISION = "88b8c7fa089446b53382c1040037492463430bed"
+TEST_MODEL_TAG = "av-v0.1.8-bundle-2"
 TEST_MANIFEST_SHA256 = "c" * 64
 
 
