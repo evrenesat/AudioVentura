@@ -3,6 +3,7 @@
   if (!detail) return;
   const statusNode = document.querySelector("#job-status");
   const progressNode = document.querySelector("#job-progress");
+  const phaseNode = document.querySelector("#job-phase");
   const outputsNode = document.querySelector("#outputs");
   const terminal = new Set(["completed", "failed"]);
   let confirmationReloaded = false;
@@ -22,6 +23,13 @@
       statusNode.textContent = job.status_label;
       statusNode.className = `status status-${job.status}`;
       progressNode.textContent = `${job.completed_variations}/${job.variation_count} variations`;
+      if (job.phase && job.phase_label) {
+        phaseNode.hidden = false;
+        phaseNode.textContent = `${job.phase_label} · ${job.elapsed_seconds} seconds elapsed`;
+      } else {
+        phaseNode.hidden = true;
+        phaseNode.textContent = "";
+      }
       if (job.error) {
         let errorNode = document.querySelector("#job-error");
         if (!errorNode) { errorNode = document.createElement("div"); errorNode.id = "job-error"; errorNode.className = "banner error"; detail.prepend(errorNode); }

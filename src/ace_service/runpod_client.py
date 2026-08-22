@@ -27,6 +27,16 @@ _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _RUNPOD_STATES = frozenset(
     {"IN_QUEUE", "IN_PROGRESS", "RUNNING", "COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"}
 )
+_PROGRESS_KIND = "audioventura_progress_v1"
+_WORKER_PROGRESS_PHASES = frozenset(
+    {"source_download", "generation", "finalizing", "output_upload"}
+)
+_WORKER_PROGRESS_SEQUENCES = {
+    "source_download": 10,
+    "generation": 20,
+    "finalizing": 30,
+    "output_upload": 40,
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -71,11 +81,13 @@ class EndpointWorkerCounts:
     running: int
     queued: int
     in_progress: int
+    initializing: int = 0
+    unhealthy: int = 0
 
     @property
     def active(self) -> int:
-        """Idle plus running workers are the zero-at-rest worker population."""
-        return self.idle + self.running
+        """Count every known worker state that prevents a zero-at-rest claim."""
+        return self.idle + self.running + self.initializing + self.unhealthy
 
     @property
     def has_pending_work(self) -> bool:
@@ -115,6 +127,8 @@ def parse_worker_counts(health: RunpodHealth) -> EndpointWorkerCounts:
         running=_bounded_count(workers.get("running"), "workers.running"),
         queued=_bounded_count(jobs.get("inQueue"), "jobs.inQueue"),
         in_progress=_bounded_count(jobs.get("inProgress"), "jobs.inProgress"),
+        initializing=_bounded_optional_count(workers.get("initializing"), "workers.initializing"),
+        unhealthy=_bounded_optional_count(workers.get("unhealthy"), "workers.unhealthy"),
     )
 
 
@@ -129,6 +143,7 @@ class RunpodStatusResult:
     error: str | None = None
     delay_ms: int | None = None
     execution_ms: int | None = None
+    progress: dict[str, Any] | None = None
 
     @property
     def status(self) -> str:
@@ -143,6 +158,25 @@ def _positive_int(value: Any, name: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise RunpodResponseError(f"Runpod response field {name} is malformed")
     return cast(int, value)
+
+
+def _bounded_optional_count(value: Any, name: str) -> int:
+    return 0 if value is None else _bounded_count(value, name)
+
+
+def _worker_progress(value: Any) -> dict[str, Any] | None:
+    """Return one exact advisory progress object or ignore provider noise."""
+
+    if not isinstance(value, Mapping) or set(value) != {"kind", "phase", "sequence"}:
+        return None
+    if value.get("kind") != _PROGRESS_KIND or value.get("phase") not in _WORKER_PROGRESS_PHASES:
+        return None
+    sequence = value.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int):
+        return None
+    if sequence != _WORKER_PROGRESS_SEQUENCES[value["phase"]]:
+        return None
+    return {"kind": _PROGRESS_KIND, "phase": value["phase"], "sequence": sequence}
 
 
 def _job_id(value: Any, name: str = "job ID") -> str:
@@ -263,9 +297,19 @@ class RunpodClient:
         if returned_id != request_id:
             raise RunpodResponseError("Runpod status response job ID does not match the request")
         raw_status, category = _state(response.get("status"))
-        result = response.get("output")
-        if result is not None and not isinstance(result, Mapping):
-            raise RunpodResponseError("Runpod status output is malformed")
+        raw_output = response.get("output")
+        result: dict[str, Any] | None = None
+        progress: dict[str, Any] | None = None
+        if category in {RunpodState.CLOUD_QUEUED, RunpodState.GENERATING}:
+            progress = _worker_progress(raw_output)
+            if raw_output is not None and progress is None:
+                LOGGER.warning(
+                    "stage=runpod operation=status error_code=runpod_progress_unavailable"
+                )
+        elif raw_output is not None:
+            if not isinstance(raw_output, Mapping):
+                raise RunpodResponseError("Runpod status output is malformed")
+            result = dict(raw_output)
         raw_error = response.get("error")
         if raw_error is not None and (not isinstance(raw_error, str) or len(raw_error) > 4096):
             raise RunpodResponseError("Runpod status error is malformed")
@@ -273,10 +317,11 @@ class RunpodClient:
             job_id=request_id,
             category=category,
             raw_status=raw_status,
-            result=dict(result) if isinstance(result, Mapping) else None,
+            result=result,
             error=raw_error,
             delay_ms=_positive_int(response.get("delayTime"), "delayTime"),
             execution_ms=_positive_int(response.get("executionTime"), "executionTime"),
+            progress=progress,
         )
 
     async def cancel(self, runpod_job_id: str) -> RunpodStatusResult:

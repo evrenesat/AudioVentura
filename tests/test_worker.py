@@ -17,12 +17,13 @@ from ace_service.repository import (
     get_variation_attempt,
     persist_variation_runpod_job_id,
     prepare_variation_submission,
+    set_variation_progress,
     set_variation_runpod_result,
     sum_terminal_attempt_estimates,
     transition_job,
     transition_variation_attempt,
 )
-from ace_service.runpod_client import RunpodError, RunpodState, RunpodStatusResult
+from ace_service.runpod_client import RunpodError, RunpodHealth, RunpodState, RunpodStatusResult
 from ace_service.schemas import OriginalSongRequest
 from ace_service.worker import ControllerWorker
 
@@ -144,8 +145,145 @@ def _completion_evidence(
             "lm_model": "test-lm",
             "image_digest": "sha256:" + "d" * 64,
             "gpu": "test-gpu",
+            "model_bundle": {
+                "repo": "evrenesat/audioventura-ace-step-v0.1.8",
+                "revision": "6f196b2c116474c43a96fc8331ebcd2057e18eef",
+                "tag": "av-v0.1.8-bundle-1",
+                "manifest_sha256": "c" * 64,
+            },
         },
     }
+
+
+def test_variation_progress_is_bounded_monotonic_and_terminal_result_replaces_it(
+    session,
+) -> None:
+    job = create_original_job(
+        session,
+        OriginalSongRequest(description="progress persistence"),
+        job_id="job-progress-persistence",
+    )
+    _, attempt, _ = prepare_variation_submission(session, job.id, 1)
+    set_variation_progress(session, attempt.id, "cloud_wait")
+    set_variation_progress(session, attempt.id, "generation")
+    set_variation_progress(session, attempt.id, "worker_running")
+    session.commit()
+    session.expire_all()
+
+    persisted = get_variation_attempt(session, job.id, 1)
+    assert persisted is not None
+    assert persisted.runpod_result_json["phase"] == "generation"
+    set_variation_runpod_result(session, persisted.id, {"schema_version": 2, "output": {}})
+    assert persisted.runpod_result_json == {"schema_version": 2, "output": {}}
+
+
+class _PhaseRunpod:
+    def __init__(self, result: RunpodStatusResult, *, initializing: int = 0) -> None:
+        self.result = result
+        self.initializing = initializing
+        self.health_calls = 0
+
+    async def status(self, runpod_job_id: str) -> RunpodStatusResult:
+        assert runpod_job_id == "runpod-progress"
+        return self.result
+
+    async def health(self) -> RunpodHealth:
+        self.health_calls += 1
+        return RunpodHealth(
+            details={
+                "workers": {
+                    "idle": 0,
+                    "running": 0,
+                    "initializing": self.initializing,
+                    "unhealthy": 0,
+                },
+                "jobs": {"inQueue": 1, "inProgress": 0},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("result", "initializing", "expected_phase", "health_calls"),
+    [
+        (
+            RunpodStatusResult(
+                job_id="runpod-progress",
+                category=RunpodState.CLOUD_QUEUED,
+                raw_status="IN_QUEUE",
+            ),
+            0,
+            "cloud_wait",
+            1,
+        ),
+        (
+            RunpodStatusResult(
+                job_id="runpod-progress",
+                category=RunpodState.CLOUD_QUEUED,
+                raw_status="IN_QUEUE",
+            ),
+            1,
+            "worker_initializing",
+            1,
+        ),
+        (
+            RunpodStatusResult(
+                job_id="runpod-progress",
+                category=RunpodState.GENERATING,
+                raw_status="IN_PROGRESS",
+            ),
+            0,
+            "worker_running",
+            0,
+        ),
+        (
+            RunpodStatusResult(
+                job_id="runpod-progress",
+                category=RunpodState.GENERATING,
+                raw_status="IN_PROGRESS",
+                progress={
+                    "kind": "audioventura_progress_v1",
+                    "phase": "source_download",
+                    "sequence": 10,
+                },
+            ),
+            0,
+            "source_download",
+            0,
+        ),
+    ],
+)
+def test_controller_persists_evidence_backed_phase(
+    settings,
+    result: RunpodStatusResult,
+    initializing: int,
+    expected_phase: str,
+    health_calls: int,
+) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_original_job(
+                session,
+                OriginalSongRequest(description="phase orchestration"),
+                job_id="job-phase-orchestration",
+            )
+            _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+            persist_variation_runpod_job_id(
+                session, attempt.id, "runpod-progress", submission_nonce=nonce
+            )
+            session.commit()
+        fake = _PhaseRunpod(result, initializing=initializing)
+        worker = ControllerWorker(settings, factory, fake, poll_interval_seconds=0)  # type: ignore[arg-type]
+
+        _run(worker._poll_variation("job-phase-orchestration", 1))
+
+        with factory() as session:
+            attempt = get_variation_attempt(session, "job-phase-orchestration", 1)
+            assert attempt is not None
+            assert attempt.runpod_result_json["phase"] == expected_phase
+        assert fake.health_calls == health_calls
+    finally:
+        engine.dispose()
 
 
 def _create_completion_evidence_case(
@@ -185,6 +323,12 @@ def _create_completion_evidence_case(
         output = dict(output)
         output[mismatch_field] = int(output["bytes"]) + 1 if mismatch_field == "bytes" else "b" * 64
         result["output"] = output
+    elif mismatch_field == "model_revision":
+        worker = result["worker"]
+        assert isinstance(worker, dict)
+        model_bundle = worker["model_bundle"]
+        assert isinstance(model_bundle, dict)
+        model_bundle["revision"] = "MAIN"
     if result_before_upload:
         with factory() as session:
             attempt = get_variation_attempt(session, job_id, 1)
@@ -213,7 +357,7 @@ def _create_completion_evidence_case(
 
 @pytest.mark.parametrize(
     "mismatch_field",
-    ["job_id", "submission_nonce", "variation_index", "bytes", "sha256"],
+    ["job_id", "submission_nonce", "variation_index", "bytes", "sha256", "model_revision"],
 )
 @pytest.mark.parametrize("result_before_upload", [False, True])
 def test_schema_v2_completion_evidence_mismatch_fails_closed(
@@ -620,6 +764,12 @@ def test_schema_v2_status_expiry_uses_persisted_completion_metadata(settings) ->
                         "lm_model": "test-lm",
                         "image_digest": "sha256:" + "d" * 64,
                         "gpu": "test-gpu",
+                        "model_bundle": {
+                            "repo": "evrenesat/audioventura-ace-step-v0.1.8",
+                            "revision": "6f196b2c116474c43a96fc8331ebcd2057e18eef",
+                            "tag": "av-v0.1.8-bundle-1",
+                            "manifest_sha256": "c" * 64,
+                        },
                     },
                 },
             )

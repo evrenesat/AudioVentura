@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import wave
 from collections.abc import Callable
 from pathlib import Path
@@ -19,6 +20,10 @@ JOB_ID = "11111111-1111-4111-8111-111111111111"
 NONCE = "22222222-2222-4222-8222-222222222222"
 SOURCE_BODY = b"prepared source"
 TEST_IMAGE_DIGEST = "sha256:" + "a" * 64
+TEST_MODEL_REPO = "evrenesat/audioventura-ace-step-v0.1.8"
+TEST_MODEL_REVISION = "6f196b2c116474c43a96fc8331ebcd2057e18eef"
+TEST_MODEL_TAG = "av-v0.1.8-bundle-1"
+TEST_MANIFEST_SHA256 = "cd66241b729e6b4ba6bc2e7f390a26d05ea3c6bc8e7c66cd2b85b528a1a8524f"
 
 
 class FakeParams:
@@ -350,6 +355,10 @@ def _runtime(
         generate_music=generate_music,
         gpu_name="test-gpu",
         gpu_vram_bytes=24 * 1024**3,
+        model_repo=TEST_MODEL_REPO,
+        model_revision=TEST_MODEL_REVISION,
+        model_tag=TEST_MODEL_TAG,
+        model_manifest_sha256=TEST_MANIFEST_SHA256,
         worker_image_digest=TEST_IMAGE_DIGEST,
         transfer_client_factory=lambda: transfer_client,
     )
@@ -450,10 +459,65 @@ def test_v2_enhance_persists_pinned_lm_metadata_without_rewriting_lyrics(
         "keyscale": "D minor",
     }
     assert result["worker"]["image_digest"] == TEST_IMAGE_DIGEST
+    assert result["worker"]["model_bundle"] == {
+        "repo": TEST_MODEL_REPO,
+        "revision": TEST_MODEL_REVISION,
+        "tag": TEST_MODEL_TAG,
+        "manifest_sha256": TEST_MANIFEST_SHA256,
+    }
     encoded = json.dumps(result)
     assert "audio_codes" not in encoded
     assert "time_costs" not in encoded
     assert "tensor" not in encoded
+
+
+def test_cover_reports_exact_progress_boundaries_with_original_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transfer_client = FakeTransferClient()
+    generated_paths: list[Path] = []
+    calls: list[tuple[FakeParams, FakeConfig]] = []
+    reports: list[tuple[object, dict[str, object]]] = []
+
+    class FakeServerless:
+        @staticmethod
+        def progress_update(event: object, payload: dict[str, object]) -> None:
+            reports.append((event, payload))
+
+    monkeypatch.setitem(sys.modules, "runpod", SimpleNamespace(serverless=FakeServerless()))
+    handler_module.configure_runtime(_runtime(transfer_client, generated_paths, calls))
+    event = _payload(cover=True)
+
+    handler_module.handler(event)
+
+    assert all(reported_event is event for reported_event, _ in reports)
+    assert [payload for _, payload in reports] == [
+        {"kind": "audioventura_progress_v1", "phase": "source_download", "sequence": 10},
+        {"kind": "audioventura_progress_v1", "phase": "generation", "sequence": 20},
+        {"kind": "audioventura_progress_v1", "phase": "finalizing", "sequence": 30},
+        {"kind": "audioventura_progress_v1", "phase": "output_upload", "sequence": 40},
+    ]
+
+
+def test_progress_delivery_failure_does_not_fail_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transfer_client = FakeTransferClient()
+    generated_paths: list[Path] = []
+    calls: list[tuple[FakeParams, FakeConfig]] = []
+
+    class FailingServerless:
+        @staticmethod
+        def progress_update(event: object, payload: dict[str, object]) -> None:
+            del event, payload
+            raise RuntimeError("provider progress unavailable")
+
+    monkeypatch.setitem(sys.modules, "runpod", SimpleNamespace(serverless=FailingServerless()))
+    handler_module.configure_runtime(_runtime(transfer_client, generated_paths, calls))
+
+    result = handler_module.handler(_payload())
+
+    assert result["status"] == "uploaded"
 
 
 @pytest.mark.parametrize("result_style", ["mapping", "attribute"])

@@ -379,6 +379,33 @@ PCM WAV and the worker encodes that file to the requested MP3 in-process with
 the pinned LAME encoder. Requested WAV and FLAC outputs retain their native
 ACE-Step save formats. Hetzner performs no media processing.
 
+## Revision-pinned cached-model boundary
+
+The Runpod image contains code but no model weights. At process startup it
+constructs exactly one Hugging Face cache path from the configured
+`owner/repo` and 40-hex destination commit. It never reads a mutable ref,
+chooses another available snapshot, contacts Hugging Face, or falls back to
+the former `/runpod-volume/checkpoints` layout. The snapshot's pinned
+`bundle-manifest.json` digest, ACE-Step source identity, two upstream source
+commits, four component mappings, complete checkpoint file set, individual
+sizes, and 25,253,688,079-byte total must all validate before ACE-Step imports.
+Cache file symlinks may resolve only within that model repository's cache
+root. The resulting checkpoints path is exported to ACE-Step only after this
+gate passes, and completion metadata carries the aggregate repo, destination
+commit, release tag, and manifest digest alongside image and GPU identity.
+
+Worker progress is advisory metadata, never generation control. The worker
+uses the pinned Runpod SDK to report source transfer, generation, finalization,
+and output upload boundaries with fixed sequence values. The controller
+accepts only that exact bounded payload. While a job is queued, it separately
+uses provider health evidence to distinguish capacity/cache waiting from an
+initializing worker; health or progress errors retain the last valid phase and
+cannot fail generation. Monotonic nonterminal progress replaces the current
+attempt's `runpod_result_json`, survives controller restarts, is never
+projected onto an output, and is transactionally replaced by terminal worker
+metadata. The UI displays the named phase and elapsed time, not an inferred
+percentage or completion estimate.
+
 ## Checkpoint 5 original-song workflow
 
 Original-song requests are validated at the controller boundary and persisted

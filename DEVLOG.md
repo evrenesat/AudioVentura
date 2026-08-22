@@ -1,5 +1,27 @@
 # Development Log
 
+## 2026-08-22 (revision-pinned cached-model product runtime)
+
+- Replaced the Runpod worker's network-volume checkpoint fallback with a
+  fail-closed Hugging Face cached-snapshot contract: exact repo/commit/tag and
+  manifest identities, fixed upstream revisions and ACE-Step source, complete
+  four-component inventory and size validation, cache-contained symlinks, and
+  offline model-library defaults are required before model initialization.
+- Added aggregate bundle identity to bounded worker completion metadata and
+  advisory Runpod progress updates at source transfer, generation,
+  finalization, and output upload boundaries. Progress delivery failures do
+  not affect generation.
+- Added provider-evidenced UI phases for cache/capacity wait, worker startup,
+  source transfer, generation, finalization, and upload. The controller stores
+  monotonic nonterminal phase state in the existing attempt JSON, preserves it
+  across restarts, replaces it at terminal completion, and shows elapsed time
+  without invented percentages.
+- Added offline tests for revision/ref refusal, manifest and inventory drift,
+  unsafe links, legacy-volume refusal, exact progress parsing/persistence,
+  initialization health evidence, terminal replacement, and UI polling. This
+  product-side implementation pass contacted no provider and ran no paid
+  generation before deployment.
+
 ## 2026-08-22 (cover continuation and duration recovery)
 
 - Diagnosed production job `543b832e-342e-45b3-a8a6-861d45b28c1c`: the cover

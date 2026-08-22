@@ -215,12 +215,19 @@ def _health_details(
     running: int = 0,
     queued: int = 0,
     in_progress: int = 0,
+    initializing: int = 0,
+    unhealthy: int = 0,
 ) -> dict[str, object]:
     # Representative documented Runpod /health body.  Only the workers block
     # and the inQueue/inProgress job counts are required; the remaining job
     # fields are tolerated provider contract.
     return {
-        "workers": {"idle": idle, "running": running},
+        "workers": {
+            "idle": idle,
+            "running": running,
+            "initializing": initializing,
+            "unhealthy": unhealthy,
+        },
         "jobs": {
             "completed": 0,
             "failed": 0,
@@ -257,6 +264,54 @@ def test_parse_health_active_and_pending_work() -> None:
     both = _parse(idle=2, running=3, queued=1, in_progress=4)
     assert both.active == 5
     assert both.queued == 1 and both.in_progress == 4
+    startup = _parse(initializing=1, unhealthy=2)
+    assert startup.initializing == 1 and startup.unhealthy == 2
+    assert startup.active == 3
+
+
+def test_nonterminal_status_accepts_only_exact_progress_payload() -> None:
+    responses = iter(
+        [
+            {
+                "id": "job-123",
+                "status": "IN_PROGRESS",
+                "output": {
+                    "kind": "audioventura_progress_v1",
+                    "phase": "generation",
+                    "sequence": 20,
+                },
+            },
+            {
+                "id": "job-123",
+                "status": "IN_PROGRESS",
+                "output": {
+                    "kind": "audioventura_progress_v1",
+                    "phase": "generation",
+                    "sequence": 21,
+                    "extra": True,
+                },
+            },
+        ]
+    )
+
+    async def scenario() -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=next(responses)))
+        async with httpx.AsyncClient(base_url="https://runpod.test", transport=transport) as http:
+            client = RunpodClient(
+                "secret-key", "endpoint", base_url="https://runpod.test", http_client=http
+            )
+            valid = await client.status("job-123")
+            assert valid.progress == {
+                "kind": "audioventura_progress_v1",
+                "phase": "generation",
+                "sequence": 20,
+            }
+            assert valid.result is None
+            malformed = await client.status("job-123")
+            assert malformed.progress is None
+            assert malformed.result is None
+
+    _run(scenario())
 
 
 @pytest.mark.parametrize(

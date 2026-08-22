@@ -67,6 +67,7 @@ _LM_TEXT_FIELDS = frozenset(
 )
 _LM_NUMERIC_FIELDS = frozenset({"bpm", "duration"})
 _MAX_LM_METADATA_BYTES = 16_384
+_PROGRESS_KIND = "audioventura_progress_v1"
 
 
 class GenerationError(RuntimeError):
@@ -91,7 +92,7 @@ def handler(event: Mapping[str, Any]) -> dict[str, Any]:
     try:
         allowed_host = _configured_transfer_host()
         request = WorkerRequest.from_event(event, allowed_transfer_host=allowed_host)
-        return _handle_request(request, runtime)
+        return _handle_request(request, runtime, event)
     except Exception as exc:
         LOGGER.error(
             "job=%s stage=worker error_code=worker_request_failed exception_class=%s elapsed_ms=%d",
@@ -102,13 +103,16 @@ def handler(event: Mapping[str, Any]) -> dict[str, Any]:
         raise
 
 
-def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str, Any]:
+def _handle_request(
+    request: WorkerRequest, runtime: WorkerRuntime, event: Mapping[str, Any]
+) -> dict[str, Any]:
     started = time.monotonic()
     transfer_client = runtime.transfer_client_factory()
     with tempfile.TemporaryDirectory(prefix="ace-step-") as temporary_root:
         temporary_path = Path(temporary_root)
         source_path: Path | None = None
         if request.source is not None:
+            _report_progress(event, "source_download", 10)
             source_path = temporary_path / "source.mp3"
             transfer_client.download_source(request.source, source_path)
 
@@ -116,6 +120,7 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
         output_directory.mkdir(mode=0o700)
         params = _build_generation_params(runtime, request, source_path)
         config = _build_generation_config(runtime, request)
+        _report_progress(event, "generation", 20)
         result = runtime.generate_music(
             runtime.dit_handler,
             runtime.llm_handler,
@@ -123,6 +128,7 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
             config,
             save_dir=str(output_directory),
         )
+        _report_progress(event, "finalizing", 30)
         audio = _one_audio(result)
         lm_metadata = _lm_metadata_from_result(result)
         output_format = request.generation.output_format
@@ -140,6 +146,7 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
         )
         if output_path.suffix.lower().lstrip(".") != output_format:
             raise GenerationError("ACE-Step returned an unexpected output format")
+        _report_progress(event, "output_upload", 40)
         uploaded = transfer_client.upload_output(request.result_upload, output_path)
         metadata = _result_metadata(
             request,
@@ -159,6 +166,22 @@ def _handle_request(request: WorkerRequest, runtime: WorkerRuntime) -> dict[str,
             int((time.monotonic() - started) * 1000),
         )
         return metadata
+
+
+def _report_progress(event: Mapping[str, Any], phase: str, sequence: int) -> None:
+    """Publish advisory progress without changing the generation outcome."""
+
+    payload = {"kind": _PROGRESS_KIND, "phase": phase, "sequence": sequence}
+    try:
+        import runpod  # type: ignore[import-not-found]
+
+        runpod.serverless.progress_update(event, payload)
+    except Exception as exc:
+        LOGGER.warning(
+            "stage=progress phase=%s error_code=progress_update_failed exception_class=%s",
+            phase,
+            type(exc).__name__,
+        )
 
 
 def _build_generation_params(
@@ -440,6 +463,12 @@ def _result_metadata(
             "image_digest": image_digest,
             "gpu": runtime.gpu_name,
             "vram_bytes": runtime.gpu_vram_bytes,
+            "model_bundle": {
+                "repo": runtime.model_repo,
+                "revision": runtime.model_revision,
+                "tag": runtime.model_tag,
+                "manifest_sha256": runtime.model_manifest_sha256,
+            },
         },
     }
     _validate_result_metadata(result)

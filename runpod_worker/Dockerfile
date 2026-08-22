@@ -1,6 +1,6 @@
 # ACE-Step v0.1.8 Runpod Serverless Flex worker.
-# Model weights are external to this image and must be present in the endpoint
-# cached-model location or network volume before a worker starts.
+# Model weights are external to this image and must be present in the endpoint's
+# exact revision-pinned Hugging Face cached-model snapshot before startup.
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
@@ -16,9 +16,11 @@ ENV LANG=C.UTF-8 \
     TOKENIZERS_PARALLELISM=false \
     ACE_STEP_TAG=${ACE_STEP_TAG} \
     ACE_STEP_COMMIT=${ACE_STEP_COMMIT} \
-    ACE_WORKER_CHECKPOINTS_DIR=/runpod-volume/checkpoints \
+    ACE_WORKER_HF_CACHE_ROOT=/runpod-volume/huggingface-cache/hub \
     ACE_TRANSFER_ALLOWED_HOST= \
-    ACESTEP_DISABLE_TQDM=true
+    ACESTEP_DISABLE_TQDM=true \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -48,8 +50,5 @@ RUN git clone --quiet --depth 1 --branch "${ACE_STEP_TAG}" "${ACE_STEP_REPOSITOR
 
 WORKDIR /opt
 COPY runpod_worker /opt/runpod_worker
-
-RUN mkdir -p /runpod-volume/checkpoints \
-    && chmod 700 /runpod-volume/checkpoints
 
 CMD ["python", "-m", "runpod_worker.handler"]

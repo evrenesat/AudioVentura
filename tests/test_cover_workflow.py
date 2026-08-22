@@ -184,6 +184,12 @@ class _CoverRunpod:
                 "lm_model": "test-lm",
                 "image_digest": "sha256:" + "c" * 64,
                 "gpu": "test-gpu",
+                "model_bundle": {
+                    "repo": "evrenesat/audioventura-ace-step-v0.1.8",
+                    "revision": "6f196b2c116474c43a96fc8331ebcd2057e18eef",
+                    "tag": "av-v0.1.8-bundle-1",
+                    "manifest_sha256": "c" * 64,
+                },
             },
         }
         return RunpodStatusResult(
@@ -805,6 +811,12 @@ def test_cover_restart_polls_persisted_runpod_id_without_resubmission(settings) 
                             "lm_model": "test-lm",
                             "image_digest": "sha256:" + "c" * 64,
                             "gpu": "test-gpu",
+                            "model_bundle": {
+                                "repo": "evrenesat/audioventura-ace-step-v0.1.8",
+                                "revision": "6f196b2c116474c43a96fc8331ebcd2057e18eef",
+                                "tag": "av-v0.1.8-bundle-1",
+                                "manifest_sha256": "c" * 64,
+                            },
                         },
                     },
                 )

@@ -66,6 +66,16 @@ _NONTERMINAL_JOB_STATUSES = frozenset(JobStatus) - _TERMINAL_JOB_STATUSES
 _COVER_STAGING_STATUSES = frozenset({"awaiting_confirmation", "confirmed"})
 _COVER_STAGING_KEYS = frozenset({"status", "staged_at", "confirmed_at"})
 _MISSING = object()
+_PROGRESS_KIND = "audioventura_progress_v1"
+_PROGRESS_SEQUENCES = {
+    "cloud_wait": 0,
+    "worker_initializing": 1,
+    "worker_running": 5,
+    "source_download": 10,
+    "generation": 20,
+    "finalizing": 30,
+    "output_upload": 40,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -881,6 +891,45 @@ def set_variation_runpod_result(
             for output in output_records:
                 project_runpod_result_to_output(output, result)
     attempt.updated_at = _utc_timestamp(now)
+    session.flush()
+    return attempt
+
+
+def set_variation_progress(
+    session: Session,
+    attempt_id: int,
+    phase: str,
+    *,
+    sequence: int | None = None,
+    now: datetime | None = None,
+) -> VariationAttempt:
+    """Persist one bounded monotonic nonterminal progress envelope."""
+
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    if attempt.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        raise ValueError("terminal variation progress cannot be changed")
+    expected_sequence = _PROGRESS_SEQUENCES.get(phase)
+    if expected_sequence is None:
+        raise ValueError("variation progress phase is unsupported")
+    resolved_sequence = expected_sequence if sequence is None else sequence
+    if resolved_sequence != expected_sequence:
+        raise ValueError("variation progress sequence does not match its phase")
+    current = attempt.runpod_result_json
+    if isinstance(current, dict) and current.get("kind") == _PROGRESS_KIND:
+        current_sequence = current.get("sequence")
+        if isinstance(current_sequence, int) and not isinstance(current_sequence, bool):
+            if current_sequence > resolved_sequence:
+                return attempt
+    timestamp = _utc_timestamp(now)
+    attempt.runpod_result_json = {
+        "kind": _PROGRESS_KIND,
+        "phase": phase,
+        "sequence": resolved_sequence,
+        "observed_at": timestamp.isoformat(),
+    }
+    attempt.updated_at = timestamp
     session.flush()
     return attempt
 

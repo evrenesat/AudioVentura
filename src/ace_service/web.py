@@ -91,6 +91,15 @@ _STATUS_LABELS = {
     JobStatus.COMPLETED: "Completed",
     JobStatus.FAILED: "Failed",
 }
+_PHASE_LABELS = {
+    "cloud_wait": "Waiting for GPU/model cache",
+    "worker_initializing": "Starting GPU worker and loading model",
+    "worker_running": "Worker started",
+    "source_download": "Transferring source audio",
+    "generation": "Generating audio",
+    "finalizing": "Finalizing audio",
+    "output_upload": "Uploading result",
+}
 
 
 def capture_submission_quote(app: FastAPI, session: Any, job: Job) -> SubmissionQuote | None:
@@ -1063,6 +1072,21 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         target_duration = generation.get("duration_seconds", resolved.get("duration"))
     audio_cover_strength = generation.get("audio_cover_strength", job.cover_strength)
     cover_noise_strength = generation.get("cover_noise_strength")
+    phase: str | None = None
+    phase_observed_at: str | None = None
+    if job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        active_attempt = next(
+            (item for item in attempts if item.variation_index == (job.current_variation or 1)),
+            None,
+        )
+        progress = active_attempt.runpod_result_json if active_attempt is not None else None
+        if isinstance(progress, dict) and progress.get("kind") == "audioventura_progress_v1":
+            candidate_phase = progress.get("phase")
+            candidate_observed_at = progress.get("observed_at")
+            if isinstance(candidate_phase, str) and candidate_phase in _PHASE_LABELS:
+                phase = candidate_phase
+                if isinstance(candidate_observed_at, str) and len(candidate_observed_at) <= 64:
+                    phase_observed_at = candidate_observed_at
     view = {
         "job_id": job.id,
         "job_type": job.job_type.value,
@@ -1094,6 +1118,9 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         "started_at": _iso(job.started_at),
         "completed_at": _iso(job.completed_at),
         "elapsed_seconds": _elapsed(job),
+        "phase": phase,
+        "phase_label": _PHASE_LABELS.get(phase) if phase is not None else None,
+        "phase_observed_at": phase_observed_at,
         "detail_url": _route_path(request, "job_detail", job_id=job.id),
         "status_url": _route_path(request, "job_status", job_id=job.id),
         "confirm_url": _route_path(request, "confirm_cover", job_id=job.id),

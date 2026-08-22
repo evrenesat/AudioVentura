@@ -136,6 +136,15 @@ worker `job_id`; the strict worker schema validates every job ID as a UUID.
 The strict v1/v2 compatibility smokes are expanded into complete worker
 envelopes and validated end-to-end against the real worker parser
 (`runpod_worker.schemas.WorkerRequest`) before any execution window opens.
+
+The Runpod worker now loads checkpoints only from one revision-pinned Hugging
+Face cached-model snapshot. Production must provide `ACE_WORKER_MODEL_REPO`,
+the exact 40-hex `ACE_WORKER_MODEL_REVISION`, release tag, manifest SHA-256,
+and cache root; the worker validates the complete 25,253,688,079-byte manifest
+inventory before importing ACE-Step and has no network-volume checkpoint
+fallback. `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are image defaults.
+Nonterminal status polling exposes named evidence-backed phases and elapsed
+time, without presenting a completion percentage.
 Score-sheet export, import, and finalization all enforce exact current
 scoreable-sample-set and pair coverage: a sample or pair declared after export
 causes import and finalization to reject the stale sheet even after that

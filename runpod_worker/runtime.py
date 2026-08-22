@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import logging
 import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,8 +21,29 @@ DIT_MODEL = "acestep-v15-xl-turbo"
 LM_MODEL = "acestep-5Hz-lm-1.7B"
 EMBEDDING_MODEL = "Qwen3-Embedding-0.6B"
 VAE_MODEL = "vae"
-DEFAULT_CHECKPOINTS_DIR = "/runpod-volume/checkpoints"
+DEFAULT_HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
+MODEL_BUNDLE_ID = "audioventura-ace-step-v0.1.8"
+MODEL_BUNDLE_TOTAL_BYTES = 25_253_688_079
+MODEL_BUNDLE_MANIFEST = "bundle-manifest.json"
+MAX_MODEL_MANIFEST_BYTES = 1_048_576
+ACE_SOURCE_REPOSITORY = "https://github.com/ace-step/ACE-Step-1.5.git"
+ACE_SOURCE_TAG = "v0.1.8"
+ACE_SOURCE_COMMIT = "dce621408bee8c31b4fcf4811682eb9359e1bc94"
+MODEL_SOURCES = {
+    "ACE-Step/Ace-Step1.5": "19671f406d603126926c1b7e2adc169acbcade22",
+    "ACE-Step/acestep-v15-xl-turbo": "d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee",
+}
+REQUIRED_MODEL_DIRECTORIES = (
+    f"checkpoints/{EMBEDDING_MODEL}",
+    f"checkpoints/{LM_MODEL}",
+    f"checkpoints/{DIT_MODEL}",
+    f"checkpoints/{VAE_MODEL}",
+)
 _IMAGE_DIGEST_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}@)?sha256:[0-9a-f]{64}$")
+_MODEL_REPO_PART_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$")
+_MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_MODEL_TAG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class WorkerInitializationError(RuntimeError):
@@ -54,6 +78,10 @@ class WorkerRuntime:
     generate_music: Callable[..., Any]
     gpu_name: str
     gpu_vram_bytes: int
+    model_repo: str
+    model_revision: str
+    model_tag: str
+    model_manifest_sha256: str
     model_name: str = DIT_MODEL
     lm_model_name: str = LM_MODEL
     ace_tag: str = field(default_factory=lambda: os.environ.get("ACE_STEP_TAG", "v0.1.8"))
@@ -66,6 +94,10 @@ class WorkerRuntime:
     def __post_init__(self) -> None:
         validate_runtime_signatures(self.generation_params_type, self.generation_config_type)
         validate_worker_image_digest(self.worker_image_digest)
+        validate_model_repo(self.model_repo)
+        validate_model_revision(self.model_revision)
+        validate_model_tag(self.model_tag)
+        validate_model_manifest_sha256(self.model_manifest_sha256)
 
 
 _REQUIRED_GENERATION_PARAMS = frozenset(
@@ -137,6 +169,42 @@ def validate_worker_image_digest(value: Any) -> str:
     return value
 
 
+def validate_model_repo(value: Any) -> str:
+    """Require one unambiguous Hugging Face ``owner/repo`` identifier."""
+
+    if not isinstance(value, str) or value != value.strip() or value.count("/") != 1:
+        raise WorkerInitializationError("ACE_WORKER_MODEL_REPO must be an owner/repo identifier")
+    owner, repo = value.split("/", 1)
+    if not _MODEL_REPO_PART_RE.fullmatch(owner) or not _MODEL_REPO_PART_RE.fullmatch(repo):
+        raise WorkerInitializationError("ACE_WORKER_MODEL_REPO must be an owner/repo identifier")
+    if "--" in owner or "--" in repo or ".." in owner or ".." in repo:
+        raise WorkerInitializationError("ACE_WORKER_MODEL_REPO is ambiguous in the cache layout")
+    return value
+
+
+def validate_model_revision(value: Any) -> str:
+    if not isinstance(value, str) or not _MODEL_REVISION_RE.fullmatch(value):
+        raise WorkerInitializationError("ACE_WORKER_MODEL_REVISION must be 40 lowercase hex")
+    return value
+
+
+def validate_model_tag(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or not _MODEL_TAG_RE.fullmatch(value)
+        or ".." in value
+    ):
+        raise WorkerInitializationError("ACE_WORKER_MODEL_TAG is malformed")
+    return value
+
+
+def validate_model_manifest_sha256(value: Any) -> str:
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise WorkerInitializationError("ACE_WORKER_MODEL_MANIFEST_SHA256 must be 64 lowercase hex")
+    return value
+
+
 def _validate_callable_signature(
     callable_type: type[Any], required: frozenset[str], label: str
 ) -> None:
@@ -161,16 +229,28 @@ def _validate_callable_signature(
         )
 
 
-def resolve_checkpoint_paths(checkpoints_dir: str | Path | None = None) -> CheckpointPaths:
-    """Resolve and fail closed when any pinned checkpoint directory is absent."""
+def resolve_checkpoint_paths(cache_root: str | Path | None = None) -> CheckpointPaths:
+    """Validate and resolve only the configured immutable cached-model snapshot."""
 
-    root = (
-        Path(
-            checkpoints_dir or os.environ.get("ACE_WORKER_CHECKPOINTS_DIR", DEFAULT_CHECKPOINTS_DIR)
-        )
-        .expanduser()
-        .resolve()
+    model_repo = validate_model_repo(os.environ.get("ACE_WORKER_MODEL_REPO"))
+    revision = validate_model_revision(os.environ.get("ACE_WORKER_MODEL_REVISION"))
+    validate_model_tag(os.environ.get("ACE_WORKER_MODEL_TAG"))
+    manifest_sha256 = validate_model_manifest_sha256(
+        os.environ.get("ACE_WORKER_MODEL_MANIFEST_SHA256")
     )
+    cache = Path(
+        cache_root or os.environ.get("ACE_WORKER_HF_CACHE_ROOT", DEFAULT_HF_CACHE_ROOT)
+    ).expanduser()
+    if not cache.is_absolute():
+        raise WorkerInitializationError("ACE_WORKER_HF_CACHE_ROOT must be absolute")
+    cache = cache.resolve()
+    owner, repo = model_repo.split("/", 1)
+    model_cache_root = cache / f"models--{owner}--{repo}"
+    snapshot = model_cache_root / "snapshots" / revision
+    if snapshot.is_symlink() or not snapshot.is_dir():
+        raise WorkerInitializationError("required cached model revision is missing")
+    _validate_model_manifest(snapshot, model_cache_root, manifest_sha256)
+    root = snapshot / "checkpoints"
     paths = CheckpointPaths(
         root=root,
         dit=root / DIT_MODEL,
@@ -179,9 +259,7 @@ def resolve_checkpoint_paths(checkpoints_dir: str | Path | None = None) -> Check
         vae=root / VAE_MODEL,
     )
     missing = [
-        str(path)
-        for path in (paths.dit, paths.lm, paths.embedding, paths.vae)
-        if not _has_weights(path)
+        str(path) for path in (paths.dit, paths.lm, paths.embedding, paths.vae) if not path.is_dir()
     ]
     if missing:
         raise WorkerInitializationError(
@@ -190,7 +268,7 @@ def resolve_checkpoint_paths(checkpoints_dir: str | Path | None = None) -> Check
     return paths
 
 
-def initialize_runtime(checkpoints_dir: str | Path | None = None) -> WorkerRuntime:
+def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
     """Initialize ACE-Step once before Runpod starts accepting jobs."""
 
     image_digest = validate_worker_image_digest(os.environ.get("ACE_WORKER_IMAGE_DIGEST"))
@@ -203,7 +281,7 @@ def initialize_runtime(checkpoints_dir: str | Path | None = None) -> WorkerRunti
     vram_bytes = int(device_properties.total_memory)
     LOGGER.info("CUDA worker GPU=%s vram_bytes=%d", device_name, vram_bytes)
 
-    paths = resolve_checkpoint_paths(checkpoints_dir)
+    paths = resolve_checkpoint_paths(cache_root)
     os.environ["ACESTEP_CHECKPOINTS_DIR"] = str(paths.root)
 
     try:
@@ -255,17 +333,190 @@ def initialize_runtime(checkpoints_dir: str | Path | None = None) -> WorkerRunti
         generate_music=generate_music,
         gpu_name=device_name,
         gpu_vram_bytes=vram_bytes,
+        model_repo=validate_model_repo(os.environ.get("ACE_WORKER_MODEL_REPO")),
+        model_revision=validate_model_revision(os.environ.get("ACE_WORKER_MODEL_REVISION")),
+        model_tag=validate_model_tag(os.environ.get("ACE_WORKER_MODEL_TAG")),
+        model_manifest_sha256=validate_model_manifest_sha256(
+            os.environ.get("ACE_WORKER_MODEL_MANIFEST_SHA256")
+        ),
         ace_tag=os.environ.get("ACE_STEP_TAG", "v0.1.8"),
         ace_commit=os.environ.get("ACE_STEP_COMMIT", ""),
         worker_image_digest=image_digest,
     )
 
 
-def _has_weights(path: Path) -> bool:
-    if not path.is_dir():
-        return False
-    return any(
-        candidate.is_file()
-        and candidate.suffix.lower() in {".safetensors", ".bin", ".pt", ".index"}
-        for candidate in path.rglob("*")
-    )
+def _validate_model_manifest(snapshot: Path, model_cache_root: Path, expected_sha256: str) -> None:
+    manifest_path = snapshot / MODEL_BUNDLE_MANIFEST
+    manifest_bytes = _read_cache_file(manifest_path, model_cache_root, MAX_MODEL_MANIFEST_BYTES)
+    if hashlib.sha256(manifest_bytes).hexdigest() != expected_sha256:
+        raise WorkerInitializationError("cached model manifest digest does not match")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkerInitializationError("cached model manifest is malformed") from exc
+    if not isinstance(manifest, dict):
+        raise WorkerInitializationError("cached model manifest is malformed")
+    required_keys = {
+        "schema_version",
+        "bundle_id",
+        "ace_step_source",
+        "sources",
+        "components",
+        "files",
+        "total_bytes",
+        "required_directories",
+        "created_at",
+    }
+    if set(manifest) != required_keys:
+        raise WorkerInitializationError("cached model manifest fields do not match the contract")
+    if manifest["schema_version"] != 1 or manifest["bundle_id"] != MODEL_BUNDLE_ID:
+        raise WorkerInitializationError("cached model manifest identity does not match")
+    if manifest["ace_step_source"] != {
+        "repository": ACE_SOURCE_REPOSITORY,
+        "tag": ACE_SOURCE_TAG,
+        "commit": ACE_SOURCE_COMMIT,
+    }:
+        raise WorkerInitializationError("cached model ACE-Step source identity does not match")
+    _validate_manifest_sources(manifest["sources"])
+    _validate_manifest_components(manifest["components"])
+    if manifest["required_directories"] != list(REQUIRED_MODEL_DIRECTORIES):
+        raise WorkerInitializationError("cached model required directories do not match")
+    if manifest["total_bytes"] != MODEL_BUNDLE_TOTAL_BYTES:
+        raise WorkerInitializationError("cached model total bytes do not match")
+    created_at = manifest["created_at"]
+    if not isinstance(created_at, str) or not created_at.endswith("Z"):
+        raise WorkerInitializationError("cached model creation timestamp is malformed")
+    try:
+        created_at_value = datetime.fromisoformat(created_at.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise WorkerInitializationError("cached model creation timestamp is malformed") from exc
+    if created_at_value.tzinfo is None or created_at_value.astimezone(UTC) != created_at_value:
+        raise WorkerInitializationError("cached model creation timestamp is malformed")
+    expected_files = _validate_manifest_files(manifest["files"])
+    actual_files = _inventory_checkpoint_files(snapshot, model_cache_root)
+    if actual_files != expected_files:
+        raise WorkerInitializationError("cached model file inventory does not match")
+    if sum(actual_files.values()) != MODEL_BUNDLE_TOTAL_BYTES:
+        raise WorkerInitializationError("cached model file sizes do not match total bytes")
+
+
+def _validate_manifest_sources(value: Any) -> None:
+    if not isinstance(value, list) or len(value) != len(MODEL_SOURCES):
+        raise WorkerInitializationError("cached model sources do not match")
+    parsed: dict[str, str] = {}
+    for source in value:
+        if not isinstance(source, dict) or set(source) != {"repo_id", "revision"}:
+            raise WorkerInitializationError("cached model source entry is malformed")
+        repo_id = source.get("repo_id")
+        revision = source.get("revision")
+        if not isinstance(repo_id, str) or not isinstance(revision, str):
+            raise WorkerInitializationError("cached model source entry is malformed")
+        parsed[repo_id] = revision
+    if parsed != MODEL_SOURCES:
+        raise WorkerInitializationError("cached model sources do not match")
+
+
+def _validate_manifest_components(value: Any) -> None:
+    expected = {
+        "embedding": (REQUIRED_MODEL_DIRECTORIES[0], "ACE-Step/Ace-Step1.5", EMBEDDING_MODEL),
+        "language_model": (REQUIRED_MODEL_DIRECTORIES[1], "ACE-Step/Ace-Step1.5", LM_MODEL),
+        "dit": (REQUIRED_MODEL_DIRECTORIES[2], "ACE-Step/acestep-v15-xl-turbo", "."),
+        "vae": (REQUIRED_MODEL_DIRECTORIES[3], "ACE-Step/Ace-Step1.5", VAE_MODEL),
+    }
+    if not isinstance(value, list) or len(value) != len(expected):
+        raise WorkerInitializationError("cached model components do not match")
+    parsed: dict[str, tuple[str, str, str]] = {}
+    keys = {
+        "name",
+        "destination_directory",
+        "source_repo_id",
+        "source_revision",
+        "source_path",
+    }
+    for component in value:
+        if not isinstance(component, dict) or set(component) != keys:
+            raise WorkerInitializationError("cached model component entry is malformed")
+        name = component.get("name")
+        repo_id = component.get("source_repo_id")
+        revision = component.get("source_revision")
+        destination = component.get("destination_directory")
+        source_path = component.get("source_path")
+        if not all(
+            isinstance(item, str) for item in (name, repo_id, revision, destination, source_path)
+        ):
+            raise WorkerInitializationError("cached model component entry is malformed")
+        if MODEL_SOURCES.get(repo_id) != revision:
+            raise WorkerInitializationError("cached model component source does not match")
+        parsed[name] = (destination, repo_id, source_path)
+    if parsed != expected:
+        raise WorkerInitializationError("cached model components do not match")
+
+
+def _validate_manifest_files(value: Any) -> dict[str, int]:
+    if not isinstance(value, list) or not value:
+        raise WorkerInitializationError("cached model file inventory is malformed")
+    result: dict[str, int] = {}
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"path", "size", "object_identity"}:
+            raise WorkerInitializationError("cached model file entry is malformed")
+        path = entry.get("path")
+        size = entry.get("size")
+        identity = entry.get("object_identity")
+        if (
+            not isinstance(path, str)
+            or not path.startswith("checkpoints/")
+            or path.startswith("/")
+            or "\\" in path
+            or ".." in Path(path).parts
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size <= 0
+            or not isinstance(identity, str)
+            or not 1 <= len(identity) <= 512
+            or not identity.startswith(("lfs-sha256:", "xet:", "git-blob:"))
+        ):
+            raise WorkerInitializationError("cached model file entry is malformed")
+        if path in result:
+            raise WorkerInitializationError("cached model file inventory contains duplicates")
+        result[path] = size
+    return result
+
+
+def _inventory_checkpoint_files(snapshot: Path, model_cache_root: Path) -> dict[str, int]:
+    checkpoints = snapshot / "checkpoints"
+    if checkpoints.is_symlink() or not checkpoints.is_dir():
+        raise WorkerInitializationError("cached model checkpoints directory is missing")
+    result: dict[str, int] = {}
+    for directory, child_directories, filenames in os.walk(checkpoints, followlinks=False):
+        directory_path = Path(directory)
+        for child in child_directories:
+            if (directory_path / child).is_symlink():
+                raise WorkerInitializationError("cached model contains a directory symlink")
+        for filename in filenames:
+            candidate = directory_path / filename
+            relative = candidate.relative_to(snapshot).as_posix()
+            result[relative] = _cache_file_size(candidate, model_cache_root)
+    return result
+
+
+def _cache_file_size(path: Path, model_cache_root: Path) -> int:
+    try:
+        resolved_root = model_cache_root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(resolved_root) or not resolved.is_file():
+            raise WorkerInitializationError("cached model file escapes its model cache")
+        return resolved.stat().st_size
+    except WorkerInitializationError:
+        raise
+    except OSError as exc:
+        raise WorkerInitializationError("cached model contains a broken file link") from exc
+
+
+def _read_cache_file(path: Path, model_cache_root: Path, maximum_bytes: int) -> bytes:
+    size = _cache_file_size(path, model_cache_root)
+    if size > maximum_bytes:
+        raise WorkerInitializationError("cached model manifest is too large")
+    try:
+        return path.resolve(strict=True).read_bytes()
+    except OSError as exc:
+        raise WorkerInitializationError("cached model contains a broken file link") from exc

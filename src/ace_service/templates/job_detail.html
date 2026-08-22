@@ -5,7 +5,7 @@
   <p class="eyebrow">{{ job.job_type_label }}</p>
   <h1>{% if job.source_title %}{{ job.source_title }}{% else %}{{ job.prompt or 'Untitled job' }}{% endif %}</h1>
   {% if job.project_url %}<p class="muted">Project: <a href="{{ job.project_url }}">{{ job.project_title }}</a></p>{% endif %}
-  <div class="detail-status"><span id="job-status" class="status status-{{ job.status }}">{{ job.status_label }}</span><span id="job-progress">{{ job.completed_variations }}/{{ job.variation_count }} variations</span></div>
+  <div class="detail-status"><span id="job-status" class="status status-{{ job.status }}">{{ job.status_label }}</span><span id="job-progress">{{ job.completed_variations }}/{{ job.variation_count }} variations</span><span id="job-phase"{% if not job.phase %} hidden{% endif %}>{% if job.phase %}{{ job.phase_label }} · {{ job.elapsed_seconds }} seconds elapsed{% endif %}</span></div>
   {% if job.continue_url %}<p><a class="button secondary" href="{{ job.continue_url }}">Continue this version</a></p>{% endif %}
   {% if job.error %}<div class="banner error" id="job-error">{{ job.error }}</div>{% endif %}
   {% if job.status == 'staging' and job.cover_confirmation_status == 'awaiting_confirmation' %}

@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 from pathlib import Path
 
 import pytest
 
 from runpod_worker.runtime import (
+    ACE_SOURCE_COMMIT,
+    ACE_SOURCE_REPOSITORY,
+    ACE_SOURCE_TAG,
+    MODEL_BUNDLE_ID,
+    MODEL_BUNDLE_TOTAL_BYTES,
+    MODEL_SOURCES,
+    REQUIRED_MODEL_DIRECTORIES,
     WorkerInitializationError,
     WorkerRuntime,
     initialize_runtime,
@@ -15,6 +24,10 @@ from runpod_worker.runtime import (
 )
 
 TEST_IMAGE_DIGEST = "sha256:" + "b" * 64
+TEST_MODEL_REPO = "evrenesat/audioventura-ace-step-v0.1.8"
+TEST_MODEL_REVISION = "6f196b2c116474c43a96fc8331ebcd2057e18eef"
+TEST_MODEL_TAG = "av-v0.1.8-bundle-1"
+TEST_MANIFEST_SHA256 = "c" * 64
 
 
 class CompatibleParams:
@@ -98,22 +111,222 @@ def test_handler_dependency_chain_imports_as_package() -> None:
     assert handler_module.__package__ == "runpod_worker"
 
 
-def test_checkpoint_resolution_fails_closed_when_weights_are_missing(tmp_path: Path) -> None:
-    with pytest.raises(WorkerInitializationError, match="required ACE-Step checkpoints"):
-        resolve_checkpoint_paths(tmp_path)
+def test_worker_image_sets_offline_mode_before_runtime_command() -> None:
+    dockerfile = Path("runpod_worker/Dockerfile").read_text()
+    command_offset = dockerfile.index('CMD ["python", "-m", "runpod_worker.handler"]')
+    assert dockerfile.index("HF_HUB_OFFLINE=1") < command_offset
+    assert dockerfile.index("TRANSFORMERS_OFFLINE=1") < command_offset
+    assert "ACE_WORKER_CHECKPOINTS_DIR" not in dockerfile
+    assert "/runpod-volume/checkpoints" not in dockerfile
 
 
-def test_checkpoint_resolution_accepts_all_required_components(tmp_path: Path) -> None:
-    for component in ("acestep-v15-xl-turbo", "acestep-5Hz-lm-1.7B", "Qwen3-Embedding-0.6B", "vae"):
-        component_path = tmp_path / component
-        component_path.mkdir()
-        (component_path / "model.safetensors").write_bytes(b"test")
+def _manifest(files: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "bundle_id": MODEL_BUNDLE_ID,
+        "ace_step_source": {
+            "repository": ACE_SOURCE_REPOSITORY,
+            "tag": ACE_SOURCE_TAG,
+            "commit": ACE_SOURCE_COMMIT,
+        },
+        "sources": [
+            {"repo_id": repo_id, "revision": revision}
+            for repo_id, revision in MODEL_SOURCES.items()
+        ],
+        "components": [
+            {
+                "name": "embedding",
+                "destination_directory": "checkpoints/Qwen3-Embedding-0.6B",
+                "source_repo_id": "ACE-Step/Ace-Step1.5",
+                "source_revision": MODEL_SOURCES["ACE-Step/Ace-Step1.5"],
+                "source_path": "Qwen3-Embedding-0.6B",
+            },
+            {
+                "name": "language_model",
+                "destination_directory": "checkpoints/acestep-5Hz-lm-1.7B",
+                "source_repo_id": "ACE-Step/Ace-Step1.5",
+                "source_revision": MODEL_SOURCES["ACE-Step/Ace-Step1.5"],
+                "source_path": "acestep-5Hz-lm-1.7B",
+            },
+            {
+                "name": "dit",
+                "destination_directory": "checkpoints/acestep-v15-xl-turbo",
+                "source_repo_id": "ACE-Step/acestep-v15-xl-turbo",
+                "source_revision": MODEL_SOURCES["ACE-Step/acestep-v15-xl-turbo"],
+                "source_path": ".",
+            },
+            {
+                "name": "vae",
+                "destination_directory": "checkpoints/vae",
+                "source_repo_id": "ACE-Step/Ace-Step1.5",
+                "source_revision": MODEL_SOURCES["ACE-Step/Ace-Step1.5"],
+                "source_path": "vae",
+            },
+        ],
+        "files": files,
+        "total_bytes": MODEL_BUNDLE_TOTAL_BYTES,
+        "required_directories": list(REQUIRED_MODEL_DIRECTORIES),
+        "created_at": "2026-08-22T12:00:00Z",
+    }
+
+
+def _cached_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[Path, dict[str, object]]:
+    model_root = tmp_path / "models--evrenesat--audioventura-ace-step-v0.1.8"
+    snapshot = model_root / "snapshots" / TEST_MODEL_REVISION
+    sizes = [1, 1, 1, MODEL_BUNDLE_TOTAL_BYTES - 3]
+    files: list[dict[str, object]] = []
+    for directory, size in zip(REQUIRED_MODEL_DIRECTORIES, sizes, strict=True):
+        path = snapshot / directory / "model.safetensors"
+        path.parent.mkdir(parents=True)
+        with path.open("wb") as checkpoint:
+            checkpoint.truncate(size)
+        files.append(
+            {
+                "path": f"{directory}/model.safetensors",
+                "size": size,
+                "object_identity": f"lfs-sha256:{'a' * 64}",
+            }
+        )
+    manifest = _manifest(files)
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    (snapshot / "bundle-manifest.json").write_bytes(manifest_bytes)
+    monkeypatch.setenv("ACE_WORKER_MODEL_REPO", TEST_MODEL_REPO)
+    monkeypatch.setenv("ACE_WORKER_MODEL_REVISION", TEST_MODEL_REVISION)
+    monkeypatch.setenv("ACE_WORKER_MODEL_TAG", TEST_MODEL_TAG)
+    monkeypatch.setenv(
+        "ACE_WORKER_MODEL_MANIFEST_SHA256", hashlib.sha256(manifest_bytes).hexdigest()
+    )
+    return snapshot, manifest
+
+
+def _rewrite_manifest(
+    monkeypatch: pytest.MonkeyPatch, snapshot: Path, manifest: dict[str, object]
+) -> None:
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    (snapshot / "bundle-manifest.json").write_bytes(manifest_bytes)
+    monkeypatch.setenv(
+        "ACE_WORKER_MODEL_MANIFEST_SHA256", hashlib.sha256(manifest_bytes).hexdigest()
+    )
+
+
+def test_checkpoint_resolution_accepts_exact_cached_revision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot, _ = _cached_bundle(monkeypatch, tmp_path)
 
     paths = resolve_checkpoint_paths(tmp_path)
 
-    assert paths.root == tmp_path.resolve()
+    assert paths.root == snapshot / "checkpoints"
     assert paths.dit.name == "acestep-v15-xl-turbo"
     assert paths.lm.name == "acestep-5Hz-lm-1.7B"
+
+
+def test_checkpoint_resolution_rejects_missing_revision_even_with_another_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _cached_bundle(monkeypatch, tmp_path)
+    monkeypatch.setenv("ACE_WORKER_MODEL_REVISION", "f" * 40)
+    with pytest.raises(WorkerInitializationError, match="revision is missing"):
+        resolve_checkpoint_paths(tmp_path)
+
+
+def test_checkpoint_resolution_does_not_follow_mutable_ref(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot, _ = _cached_bundle(monkeypatch, tmp_path)
+    refs = snapshot.parent.parent / "refs"
+    refs.mkdir()
+    (refs / "main").write_text(TEST_MODEL_REVISION)
+    monkeypatch.setenv("ACE_WORKER_MODEL_REVISION", "f" * 40)
+    with pytest.raises(WorkerInitializationError, match="revision is missing"):
+        resolve_checkpoint_paths(tmp_path)
+
+
+@pytest.mark.parametrize("case", ["missing", "oversized", "malformed", "wrong_sha"])
+def test_checkpoint_resolution_rejects_invalid_manifest(
+    case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot, _ = _cached_bundle(monkeypatch, tmp_path)
+    path = snapshot / "bundle-manifest.json"
+    if case == "missing":
+        path.unlink()
+    elif case == "oversized":
+        path.write_bytes(b"x" * (1_048_576 + 1))
+    elif case == "malformed":
+        path.write_bytes(b"{")
+        monkeypatch.setenv("ACE_WORKER_MODEL_MANIFEST_SHA256", hashlib.sha256(b"{").hexdigest())
+    else:
+        monkeypatch.setenv("ACE_WORKER_MODEL_MANIFEST_SHA256", "f" * 64)
+    with pytest.raises(WorkerInitializationError):
+        resolve_checkpoint_paths(tmp_path)
+
+
+@pytest.mark.parametrize("case", ["extra_file", "wrong_size", "traversal", "missing_component"])
+def test_checkpoint_resolution_rejects_inventory_drift(
+    case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot, manifest = _cached_bundle(monkeypatch, tmp_path)
+    files = manifest["files"]
+    assert isinstance(files, list)
+    if case == "extra_file":
+        (snapshot / "checkpoints" / "vae" / "extra.bin").write_bytes(b"x")
+    elif case == "wrong_size":
+        first = files[0]
+        assert isinstance(first, dict)
+        first["size"] = 2
+        _rewrite_manifest(monkeypatch, snapshot, manifest)
+    elif case == "traversal":
+        first = files[0]
+        assert isinstance(first, dict)
+        first["path"] = "checkpoints/../escape.bin"
+        _rewrite_manifest(monkeypatch, snapshot, manifest)
+    else:
+        directories = manifest["required_directories"]
+        assert isinstance(directories, list)
+        directories.pop()
+        _rewrite_manifest(monkeypatch, snapshot, manifest)
+    with pytest.raises(WorkerInitializationError):
+        resolve_checkpoint_paths(tmp_path)
+
+
+def test_checkpoint_resolution_rejects_broken_and_escaping_symlinks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot, _ = _cached_bundle(monkeypatch, tmp_path)
+    candidate = snapshot / "checkpoints" / "vae" / "model.safetensors"
+    candidate.unlink()
+    candidate.symlink_to(tmp_path / "missing")
+    with pytest.raises(WorkerInitializationError, match="broken"):
+        resolve_checkpoint_paths(tmp_path)
+
+    outside = tmp_path.parent / "outside-model.bin"
+    outside.write_bytes(b"x")
+    candidate.unlink()
+    candidate.symlink_to(outside)
+    with pytest.raises(WorkerInitializationError, match="escapes"):
+        resolve_checkpoint_paths(tmp_path)
+
+
+def test_legacy_network_volume_layout_is_not_a_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    volume = tmp_path / "checkpoints"
+    for directory in REQUIRED_MODEL_DIRECTORIES:
+        path = volume / Path(directory).name
+        path.mkdir(parents=True)
+        (path / "model.safetensors").write_bytes(b"x")
+    monkeypatch.setenv("ACE_WORKER_MODEL_REPO", TEST_MODEL_REPO)
+    monkeypatch.setenv("ACE_WORKER_MODEL_REVISION", TEST_MODEL_REVISION)
+    monkeypatch.setenv("ACE_WORKER_MODEL_TAG", TEST_MODEL_TAG)
+    monkeypatch.setenv("ACE_WORKER_MODEL_MANIFEST_SHA256", TEST_MANIFEST_SHA256)
+    with pytest.raises(WorkerInitializationError, match="revision is missing"):
+        resolve_checkpoint_paths(tmp_path)
 
 
 def test_incompatible_ace_constructor_is_rejected_before_handling() -> None:
@@ -165,6 +378,10 @@ def _make_runtime(image_digest: str) -> WorkerRuntime:
         generate_music=_generate_music,
         gpu_name="test-gpu",
         gpu_vram_bytes=1,
+        model_repo=TEST_MODEL_REPO,
+        model_revision=TEST_MODEL_REVISION,
+        model_tag=TEST_MODEL_TAG,
+        model_manifest_sha256=TEST_MANIFEST_SHA256,
         worker_image_digest=image_digest,
     )
 

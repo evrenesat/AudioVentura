@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import re
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -43,11 +44,17 @@ from ace_service.repository import (
     recover_uncertain_submissions,
     recover_uncertain_variation_submissions,
     revoke_active_transfers,
+    set_variation_progress,
     set_variation_runpod_result,
     transition_job,
     transition_variation_attempt,
 )
-from ace_service.runpod_client import RunpodState, RunpodStatusResult
+from ace_service.runpod_client import (
+    RunpodHealth,
+    RunpodState,
+    RunpodStatusResult,
+    parse_worker_counts,
+)
 from ace_service.schemas import (
     LEGACY_WORKER_SCHEMA_VERSION,
     WORKER_SCHEMA_VERSION,
@@ -60,6 +67,13 @@ from ace_service.state import ControllerLock
 from ace_service.transfers import issue_transfer_url
 
 LOGGER = logging.getLogger(__name__)
+_MODEL_REPO_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?/"
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$"
+)
+_MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_MODEL_TAG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
+_MODEL_MANIFEST_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RunpodWorkerClient(Protocol):
@@ -68,6 +82,8 @@ class RunpodWorkerClient(Protocol):
     ) -> str: ...
 
     async def status(self, runpod_job_id: str) -> RunpodStatusResult: ...
+
+    async def health(self) -> RunpodHealth: ...
 
 
 PayloadBuilder = Callable[[Job, VariationAttempt], Mapping[str, Any]]
@@ -398,15 +414,51 @@ class ControllerWorker:
             extra={"component": "controller"},
         )
 
+        queued_phase: str | None = None
+        if result.category is RunpodState.CLOUD_QUEUED:
+            queued_phase = "cloud_wait"
+            try:
+                counts = parse_worker_counts(await self.runpod_client.health())
+                if counts.initializing > 0:
+                    queued_phase = "worker_initializing"
+                if counts.unhealthy > 0:
+                    LOGGER.warning(
+                        "job=%s stage=poll component=controller "
+                        "error_code=runpod_workers_unhealthy count=%d",
+                        job_id,
+                        counts.unhealthy,
+                        extra={"component": "controller"},
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning(
+                    "job=%s stage=poll component=controller "
+                    "error_code=runpod_health_unavailable exception_class=%s",
+                    job_id,
+                    type(exc).__name__,
+                    extra={"component": "controller"},
+                )
+
         with self.session_factory() as session:
             attempt = get_variation_attempt(session, job_id, variation_index)
             job = get_job(session, job_id)
             if attempt is None or job is None:
                 raise ValueError("polled job no longer has a durable variation attempt")
             if result.category is RunpodState.CLOUD_QUEUED:
+                set_variation_progress(session, attempt.id, queued_phase or "cloud_wait")
                 session.commit()
                 return
             if result.category is RunpodState.GENERATING:
+                if result.progress is None:
+                    set_variation_progress(session, attempt.id, "worker_running")
+                else:
+                    set_variation_progress(
+                        session,
+                        attempt.id,
+                        str(result.progress["phase"]),
+                        sequence=int(result.progress["sequence"]),
+                    )
                 transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
                 if job.status is JobStatus.CLOUD_QUEUED:
                     transition_job(session, job.id, JobStatus.GENERATING)
@@ -1129,6 +1181,30 @@ def _validate_completion_metadata(
         value = worker.get(field_name)
         if not isinstance(value, str) or not value.strip() or len(value) > 512:
             raise ValueError(f"worker completion is missing worker {field_name}")
+    model_bundle = worker.get("model_bundle")
+    if not isinstance(model_bundle, Mapping) or set(model_bundle) != {
+        "repo",
+        "revision",
+        "tag",
+        "manifest_sha256",
+    }:
+        raise ValueError("worker completion is missing model bundle identity")
+    if not isinstance(model_bundle.get("repo"), str) or not _MODEL_REPO_RE.fullmatch(
+        model_bundle["repo"]
+    ):
+        raise ValueError("worker completion model bundle repo is malformed")
+    if not isinstance(model_bundle.get("revision"), str) or not _MODEL_REVISION_RE.fullmatch(
+        model_bundle["revision"]
+    ):
+        raise ValueError("worker completion model bundle revision is malformed")
+    if not isinstance(model_bundle.get("tag"), str) or not _MODEL_TAG_RE.fullmatch(
+        model_bundle["tag"]
+    ):
+        raise ValueError("worker completion model bundle tag is malformed")
+    if not isinstance(
+        model_bundle.get("manifest_sha256"), str
+    ) or not _MODEL_MANIFEST_SHA256_RE.fullmatch(model_bundle["manifest_sha256"]):
+        raise ValueError("worker completion model bundle manifest digest is malformed")
     actual = output.get("duration_seconds")
     target = output.get("target_duration_seconds")
     if target is None:
