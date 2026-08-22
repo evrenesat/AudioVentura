@@ -395,7 +395,10 @@ def _validate_model_manifest(snapshot: Path, model_cache_root: Path, expected_sh
     expected_files = _validate_manifest_files(manifest["files"])
     actual_files = _inventory_checkpoint_files(snapshot, model_cache_root)
     if actual_files != expected_files:
-        raise WorkerInitializationError("cached model file inventory does not match")
+        raise WorkerInitializationError(
+            "cached model file inventory does not match: "
+            + _bounded_inventory_diff(expected_files, actual_files)
+        )
     if sum(actual_files.values()) != MODEL_BUNDLE_TOTAL_BYTES:
         raise WorkerInitializationError("cached model file sizes do not match total bytes")
 
@@ -414,6 +417,32 @@ def _validate_manifest_sources(value: Any) -> None:
         parsed[repo_id] = revision
     if parsed != MODEL_SOURCES:
         raise WorkerInitializationError("cached model sources do not match")
+
+
+def _bounded_inventory_diff(expected: dict[str, int], actual: dict[str, int]) -> str:
+    """Describe cache-shape drift without emitting an unbounded worker log."""
+
+    limit = 5
+    missing = sorted(expected.keys() - actual.keys())
+    unexpected = sorted(actual.keys() - expected.keys())
+    different = sorted(
+        path for path in expected.keys() & actual.keys() if expected[path] != actual[path]
+    )
+
+    def sample(paths: list[str]) -> str:
+        values = paths[:limit]
+        suffix = f",...(+{len(paths) - limit})" if len(paths) > limit else ""
+        return ",".join(values) + suffix
+
+    size_sample = different[:limit]
+    sizes = ",".join(f"{path}={expected[path]}!={actual[path]}" for path in size_sample)
+    if len(different) > limit:
+        sizes += f",...(+{len(different) - limit})"
+    return (
+        f"missing[{len(missing)}]={sample(missing)}; "
+        f"unexpected[{len(unexpected)}]={sample(unexpected)}; "
+        f"sizes[{len(different)}]={sizes}"
+    )
 
 
 def _validate_manifest_components(value: Any) -> None:

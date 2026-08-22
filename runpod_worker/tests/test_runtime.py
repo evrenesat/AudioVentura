@@ -291,8 +291,29 @@ def test_checkpoint_resolution_rejects_inventory_drift(
         assert isinstance(directories, list)
         directories.pop()
         _rewrite_manifest(monkeypatch, snapshot, manifest)
-    with pytest.raises(WorkerInitializationError):
+    with pytest.raises(WorkerInitializationError) as failure:
         resolve_checkpoint_paths(tmp_path)
+    if case == "extra_file":
+        assert "unexpected[1]=checkpoints/vae/extra.bin" in str(failure.value)
+    elif case == "wrong_size":
+        assert "sizes[1]=" in str(failure.value)
+
+
+def test_checkpoint_inventory_diagnostic_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot, _ = _cached_bundle(monkeypatch, tmp_path)
+    for index in range(20):
+        (snapshot / "checkpoints" / "vae" / f"extra-{index:02d}.bin").write_bytes(b"x")
+
+    with pytest.raises(WorkerInitializationError) as failure:
+        resolve_checkpoint_paths(tmp_path)
+
+    message = str(failure.value)
+    assert "unexpected[20]=" in message
+    assert "...(+15)" in message
+    assert "extra-05.bin" not in message
+    assert len(message) < 1024
 
 
 def test_checkpoint_resolution_rejects_broken_and_escaping_symlinks(
