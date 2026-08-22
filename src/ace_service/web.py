@@ -92,8 +92,8 @@ _STATUS_LABELS = {
     JobStatus.FAILED: "Failed",
 }
 _PHASE_LABELS = {
-    "cloud_wait": "Waiting for GPU/model cache",
-    "worker_initializing": "Starting GPU worker and loading model",
+    "cloud_wait": "Waiting for Runpod to allocate a GPU",
+    "worker_initializing": "Cloud worker initializing",
     "worker_running": "Worker started",
     "source_download": "Transferring source audio",
     "generation": "Generating audio",

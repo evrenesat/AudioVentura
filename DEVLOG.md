@@ -2,6 +2,11 @@
 
 ## 2026-08-22 (revision-pinned cached-model product runtime)
 
+- Tightened cold-start UI language to the provider evidence boundary. A
+  queued job with no worker now says Runpod has not allocated a GPU; once the
+  provider reports an initializing worker, the UI says only that the cloud
+  worker is initializing. Image download and model-cache preparation are not
+  attributed individually until Runpod exposes a worker and its logs.
 - Live worker logs proved bundle revision 1 contained two DiT Python files
   from the upstream model repository that differed from the pinned ACE-Step
   v0.1.8 runtime. ACE-Step therefore attempted an auto-sync into Runpod's

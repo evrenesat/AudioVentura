@@ -1720,27 +1720,36 @@ def test_status_polling_and_timing_metadata(web_app) -> None:
         assert "/static/status.js" in detail.text
 
 
-def test_status_polling_exposes_named_phase_and_elapsed_time(web_app) -> None:
+@pytest.mark.parametrize(
+    ("phase", "phase_label"),
+    [
+        ("cloud_wait", "Waiting for Runpod to allocate a GPU"),
+        ("worker_initializing", "Cloud worker initializing"),
+    ],
+)
+def test_status_polling_exposes_named_phase_and_elapsed_time(
+    web_app, phase: str, phase_label: str
+) -> None:
     app, factory, _ = web_app
     with factory() as session:
         job = create_job(session, job_type=JobType.ORIGINAL)
         attempt = create_variation_attempt(session, job_id=job.id, variation_index=1)
         transition_job(session, job.id, JobStatus.CLOUD_QUEUED)
         transition_variation_attempt(session, attempt.id, JobStatus.CLOUD_QUEUED)
-        set_variation_progress(session, attempt.id, "worker_initializing")
+        set_variation_progress(session, attempt.id, phase)
         session.commit()
         job_id = job.id
 
     with TestClient(app) as client:
         body = client.get(f"/jobs/{job_id}/status", auth=_auth(client)).json()
-        assert body["phase"] == "worker_initializing"
-        assert body["phase_label"] == "Starting GPU worker and loading model"
+        assert body["phase"] == phase
+        assert body["phase_label"] == phase_label
         assert body["phase_observed_at"].endswith("+00:00")
         assert body["elapsed_seconds"] >= 0
 
         detail = client.get(f"/jobs/{job_id}", auth=_auth(client))
         assert 'id="job-phase"' in detail.text
-        assert "Starting GPU worker and loading model" in detail.text
+        assert phase_label in detail.text
         static_status = client.get("/static/status.js", auth=_auth(client))
         assert "job.phase_label" in static_status.text
         assert "seconds elapsed" in static_status.text
