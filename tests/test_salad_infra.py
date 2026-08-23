@@ -123,6 +123,7 @@ class _FakeSaladApi:
             group = json.loads(json.dumps(json_body))
             group["container"].pop("registry_authentication")
             group["priority"] = group["container"].pop("priority")
+            group["autostart_policy"] = False
             self.groups.append(group)
             return group
         raise AssertionError(f"unexpected fake request: {method} {path}")

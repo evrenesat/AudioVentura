@@ -16,6 +16,9 @@
   group-level field; list summaries remain inspection-only.
 - Advanced the group identity to `audioventura-ace-step-v2` after Salad
   retained the deleted, failed first-create name; the shared queue is unchanged.
+- Excluded the consumed create-time autostart action from repeat drift checks;
+  Salad reads it back as false after activation while durable configuration
+  remains independently verified.
 
 ## 2026-08-23 (Salad live-contract and retry-safety corrections)
 

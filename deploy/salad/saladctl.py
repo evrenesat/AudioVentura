@@ -199,6 +199,7 @@ def _verifiable_group_state(desired: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize create-only fields to Salad's readable group representation."""
 
     value = copy.deepcopy(dict(desired))
+    value.pop("autostart_policy", None)
     container = value.get("container")
     if isinstance(container, dict):
         container.pop("registry_authentication", None)
