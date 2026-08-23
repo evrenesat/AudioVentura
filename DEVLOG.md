@@ -14,6 +14,9 @@
 - Runpod progress reporting now runs only for events carrying a Runpod job ID,
   so Salad execution does not emit advisory `KeyError` warnings. Duration
   rejection logs now include only bounded numeric actual/target evidence.
+- Published the corrected model-inclusive amd64 image as immutable digest
+  `sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53`;
+  its 20 compressed layers total 28,979,331,889 bytes, below the 35 GB gate.
 
 ## 2026-08-23 (Salad live pull-progress normalization)
 
