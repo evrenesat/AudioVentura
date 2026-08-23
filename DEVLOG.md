@@ -1,5 +1,20 @@
 # Development Log
 
+## 2026-08-23 (SaladCloud infrastructure gate)
+
+- Expanded p100's thin-provisioned root disk from 100 GiB to 180 GiB so the
+  immutable model-inclusive worker could be assembled without altering the
+  current controller, home-ingest, or Runpod deployments.
+- Added a Salad Job Queue HTTP wrapper around the existing isolated ACE-Step
+  handler, fail-closed model/readiness startup, a pinned Salad queue-worker
+  binary, scale-to-zero desired-state tooling, and focused offline tests.
+- Built and privately pushed the bundle-2 worker to GHCR. The amd64 manifest is
+  `sha256:e20eceb01df99d129bd379a545aaf80f02b54c5294a48ba0e4ca424c111e279a`;
+  its 20 compressed layers total 28,979,321,976 bytes, below SaladCloud's
+  documented 35 GB image limit. No Salad queue, container group, or paid job
+  was created because the organization/project slugs were not locally
+  discoverable.
+
 ## 2026-08-22 (revision-pinned cached-model product runtime)
 
 - Tightened cold-start UI language to the provider evidence boundary. A

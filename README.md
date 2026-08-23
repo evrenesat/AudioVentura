@@ -61,7 +61,10 @@ deployed worker image as an exact `sha256:<64 hex>` release identity; it is
 server configuration and never browser input.
 
 Operational deployment, Tailscale/proxy policy, cleanup, backups, and live
-acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md). The
+prepared SaladCloud image and scale-to-zero infrastructure boundary are
+documented separately in [docs/SALAD.md](docs/SALAD.md); the controller is not
+wired to that provider until the provider-abstraction migration lands.
 
 The detailed deployment and distributed-runtime handoff follows below.
 

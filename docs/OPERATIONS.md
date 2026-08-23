@@ -276,6 +276,15 @@ Runpod network volume; do not download weights per request. The network volume
 is an optional fallback when baking or caching the checkpoints in the worker
 image is not reliable in the selected region.
 
+## Prepared SaladCloud deployment
+
+SaladCloud is prepared as the first alternate inference backend, but it is not
+an active controller path until the provider-abstraction migration is deployed.
+The image, queue-worker wrapper, scale-to-zero desired state, immutable build
+receipt, provisioning command, and zero-at-rest checks are in
+`docs/SALAD.md`. Do not create paid Salad jobs from the infrastructure tooling;
+job submission remains controller-owned.
+
 ## Startup order and cleanup
 
 1. Mount the Hetzner data volume and verify its ownership/mode.

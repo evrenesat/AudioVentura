@@ -1,0 +1,29 @@
+{
+  "container_group": {
+    "display_name": "AudioVentura ACE-Step",
+    "name": "audioventura-ace-step-v1"
+  },
+  "gpu_names": [
+    "RTX 3090",
+    "RTX 3090 Ti",
+    "RTX A5000",
+    "RTX 4090",
+    "RTX 5090"
+  ],
+  "probes": {
+    "liveness_failure_threshold": 3,
+    "readiness_failure_threshold": 3,
+    "startup_failure_threshold": 180
+  },
+  "queue": {
+    "description": "AudioVentura ACE-Step inference jobs",
+    "display_name": "AudioVentura jobs",
+    "name": "audioventura-jobs"
+  },
+  "resources": {
+    "cpu": 8,
+    "memory_mb": 32768,
+    "shm_bytes": 8589934592,
+    "storage_bytes": 2147483648
+  }
+}
