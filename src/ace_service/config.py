@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .providers.salad_names import is_salad_resource_name
+
 _PLACEHOLDERS = frozenset(
     {
         "change-me",
@@ -23,7 +25,6 @@ _CREDENTIAL_FIELDS = (
     "service_password",
     "home_ingest_token",
 )
-_SALAD_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _WORKER_RUNTIME_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SERVICE_ROOT_PATH_RE = re.compile(r"^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)$")
 
@@ -393,7 +394,7 @@ class ServiceSettings(BaseSettings):
     @field_validator("salad_queue_name", "salad_container_group_name")
     @classmethod
     def validate_salad_names(cls, value: str) -> str:
-        if not _SALAD_NAME_RE.fullmatch(value):
+        if not is_salad_resource_name(value):
             raise ValueError("Salad resource names must be DNS-compatible")
         return value
 
@@ -477,9 +478,9 @@ class ServiceSettings(BaseSettings):
                 if value is None or not value.strip() or value.strip().lower() in _PLACEHOLDERS:
                     raise ValueError(f"{field_name} is required for Salad")
             assert self.salad_organization is not None and self.salad_project is not None
-            if not _SALAD_NAME_RE.fullmatch(
-                self.salad_organization
-            ) or not _SALAD_NAME_RE.fullmatch(self.salad_project):
+            if not is_salad_resource_name(self.salad_organization) or not is_salad_resource_name(
+                self.salad_project
+            ):
                 raise ValueError("Salad organization and project must be DNS-compatible")
 
         if self.eligible_gpu_ids and self.runpod_worker_runtime_identity is None:

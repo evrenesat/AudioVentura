@@ -64,6 +64,9 @@ def test_desired_state_is_scale_to_zero_and_secret_is_not_serialized_elsewhere(
     }
     assert group["container"]["image"] == image
     assert group["container"]["registry_authentication"]["basic"]["password"] == "token"
+    environment = group["container"]["environment_variables"]
+    assert environment["SALAD_QUEUE_WORKER_LOG_LEVEL"] == "info"
+    assert "SALAD_LOG_LEVEL" not in environment
 
 
 def test_desired_state_rejects_mutable_or_unrelated_image(tmp_path: Path) -> None:
@@ -76,3 +79,10 @@ def test_desired_state_rejects_mutable_or_unrelated_image(tmp_path: Path) -> Non
             ghcr_username="user",
             ghcr_token="token",
         )
+
+
+def test_worker_image_uses_official_queue_worker_log_variable() -> None:
+    dockerfile = Path("deploy/salad/Dockerfile").read_text(encoding="utf-8")
+
+    assert "SALAD_QUEUE_WORKER_LOG_LEVEL=info" in dockerfile
+    assert "SALAD_LOG_LEVEL=" not in dockerfile

@@ -96,7 +96,10 @@ def test_status_maps_finite_lifecycle(state: str, phase: ProviderPhase) -> None:
 
 
 def test_pending_status_uses_unambiguous_deployment_progress() -> None:
+    paths: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
         if request.url.path.endswith("/instances"):
             return httpx.Response(
                 200, json={"items": [{"state": "downloading", "pulling_progress": 63}]}
@@ -114,6 +117,47 @@ def test_pending_status_uses_unambiguous_deployment_progress() -> None:
         await provider._client.aclose()
 
     asyncio.run(scenario())
+    assert paths == [
+        f"/api/public/organizations/org/projects/project/queues/queue/jobs/{JOB_ID}",
+        "/api/public/organizations/org/projects/project/containers/group/instances",
+    ]
+
+
+def test_health_uses_container_path_and_current_queue_length() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/queues/queue"):
+            return httpx.Response(200, json={"current_queue_length": 7})
+        if request.url.path.endswith("/containers/group"):
+            return httpx.Response(200, json={"replicas": 1})
+        return httpx.Response(404)
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        health = await provider.health()
+        assert (health.queued_jobs, health.running_instances) == (7, 1)
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+    assert paths == [
+        "/api/public/organizations/org/projects/project/queues/queue",
+        "/api/public/organizations/org/projects/project/containers/group",
+    ]
+
+
+@pytest.mark.parametrize("name", ("a", "1a", "a-", "a" * 64))
+def test_provider_rejects_names_outside_salad_contract(name: str) -> None:
+    with pytest.raises(ValueError, match="queue name is invalid"):
+        SaladProvider("secret-key", "org", "project", name, "group")
+
+
+@pytest.mark.parametrize("name", ("ab", "a-1", "a" * 63))
+def test_provider_accepts_names_within_salad_contract(name: str) -> None:
+    provider = SaladProvider("secret-key", "org", "project", name, "group")
+
+    asyncio.run(provider.aclose())
 
 
 @pytest.mark.parametrize(

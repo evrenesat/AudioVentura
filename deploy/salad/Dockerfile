@@ -27,7 +27,7 @@ ENV ACE_WORKER_MODEL_REPO=evrenesat/audioventura-ace-step-v0.1.8 \
     ACE_TRANSFER_ALLOWED_HOST=player.evren.io \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    SALAD_LOG_LEVEL=info
+    SALAD_QUEUE_WORKER_LOG_LEVEL=info
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends curl \

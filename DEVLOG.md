@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-23 (Salad live-contract and retry-safety corrections)
+
+- Corrected Container Engine lookup paths, queue-depth parsing, official
+  resource-name boundaries, and the Job Queue Worker log-level variable.
+- Schema-v2 unseeded submissions now freeze a cryptographically derived seed
+  from the durable job, variation, and submission nonce so provider retries
+  produce the same output; explicit seed progression is unchanged.
+- Restored cover-source cleanup after validated local-output recovery commits.
+  All verification remained offline; no provider mutation or paid request ran.
+
 ## 2026-08-23 (durable inference providers)
 
 - Added provider-neutral capabilities, requests, refs, lifecycle, results,

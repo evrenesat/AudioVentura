@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
@@ -27,8 +26,8 @@ from .base import (
     ProviderStatus,
     RequestFeature,
 )
+from .salad_names import is_salad_resource_name
 
-_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_BODY = 1_048_576
 _FEATURES = frozenset(RequestFeature)
 
@@ -59,7 +58,7 @@ class SaladProvider:
             (queue, "queue"),
             (container_group, "container group"),
         ):
-            if not _NAME_RE.fullmatch(value):
+            if not is_salad_resource_name(value):
                 raise ValueError(f"Salad {label} name is invalid")
         if not api_key.strip():
             raise ValueError("Salad API key must not be empty")
@@ -209,7 +208,7 @@ class SaladProvider:
             return base
         try:
             raw = await self._request(
-                "GET", f"container-groups/{self.container_group}/instances", "instances"
+                "GET", f"containers/{self.container_group}/instances", "instances"
             )
             values = raw.get("items", raw.get("instances")) if isinstance(raw, Mapping) else raw
             if (
@@ -297,10 +296,10 @@ class SaladProvider:
             await self._request("GET", f"queues/{self.queue}", "health"), "health"
         )
         group = self._mapping(
-            await self._request("GET", f"container-groups/{self.container_group}", "health"),
+            await self._request("GET", f"containers/{self.container_group}", "health"),
             "health",
         )
-        queued = queue.get("pending_jobs", queue.get("pending_count"))
+        queued = queue.get("current_queue_length")
         replicas = group.get("replicas")
         return ProviderHealth(
             True,

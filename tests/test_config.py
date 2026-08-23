@@ -123,6 +123,30 @@ def test_salad_default_requires_scoped_credentials_and_accepts_runpod_as_seconda
         ServiceSettings(**kwargs)
 
 
+@pytest.mark.parametrize("name", ("a", "1a", "a-", "a" * 64))
+@pytest.mark.parametrize("field_name", ("salad_queue_name", "salad_container_group_name"))
+def test_salad_resource_names_enforce_official_boundaries(
+    field_name: str, name: str, tmp_path: Path
+) -> None:
+    kwargs = _settings_kwargs(tmp_path)
+    kwargs[field_name] = name
+
+    with pytest.raises(ValidationError, match="DNS-compatible"):
+        ServiceSettings(**kwargs)
+
+
+@pytest.mark.parametrize("name", ("ab", "a-1", "a" * 63))
+def test_salad_resource_names_accept_official_boundaries(name: str, tmp_path: Path) -> None:
+    settings = ServiceSettings(
+        **_settings_kwargs(tmp_path),
+        salad_queue_name=name,
+        salad_container_group_name=name,
+    )
+
+    assert settings.salad_queue_name == name
+    assert settings.salad_container_group_name == name
+
+
 def test_generic_timeout_accepts_runpod_environment_alias(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

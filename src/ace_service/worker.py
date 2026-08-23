@@ -46,6 +46,7 @@ from ace_service.providers.base import (
 )
 from ace_service.providers.registry import ProviderRegistry
 from ace_service.providers.runpod import RunpodProvider
+from ace_service.quality_profiles import MAX_SEED
 from ace_service.repository import (
     attempt_provider_ref,
     attempt_provider_result,
@@ -937,9 +938,12 @@ class ControllerWorker:
                 completed, _, parent_completed = complete_variation_attempt(
                     session, attempt.id, note="provider_status_unavailable_after_output"
                 )
-                if parent_completed and completed.job_type is JobType.COVER:
+                remove_completed_cover = parent_completed and completed.job_type is JobType.COVER
+                if remove_completed_cover:
                     revoke_active_transfers(session, completed.id)
                 session.commit()
+                if remove_completed_cover:
+                    remove_cover_source(self.settings, completed.id)
                 self._clear_poll_error(job_id)
                 return
         if utc_now() < deadline:
@@ -1130,28 +1134,47 @@ class ControllerWorker:
     def _default_payload(job: Job, attempt: VariationAttempt) -> Mapping[str, Any]:
         payload = dict(job.normalized_request_json or {})
         generation = payload.get("generation")
-        if isinstance(generation, Mapping):
-            generation_payload = dict(generation)
-            seed = generation_payload.get("seed")
-            if seed is not None:
-                if isinstance(seed, bool) or not isinstance(seed, int):
-                    raise ValueError("generation seed must be an integer")
-                progressed_seed = seed + attempt.variation_index - 1
-                if not 0 <= progressed_seed <= 2_147_483_647:
-                    raise ValueError("generation seed progression is out of range")
-                generation_payload["seed"] = progressed_seed
-            payload["generation"] = generation_payload
+        generation_payload = dict(generation) if isinstance(generation, Mapping) else None
         resolved = payload.get("resolved_parameters")
-        if isinstance(resolved, Mapping):
-            resolved_payload = dict(resolved)
-            seed = resolved_payload.get("seed")
-            if seed is not None:
-                if isinstance(seed, bool) or not isinstance(seed, int):
-                    raise ValueError("resolved seed must be an integer")
-                progressed_seed = seed + attempt.variation_index - 1
-                if not 0 <= progressed_seed <= 2_147_483_647:
-                    raise ValueError("resolved seed progression is out of range")
-                resolved_payload["seed"] = progressed_seed
+        resolved_payload = dict(resolved) if isinstance(resolved, Mapping) else None
+        supplied_seeds: list[int] = []
+        for seed, label in (
+            (
+                generation_payload.get("seed") if generation_payload is not None else None,
+                "generation",
+            ),
+            (
+                resolved_payload.get("seed") if resolved_payload is not None else None,
+                "resolved",
+            ),
+        ):
+            if seed is None:
+                continue
+            if isinstance(seed, bool) or not isinstance(seed, int):
+                raise ValueError(f"{label} seed must be an integer")
+            supplied_seeds.append(seed)
+        if len(set(supplied_seeds)) > 1:
+            raise ValueError("generation and resolved seeds must match")
+        effective_seed: int | None = None
+        if supplied_seeds:
+            effective_seed = supplied_seeds[0] + attempt.variation_index - 1
+            if not 0 <= effective_seed <= MAX_SEED:
+                raise ValueError("generation seed progression is out of range")
+        elif payload.get("schema_version") == WORKER_SCHEMA_VERSION:
+            if not attempt.submission_nonce:
+                raise ValueError(
+                    "schema-v2 submission must have a durable nonce before payload build"
+                )
+            effective_seed = _deterministic_submission_seed(
+                job.id, attempt.variation_index, attempt.submission_nonce
+            )
+        if generation_payload is not None:
+            if effective_seed is not None:
+                generation_payload["seed"] = effective_seed
+            payload["generation"] = generation_payload
+        if resolved_payload is not None:
+            if effective_seed is not None:
+                resolved_payload["seed"] = effective_seed
             payload["resolved_parameters"] = resolved_payload
         payload.update(
             {
@@ -1173,6 +1196,17 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _deterministic_submission_seed(job_id: str, variation_index: int, nonce: str) -> int:
+    """Derive a stable retry-safe seed from one durable submission identity."""
+
+    digest = hashlib.sha256()
+    for component in (job_id, str(variation_index), nonce):
+        encoded = component.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return int.from_bytes(digest.digest(), "big") % (MAX_SEED + 1)
 
 
 def _worker_block_value(metadata: Mapping[str, Any] | None, field_name: str) -> str | None:

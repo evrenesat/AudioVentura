@@ -145,7 +145,7 @@ def desired_container_group(
             "environment_variables": {
                 "ACE_WORKER_IMAGE_DIGEST": image_ref,
                 "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
-                "SALAD_LOG_LEVEL": "info",
+                "SALAD_QUEUE_WORKER_LOG_LEVEL": "info",
             },
         },
         "queue_connection": {"path": "/process", "port": 8080, "queue_name": queue["name"]},

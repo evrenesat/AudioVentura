@@ -338,6 +338,11 @@ def test_original_variations_use_fresh_capabilities_and_progress_seed(settings) 
             for payload in fake.payloads
             if isinstance(payload["generation"], Mapping)
         ] == [41, 42, 43]
+        assert [
+            payload["resolved_parameters"]["seed"]
+            for payload in fake.payloads
+            if isinstance(payload["resolved_parameters"], Mapping)
+        ] == [41, 42, 43]
         assert all("variation_count" not in payload for payload in fake.payloads)
         assert all(isinstance(payload.get("result_upload"), Mapping) for payload in fake.payloads)
         upload_urls = [

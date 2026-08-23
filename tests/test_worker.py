@@ -27,6 +27,7 @@ from ace_service.repository import (
     create_job,
     create_original_job,
     create_output,
+    create_variation_attempt,
     get_job,
     get_variation_attempt,
     persist_variation_provider_job_ref,
@@ -713,6 +714,72 @@ def test_status_expiry_recovers_from_valid_local_upload(settings) -> None:
                 interval_end=attempt.completed_at + timedelta(seconds=1),
             )
             assert summary.partial_coverage and summary.attempts_without_cost == 1
+    finally:
+        engine.dispose()
+
+
+def test_status_expiry_recovery_removes_completed_cover_source(settings) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_job(session, job_type=JobType.COVER, job_id="cover-stale")
+            _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+            persist_variation_runpod_job_id(
+                session, attempt.id, "stale-cover-runpod", submission_nonce=nonce
+            )
+            transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
+            transition_job(session, job.id, JobStatus.GENERATING)
+            source = settings.paths.incoming / job.id / "source.mp3"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(b"prepared cover source")
+            session.commit()
+        fake = _FakeRunpod(settings, factory, fail_status=True)
+        fake._write_output("cover-stale", 1)
+
+        async def scenario() -> None:
+            worker = ControllerWorker(settings, factory, fake, poll_interval_seconds=0)
+            await worker.start()
+            await worker.wait_idle()
+            await worker.stop()
+
+        _run(scenario())
+        with factory() as session:
+            completed = get_job(session, "cover-stale")
+            assert completed is not None and completed.status is JobStatus.COMPLETED
+        assert not source.exists()
+    finally:
+        engine.dispose()
+
+
+def test_default_payload_freezes_unseeded_schema_v2_submission_identity(settings) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_original_job(
+                session,
+                OriginalSongRequest(
+                    description="retry stable generation", seed=None, variation_count=2
+                ),
+                job_id="stable-seed-job",
+            )
+            first = create_variation_attempt(session, job_id=job.id, variation_index=1)
+            second = create_variation_attempt(session, job_id=job.id, variation_index=2)
+            first.submission_nonce = "nonce-a"
+            second.submission_nonce = "nonce-a"
+            session.flush()
+
+            first_payload = ControllerWorker._default_payload(job, first)
+            repeated_payload = ControllerWorker._default_payload(job, first)
+            second_payload = ControllerWorker._default_payload(job, second)
+            first.submission_nonce = "nonce-b"
+            changed_nonce_payload = ControllerWorker._default_payload(job, first)
+
+        first_seed = first_payload["generation"]["seed"]
+        assert isinstance(first_seed, int) and 0 <= first_seed <= 2_147_483_647
+        assert repeated_payload["generation"]["seed"] == first_seed
+        assert first_payload["resolved_parameters"]["seed"] == first_seed
+        assert second_payload["generation"]["seed"] != first_seed
+        assert changed_nonce_payload["generation"]["seed"] != first_seed
     finally:
         engine.dispose()
 
