@@ -30,6 +30,22 @@
     before_seconds: ["before_seconds"],
     after_seconds: ["after_seconds"],
   };
+  const fieldDefaults = new WeakMap();
+  for (const wrapper of document.querySelectorAll("[data-backend-field]")) {
+    const input = wrapper.querySelector("input, select, textarea");
+    if (!input) continue;
+    fieldDefaults.set(input, {
+      disabled: input.disabled,
+      required: input.required,
+      min: input.getAttribute("min"),
+      max: input.getAttribute("max"),
+    });
+  }
+
+  const restoreAttribute = (element, name, value) => {
+    if (value == null) element.removeAttribute(name);
+    else element.setAttribute(name, value);
+  };
 
   const selectedChoice = () => choices.find((item) => item.backend_id === select.value);
 
@@ -60,17 +76,27 @@
       wrapper.hidden = isFal && !policy;
       const input = wrapper.querySelector("input, select, textarea");
       if (input) {
-        input.disabled = isFal && !policy;
-        if (isFal) input.required = Boolean(policy && policy.required);
-        if (policy && policy.minimum != null) input.min = policy.minimum;
-        if (policy && policy.maximum != null) input.max = policy.maximum;
+        const defaults = fieldDefaults.get(input);
+        if (!defaults) continue;
+        input.disabled = isFal ? !policy : defaults.disabled;
+        input.required = isFal ? Boolean(policy && policy.required) : defaults.required;
+        restoreAttribute(
+          input,
+          "min",
+          isFal && policy && policy.minimum != null ? String(policy.minimum) : defaults.min,
+        );
+        restoreAttribute(
+          input,
+          "max",
+          isFal && policy && policy.maximum != null ? String(policy.maximum) : defaults.max,
+        );
       }
     }
     for (const [catalogName, aliases] of Object.entries(fieldAliases)) {
       const policy = fields[catalogName];
       for (const alias of aliases) {
         const element = document.querySelector(`#${alias}`);
-        if (!element || !policy) continue;
+        if (!isFal || !element || !policy) continue;
         if (policy.minimum != null) element.min = policy.minimum;
         if (policy.maximum != null) element.max = policy.maximum;
         element.required = Boolean(policy.required);

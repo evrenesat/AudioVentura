@@ -26,7 +26,7 @@
   <label class="check" data-backend-field="instrumental"><input type="checkbox" name="instrumental" value="true"{% if form.get('instrumental') in ['true', 'on', '1'] %} checked{% endif %}> Instrumental</label>
   <div class="grid two">
     <div data-backend-field="prompt_mode"><label for="prompt_mode">Prompt mode</label><select id="prompt_mode" name="prompt_mode"><option value="direct"{% if form.get('prompt_mode', 'direct') == 'direct' %} selected{% endif %}>Direct</option><option value="enhance"{% if form.get('prompt_mode') == 'enhance' %} selected{% endif %}>Enhance</option><option value="auto-compose"{% if form.get('prompt_mode') == 'auto-compose' %} selected{% endif %}>Auto-compose</option></select><p class="hint">Direct bypasses planner rewriting; Enhance enables metadata/caption/language help; Auto-compose also enables planner thinking.</p></div>
-    <div data-backend-field="vocal_language"><label for="vocal_language">Vocal language</label><input id="vocal_language" name="vocal_language" value="{{ form.get('vocal_language', '') }}" maxlength="32"></div>
+    <div data-backend-field="vocal_language"><label for="vocal_language">Vocal language</label><input id="vocal_language" name="vocal_language" value="{{ form.get('vocal_language', '' if selected_backend_is_fal else 'en') }}" maxlength="32"></div>
   </div>
   <div class="grid two">
     <div data-backend-field="duration"><label for="duration_mode">Duration mode</label><select id="duration_mode" name="duration_mode"><option value="auto"{% if form.get('duration_mode', 'auto') == 'auto' %} selected{% endif %}>Auto (model-selected)</option><option value="custom"{% if form.get('duration_mode') == 'custom' %} selected{% endif %}>Custom duration</option></select></div>

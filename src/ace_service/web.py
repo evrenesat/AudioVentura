@@ -486,6 +486,9 @@ def _backend_form_context(
     return {
         "backend_choices": choices,
         "selected_backend": selected,
+        "selected_backend_is_fal": bool(
+            selected_choice is not None and selected_choice["provider"] == "fal.ai"
+        ),
         "selected_output_format": native_formats[0] if native_formats else "mp3",
     }
 

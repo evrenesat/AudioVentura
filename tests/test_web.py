@@ -202,6 +202,8 @@ def test_auth_matrix_csrf_and_security_headers(web_app) -> None:
         assert "default-src 'self'" in response.headers["content-security-policy"]
 
         token = _csrf(client)
+        original_form = client.get("/create", auth=_auth(client))
+        assert 'value="en"' in _input_tag(original_form.text, "vocal_language")
         missing = client.post("/create", auth=_auth(client), data={"description": "A valid song"})
         assert missing.status_code == 403
         invalid = client.post(
@@ -213,7 +215,11 @@ def test_auth_matrix_csrf_and_security_headers(web_app) -> None:
         accepted = client.post(
             "/create",
             auth=_auth(client),
-            data={"csrf_token": token, "description": "A valid song"},
+            data={
+                "csrf_token": token,
+                "description": "A valid song",
+                "vocal_language": "en",
+            },
             follow_redirects=False,
         )
         assert accepted.status_code == 303
@@ -249,7 +255,14 @@ def test_fal_cassette_rejects_unsupported_original_fields(settings) -> None:
     )
     try:
         with TestClient(app) as client:
-            token = _csrf(client)
+            form = client.get(
+                f"/create?backend={descriptor.backend_id}",
+                auth=_auth(client),
+            )
+            assert form.status_code == 200
+            assert 'value=""' in _input_tag(form.text, "vocal_language")
+            token = client.cookies.get("ace_csrf")
+            assert token
             response = client.post(
                 "/create",
                 auth=_auth(client),
