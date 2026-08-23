@@ -229,13 +229,16 @@ class SaladProvider:
                 )
             if status == "downloading":
                 raw_progress = instance.get("pulling_progress")
-                progress = (
-                    float(raw_progress) / 100
-                    if isinstance(raw_progress, (int, float))
+                progress = None
+                if (
+                    isinstance(raw_progress, (int, float))
                     and not isinstance(raw_progress, bool)
                     and 0 <= raw_progress <= 100
-                    else None
-                )
+                ):
+                    numeric_progress = float(raw_progress)
+                    # Live Container Engine returns a 0..1 fraction even though
+                    # its OpenAPI describes a 0..100 percentage. Accept both.
+                    progress = numeric_progress if numeric_progress <= 1 else numeric_progress / 100
                 return ProviderStatus(
                     ProviderPhase.PROVISIONING,
                     "Downloading worker image",

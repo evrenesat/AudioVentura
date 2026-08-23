@@ -123,6 +123,28 @@ def test_pending_status_uses_unambiguous_deployment_progress() -> None:
     ]
 
 
+def test_pending_status_accepts_live_fractional_pull_progress() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(
+                200,
+                json={"instances": [{"state": "downloading", "pulling_progress": 0.63}]},
+            )
+        return httpx.Response(200, json={"id": JOB_ID, "status": "pending"})
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (status.phase, status.progress, status.detail_scope) == (
+            ProviderPhase.PROVISIONING,
+            0.63,
+            DetailScope.DEPLOYMENT,
+        )
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_health_uses_container_path_and_current_queue_length() -> None:
     paths: list[str] = []
 

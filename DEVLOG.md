@@ -1,5 +1,12 @@
 # Development Log
 
+## 2026-08-23 (Salad live pull-progress normalization)
+
+- Live Container Engine instances returned `pulling_progress` as a 0..1
+  fraction despite the current OpenAPI describing a 0..100 percentage.
+  Provider status now accepts both representations and still exposes a single
+  normalized 0..1 progress value to the controller/UI.
+
 ## 2026-08-23 (Salad OpenAPI contract correction)
 
 - Validated the tracked queue and container-group request shape against the
