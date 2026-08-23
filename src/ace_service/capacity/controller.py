@@ -225,6 +225,10 @@ class CapacityController:
         now = self.clock().astimezone(UTC)
         with self.session_factory() as session:
             lease = ensure_capacity_lease(session, manager.key, manager.provider, now=now)
+            # A successful fresh inspection resolves any prior inspection
+            # failure. Later branches may set a new active-work error or keep
+            # the independent release_overdue state.
+            lease.last_error_code = None
             keep_warm = get_keep_warm_seconds(session)
             active = count_eligible_work(session, manager.backend_ids)
             if active:

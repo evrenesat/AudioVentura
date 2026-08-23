@@ -333,6 +333,30 @@ def test_controller_retains_and_releases_once(settings) -> None:
     engine.dispose()
 
 
+def test_successful_cold_reconcile_clears_resolved_inspection_error(settings) -> None:
+    from ace_service.db import create_database_engine, create_session_factory, initialize_database
+
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    manager = FakeManager()
+    controller = CapacityController(settings, factory, CapacityRegistry([manager]))
+    with factory() as database_session:
+        lease = ensure_capacity_lease(database_session, manager.key, manager.provider)
+        lease.last_error_code = CapacityErrorKind.DRIFT.value
+        database_session.commit()
+
+    result = asyncio.run(controller.reconcile_once())
+
+    assert result[0].state == "cold"
+    assert result[0].error is None
+    with factory() as database_session:
+        lease = database_session.get(CapacityLease, manager.key)
+        assert lease is not None
+        assert lease.last_error_code is None
+    engine.dispose()
+
+
 def test_warm_session_begins_only_after_provider_reports_ready(settings) -> None:
     from ace_service.db import create_database_engine, create_session_factory, initialize_database
 
