@@ -4,6 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}ACE Service{% endblock %}</title>
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <meta name="notifications-config" content="{{ urls.notifications_config }}">
+    <meta name="notifications-subscriptions" content="{{ urls.notifications_subscriptions }}">
+    <meta name="notifications-worker" content="{{ urls.notifications_worker }}">
     <link rel="stylesheet" href="{{ urls.app_css }}">
   </head>
   <body>
@@ -15,9 +19,14 @@
         <a href="{{ urls.projects }}">Projects</a>
         <a href="{{ urls.jobs }}">History</a>
       </nav>
+      <div class="notification-control">
+        <button class="button secondary" type="button" data-notifications-enable>Enable notifications</button>
+        <span class="hint" data-notifications-status>Unavailable</span>
+      </div>
     </header>
     <main class="container">
       {% block content %}{% endblock %}
     </main>
+    <script src="{{ urls.notifications_js }}" defer></script>
   </body>
 </html>

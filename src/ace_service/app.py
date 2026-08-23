@@ -12,6 +12,8 @@ from typing import Any, cast
 from fastapi import FastAPI
 from sqlalchemy import select
 
+from ace_service.capacity.controller import CapacityController
+from ace_service.capacity.registry import build_capacity_registry
 from ace_service.cleanup import cleanup_controller, cleanup_loop_interval
 from ace_service.config import ServiceSettings
 from ace_service.costs import FalPricingClient
@@ -24,6 +26,7 @@ from ace_service.db import (
 )
 from ace_service.home_ingest import HomeIngestClient
 from ace_service.models import Job, JobStatus
+from ace_service.notifications import NotificationDispatcher
 from ace_service.providers.base import BackendOperation, ProviderName
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
@@ -83,6 +86,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     cleanup_task = asyncio.create_task(_periodic_cleanup(app), name="ace-controller-cleanup")
     app.state.cleanup_task = cleanup_task
+    capacity_controller = app.state.capacity_controller
+    await capacity_controller.start()
+    notification_dispatcher = app.state.notification_dispatcher
+    await notification_dispatcher.start()
     worker = app.state.worker
     try:
         if hasattr(worker, "start"):
@@ -94,12 +101,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cleanup_task
         if hasattr(worker, "stop"):
             await worker.stop()
+        await capacity_controller.stop()
+        await notification_dispatcher.stop()
         clients = [app.state.home_ingest_client]
         clients.extend(
             getattr(provider, "client", provider)
             for provider in app.state.provider_registry.providers
         )
         clients.extend(app.state.provider_registry.closeable_transports)
+        clients.extend(
+            getattr(manager, "_client", manager) for manager in app.state.capacity_registry.managers
+        )
         if app.state.fal_pricing is not None:
             clients.append(app.state.fal_pricing)
         for client in clients:
@@ -213,6 +225,7 @@ def create_app(
             },
             selectable_backends=selectable,
         )
+    capacity_registry = build_capacity_registry(resolved_settings)
     resolved_home = home_ingest_client or HomeIngestClient(resolved_settings)
     resolved_pricing = None
     if resolved_settings.fal_key and any(
@@ -220,12 +233,18 @@ def create_app(
         for provider in provider_registry.providers
     ):
         resolved_pricing = FalPricingClient(resolved_settings.fal_key)
+    capacity_controller = CapacityController(resolved_settings, session_factory, capacity_registry)
     resolved_worker = worker or ControllerWorker(
         resolved_settings,
         session_factory,
         provider_registry,
         home_ingest_client=resolved_home,
+        capacity_registry=capacity_registry,
     )
+    if hasattr(resolved_worker, "capacity_controller"):
+        resolved_worker.capacity_controller = capacity_controller
+    if hasattr(resolved_worker, "capacity_registry"):
+        resolved_worker.capacity_registry = capacity_registry
 
     app = FastAPI(
         title="ACE Service",
@@ -240,6 +259,9 @@ def create_app(
     app.state.engine = engine
     app.state.runpod_client = resolved_runpod
     app.state.provider_registry = provider_registry
+    app.state.capacity_registry = capacity_registry
+    app.state.capacity_controller = capacity_controller
+    app.state.notification_dispatcher = NotificationDispatcher(session_factory, resolved_settings)
     app.state.fal_pricing = resolved_pricing
     app.state.fal_health_cache = {}
     app.state.home_ingest_client = resolved_home

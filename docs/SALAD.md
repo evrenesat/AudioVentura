@@ -189,6 +189,27 @@ SALAD_CONTAINER_GROUP_NAME=audioventura-ace-step-v2
 Keep working Runpod credentials during the rollback window so persisted Runpod
 jobs remain reconcilable.
 
+## Automated keep-warm lease
+
+For the deployed managed resource, the controller replaces the normal manual
+session flow. Set `SALAD_CAPACITY_EXPECTED_FINGERPRINT` to the reviewed SHA-256
+fingerprint of the exact organization/project/queue/group and bounded
+autoscaler contract. The controller can request `min_replicas=1` and desired
+replicas one before a generation, but never changes the provider maximum above
+one. Fal and unmanaged Salad resources are not touched.
+
+After the last eligible job is terminal, the durable lease waits for the
+database-selected idle deadline, warns at one minute, requests zero, and only
+marks the lease released after Salad inspection confirms zero desired replicas
+and zero observed instances/jobs. A nonzero result becomes `release_overdue`
+and is retried with a critical notification. The watchdog is an independent
+reconciliation path, not a second submission loop.
+
+Keep `session-start` and `session-stop` available as emergency recovery. They
+remain provider-read-only until their explicit mutation command is run and are
+never invoked automatically by the controller. Record only bounded UTC state;
+do not copy queue jobs, API responses, or credentials into an incident record.
+
 Pending Salad jobs can be cancelled. Running jobs report `too_late`. Salad
 404s are not terminal by assumption. The controller retains and polls the same
 durable queue UUID until terminal evidence or its deadline policy resolves the

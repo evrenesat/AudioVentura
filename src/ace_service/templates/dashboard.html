@@ -20,6 +20,29 @@
 <div class="banner warning" role="status">Home ingest is unavailable. Original songs remain available; cover preparation will wait or fail safely.</div>
 {% endif %}
 
+<section class="form-card operations-card" aria-labelledby="operations-title">
+  <div class="section-heading"><h2 id="operations-title">GPU operations</h2><span class="muted">Database-owned</span></div>
+  <form method="post" action="{{ urls.keep_warm }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="keep_warm_seconds">Keep one managed worker warm after generation</label>
+    <select id="keep_warm_seconds" name="keep_warm_seconds">
+      {% for seconds in keep_warm_options %}
+      <option value="{{ seconds }}" {% if seconds == keep_warm_seconds %}selected{% endif %}>{{ keep_warm_labels[seconds] }}</option>
+      {% endfor %}
+    </select>
+    <button class="button" type="submit">Save keep-warm setting</button>
+  </form>
+  {% for item in capacity %}
+  <div class="capacity-row">
+    <strong>{{ item.provider }}</strong>
+    <span class="status">{{ item.state }}</span>
+    {% if item.retained_minutes is not none %}<span class="muted">Warm for {{ item.retained_minutes }} minutes</span>{% endif %}
+    {% if item.release_at %}<span class="muted">Release {{ item.release_at }} ({{ item.release_minutes }} min)</span>{% endif %}
+  </div>
+  {% if item.warning %}<div class="banner warning" role="alert">Capacity release or configuration needs attention.</div>{% endif %}
+  {% endfor %}
+</section>
+
 <section class="section-heading">
   <h2>Recent jobs</h2>
   <a href="{{ urls.jobs }}">View all</a>

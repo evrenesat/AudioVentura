@@ -219,6 +219,11 @@ class TestUpgrade:
             "runtime_calibrations",
             "billing_lease",
             "projects",
+            "controller_settings",
+            "capacity_leases",
+            "notification_events",
+            "push_subscriptions",
+            "notification_deliveries",
         }
         assert _tables(legacy_database_path) == expected_tables
         assert {

@@ -177,6 +177,34 @@ discovery data at runtime. New jobs persist the selected backend and descriptor
 snapshot before enqueue; variations remain sequential and never fall back to
 another backend.
 
+### Managed capacity and notifications
+
+`src/ace_service/capacity/` is a sibling boundary to inference providers. Its
+registry contains only explicitly fingerprint-pinned Salad and RunPod
+resources; Fal and other managed APIs have no capacity manager. The controller
+reconciles one provider-local worker floor at a time, never raises a provider
+maximum above one, and refuses immutable resource or deployment drift. The
+complete secret-free identity payloads and pinned v1 digests live in
+`capacity/fingerprint_fixtures.json`; the preflight command compares those
+digests with live provider metadata without mutating floors.
+
+`controller_settings` stores the global keep-warm seconds after migration 9.
+`capacity_leases` stores last activity, the durable deadline, action fencing,
+release evidence, and bounded error state. Provider mutations happen outside
+SQL transactions and are followed by read-after-write inspection. The
+controller and systemd watchdog both use the fenced action lease, so a stale
+actor cannot commit a later state over a newer action.
+
+Verified parent completion and managed lifecycle transitions insert one
+deduplicated event into `notification_events`. The generation-start event is
+inserted at the worker seam only after the exact persisted backend resolves to
+a configured capacity manager. Active Web Push subscriptions
+are fanned out to `notification_deliveries`; the bounded dispatcher retries
+independently of job submission and capacity release. Payloads contain only
+safe copy, an event key, and a same-origin path. The authenticated worker route
+is emitted under the configured root path and never receives provider or job
+secrets.
+
 ## Durable provider ownership
 
 The controller stores the provider name and external job ID on each job and

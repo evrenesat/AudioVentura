@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 
 from ace_service.auth import (
     attach_csrf_cookie,
@@ -44,15 +44,25 @@ from ace_service.cover import (
     stage_cover_continuation_source,
 )
 from ace_service.models import (
+    KEEP_WARM_LABELS,
+    KEEP_WARM_SECONDS,
     PROJECT_TITLE_MAX_LENGTH,
+    CapacityLease,
     Job,
     JobStatus,
     JobType,
+    NotificationDelivery,
     Output,
     OutputFormat,
     Project,
     SubmissionQuote,
     VariationAttempt,
+)
+from ace_service.notifications import (
+    MAX_ATTEMPTS,
+    SubscriptionValidationError,
+    create_or_replace_subscription,
+    disable_subscription,
 )
 from ace_service.providers.base import BackendId, BackendOperation, ProviderHealth, ProviderName
 from ace_service.providers.fal import FalProvider
@@ -65,6 +75,7 @@ from ace_service.repository import (
     create_submission_quote,
     finalize_cover_job_duration,
     get_job,
+    get_keep_warm_seconds,
     get_latest_gpu_rates,
     get_matching_runtime_calibration,
     get_output,
@@ -76,6 +87,7 @@ from ace_service.repository import (
     rename_project,
     resolve_continuation_source,
     resolve_cover_continuation_output,
+    set_keep_warm_seconds,
     transition_job,
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
@@ -649,6 +661,13 @@ def register_web_routes(app: FastAPI) -> None:
                     "backend_selector_js": _route_path(
                         request, "static", path="backend_selector.js"
                     ),
+                    "notifications_js": _route_path(request, "static", path="notifications.js"),
+                    "notifications_config": _route_path(request, "notifications_config"),
+                    "notifications_subscriptions": _route_path(
+                        request, "notifications_subscriptions"
+                    ),
+                    "notifications_worker": _route_path(request, "notification_worker"),
+                    "keep_warm": _route_path(request, "set_keep_warm"),
                 },
             },
             status_code=response_status,
@@ -656,13 +675,133 @@ def register_web_routes(app: FastAPI) -> None:
         attach_csrf_cookie(request, response, token)
         return response
 
+    @app.get(
+        "/notifications/config", dependencies=[Depends(authenticated)], name="notifications_config"
+    )
+    async def notifications_config() -> JSONResponse:
+        settings: ServiceSettings = app.state.settings
+        return JSONResponse(
+            {
+                "enabled": settings.web_push_enabled,
+                "public_key": settings.web_push_vapid_public_key
+                if settings.web_push_enabled
+                else None,
+            }
+        )
+
+    @app.post(
+        "/notifications/subscriptions",
+        dependencies=[Depends(authenticated)],
+        name="notifications_subscriptions",
+    )
+    async def notifications_subscriptions(request: Request) -> JSONResponse:
+        try:
+            raw_body = await request.body()
+            if len(raw_body) > 16 * 1024:
+                raise HTTPException(status_code=413, detail="subscription body is too large")
+            import json
+
+            body = json.loads(raw_body)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="subscription body is invalid") from exc
+        if not isinstance(body, dict) or len(body) > 8:
+            raise HTTPException(status_code=400, detail="subscription body is invalid")
+        require_csrf(
+            request,
+            {"csrf_token": str(body.get("csrf_token", request.headers.get("x-csrf-token", "")))},
+        )
+        if set(body) - {"endpoint", "keys", "csrf_token"} or not isinstance(body.get("keys"), dict):
+            raise HTTPException(status_code=400, detail="subscription body is invalid")
+        endpoint = body.get("endpoint")
+        if not isinstance(endpoint, str):
+            raise HTTPException(status_code=400, detail="subscription body is invalid")
+        try:
+            with app.state.session_factory() as session:
+                subscription = create_or_replace_subscription(
+                    session,
+                    endpoint=endpoint,
+                    p256dh=body["keys"].get("p256dh"),
+                    auth=body["keys"].get("auth"),
+                    allowed_origins=app.state.settings.web_push_allowed_origins,
+                )
+                session.commit()
+                subscription_id = subscription.id
+        except SubscriptionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse({"subscription_id": subscription_id, "enabled": True})
+
+    @app.delete(
+        "/notifications/subscriptions/{subscription_id}",
+        dependencies=[Depends(authenticated)],
+        name="disable_notification_subscription",
+    )
+    async def disable_notification_subscription(
+        request: Request, subscription_id: str
+    ) -> JSONResponse:
+        require_csrf(request, {"csrf_token": request.headers.get("x-csrf-token", "")})
+        with app.state.session_factory() as session:
+            found = disable_subscription(session, subscription_id)
+            session.commit()
+        return JSONResponse(
+            {"subscription_id": subscription_id, "enabled": False},
+            status_code=200 if found else 404,
+        )
+
+    @app.get(
+        "/notification-worker.js", dependencies=[Depends(authenticated)], name="notification_worker"
+    )
+    async def notification_worker(request: Request) -> Response:
+        root_path = request.scope.get("root_path", "") or "/"
+        scope = root_path if root_path.endswith("/") else f"{root_path}/"
+        script = _notification_worker_script()
+        return Response(
+            script,
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "no-cache",
+                "Service-Worker-Allowed": scope,
+            },
+        )
+
+    @app.post("/settings/keep-warm", dependencies=[Depends(authenticated)], name="set_keep_warm")
+    async def set_keep_warm(request: Request) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        raw_seconds = fields.get("keep_warm_seconds", "")
+        try:
+            seconds = int(raw_seconds)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="keep-warm value is invalid") from exc
+        if seconds not in KEEP_WARM_SECONDS:
+            raise HTTPException(status_code=422, detail="keep-warm value is invalid")
+        with app.state.session_factory() as session:
+            set_keep_warm_seconds(session, seconds)
+            session.commit()
+        return RedirectResponse(
+            _route_path(request, "dashboard"), status_code=status.HTTP_303_SEE_OTHER
+        )
+
     @app.get("/", dependencies=[Depends(authenticated)], name="dashboard")
     async def dashboard(request: Request) -> Response:
         with app.state.session_factory() as session:
             jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(20)))
             job_views = [_job_view(request, job) for job in jobs]
         readiness = await _readiness(app)
-        return render(request, "dashboard.html", {"jobs": job_views, "readiness": readiness})
+        with app.state.session_factory() as session:
+            keep_warm_seconds = get_keep_warm_seconds(session)
+            capacity = _capacity_views(app, session)
+        return render(
+            request,
+            "dashboard.html",
+            {
+                "jobs": job_views,
+                "readiness": readiness,
+                "keep_warm_seconds": keep_warm_seconds,
+                "keep_warm_options": KEEP_WARM_SECONDS,
+                "keep_warm_labels": KEEP_WARM_LABELS,
+                "capacity": capacity,
+            },
+        )
 
     @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
@@ -1208,7 +1347,13 @@ def register_web_routes(app: FastAPI) -> None:
         readiness = await _readiness(app)
         required_ok = all(
             readiness["components"][key]["ok"]
-            for key in ("controller_database", "inference_provider", "public_transfer")
+            for key in (
+                "controller_database",
+                "inference_provider",
+                "public_transfer",
+                "capacity_management",
+                "web_push",
+            )
         )
         return JSONResponse(
             readiness,
@@ -1220,6 +1365,90 @@ def _static_app(directory: Path) -> Any:
     from starlette.staticfiles import StaticFiles
 
     return StaticFiles(directory=str(directory), check_dir=True)
+
+
+def _capacity_views(app: FastAPI, session: Any) -> list[dict[str, Any]]:
+    """Render only safe lease facts; provider identity and instance data stay server-side."""
+
+    now = datetime.now(UTC)
+    views: list[dict[str, Any]] = []
+    for manager in app.state.capacity_registry.managers:
+        lease = session.get(CapacityLease, manager.key)
+        state = lease.state if lease is not None else "cold"
+        display_state = {
+            "retained": "busy",
+            "idle": "ready",
+            "release_overdue": "release needs attention",
+        }.get(state, state)
+        label = "Salad" if manager.provider is ProviderName.SALAD else "RunPod"
+        retained_minutes = None
+        release_minutes = None
+        release_at = None
+        if lease is not None and lease.warmed_at is not None:
+            retained_minutes = max(0, int((now - lease.warmed_at).total_seconds()) // 60)
+        if lease is not None and lease.release_due_at is not None:
+            release_at = _iso(lease.release_due_at)
+            release_minutes = max(0, int((lease.release_due_at - now).total_seconds()) // 60)
+        views.append(
+            {
+                "provider": label,
+                "state": display_state,
+                "retained_minutes": retained_minutes,
+                "release_at": release_at,
+                "release_minutes": release_minutes,
+                "warning": state == "release_overdue"
+                or (lease is not None and lease.last_error_code in {"drift", "unsafe_active_work"}),
+            }
+        )
+    return views
+
+
+def _notification_worker_script() -> str:
+    return r"""/* AudioVentura scoped notification worker. */
+self.addEventListener('push', (event) => {
+  event.waitUntil((async () => {
+    let payload;
+    try { payload = event.data ? event.data.json() : null; } catch (_) { return; }
+    const kinds = new Set([
+      'generation_completed', 'managed_generation_started',
+      'capacity_retained_reminder', 'capacity_release_warning',
+      'capacity_released', 'capacity_release_overdue'
+    ]);
+    if (!payload || !kinds.has(payload.kind) || typeof payload.event_key !== 'string' ||
+        typeof payload.title !== 'string' || typeof payload.body !== 'string' ||
+        typeof payload.path !== 'string' || !payload.path.startsWith('/') ||
+        payload.path.startsWith('//') || payload.path.includes('://') ||
+        payload.title.length > 128 || payload.body.length > 512 ||
+        payload.event_key.length > 256) return;
+    const target = new URL(payload.path.replace(/^\/+/, ''), self.registration.scope);
+    if (target.origin !== self.location.origin ||
+        !target.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
+    await self.registration.showNotification(payload.title, {
+      body: payload.body, tag: payload.event_key, data: { path: target.pathname + target.search }
+    });
+  })());
+});
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const path = event.notification.data && event.notification.data.path;
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') ||
+        path.includes('://')) return;
+    const target = new URL(path, self.location.origin);
+    if (target.origin !== self.location.origin ||
+        !target.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
+    const windows = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windows) {
+      if (client.url.startsWith(self.registration.scope) && 'focus' in client) {
+        await client.focus();
+        if ('navigate' in client) await client.navigate(target.href);
+        return;
+      }
+    }
+    await clients.openWindow(target.href);
+  })());
+});
+"""
 
 
 def _enqueue(app: FastAPI, job_id: str) -> None:
@@ -1759,6 +1988,8 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
         "inference_provider": {"ok": False, "message": "unavailable"},
         "home_ingest": {"ok": False, "message": "unavailable"},
         "public_transfer": {"ok": False, "message": "unavailable"},
+        "capacity_management": {"ok": True, "message": "disabled"},
+        "web_push": {"ok": True, "message": "disabled"},
     }
     if only is None or "controller_database" in only:
         try:
@@ -1769,6 +2000,46 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
             components["controller_database"] = {"ok": False, "message": "database unavailable"}
 
     settings: ServiceSettings = app.state.settings
+    if only is None or "capacity_management" in only:
+        with app.state.session_factory() as session:
+            leases = list(session.scalars(select(CapacityLease)))
+        unhealthy = any(
+            lease.state == "release_overdue" or lease.last_error_code == "drift" for lease in leases
+        )
+        components["capacity_management"] = {
+            "ok": not unhealthy,
+            "message": "release needs attention" if unhealthy else "ready",
+        }
+    if only is None or "web_push" in only:
+        exhausted = False
+        if settings.web_push_enabled:
+            with app.state.session_factory() as session:
+                exhausted = (
+                    session.scalar(
+                        select(NotificationDelivery.id)
+                        .where(
+                            NotificationDelivery.status == "abandoned",
+                            NotificationDelivery.attempt_count >= MAX_ATTEMPTS,
+                            or_(
+                                NotificationDelivery.last_status_code.is_(None),
+                                NotificationDelivery.last_status_code.not_in((404, 410)),
+                            ),
+                        )
+                        .limit(1)
+                    )
+                    is not None
+                )
+        components["web_push"] = {
+            "ok": (settings.web_push_enabled and not exhausted)
+            or not settings.web_push_allowed_origins,
+            "message": (
+                "delivery retry exhausted"
+                if exhausted
+                else "ready"
+                if settings.web_push_enabled
+                else "disabled"
+            ),
+        }
     if only is None or "public_transfer" in only:
         parsed = settings.transfer_public_base_url
         components["public_transfer"] = {
@@ -1816,7 +2087,13 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
         components["runpod_api"] = dict(components["inference_provider"])
     required_ok = all(
         components[key]["ok"]
-        for key in ("controller_database", "inference_provider", "public_transfer")
+        for key in (
+            "controller_database",
+            "inference_provider",
+            "public_transfer",
+            "capacity_management",
+            "web_push",
+        )
     )
     return {
         "status": "ok" if required_ok and components["home_ingest"]["ok"] else "degraded",

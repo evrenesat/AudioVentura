@@ -12,7 +12,16 @@ from sqlalchemy import select
 from ace_service.config import ServiceSettings
 from ace_service.cover import remove_cover_source
 from ace_service.db import SessionFactory
-from ace_service.models import Job, JobStatus, JobType, TransferCapability, TransferStatus
+from ace_service.models import (
+    Job,
+    JobStatus,
+    JobType,
+    NotificationDelivery,
+    NotificationEvent,
+    PushSubscription,
+    TransferCapability,
+    TransferStatus,
+)
 from ace_service.repository import revoke_active_transfers, transition_job
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +41,8 @@ class CleanupReport:
     deleted_capability_records: int = 0
     removed_cover_sources: int = 0
     expired_cover_staging: int = 0
+    deleted_notification_events: int = 0
+    deleted_notification_subscriptions: int = 0
 
 
 def cleanup_controller(
@@ -51,6 +62,8 @@ def cleanup_controller(
     deleted = 0
     terminal_cover_ids: list[str] = []
     expired_staging = 0
+    deleted_notification_events = 0
+    deleted_notification_subscriptions = 0
 
     with session_factory() as session:
         jobs = list(session.scalars(select(Job)))
@@ -89,6 +102,37 @@ def cleanup_controller(
             ):
                 session.delete(capability)
                 deleted += 1
+        notification_cutoff = current_time - timedelta(days=30)
+        events = list(
+            session.scalars(
+                select(NotificationEvent).where(NotificationEvent.created_at <= notification_cutoff)
+            )
+        )
+        for event in events:
+            deliveries = list(
+                session.scalars(
+                    select(NotificationDelivery).where(NotificationDelivery.event_id == event.id)
+                )
+            )
+            if not deliveries or all(
+                item.status in {"delivered", "abandoned"} for item in deliveries
+            ):
+                for delivery in deliveries:
+                    session.delete(delivery)
+                session.delete(event)
+                deleted_notification_events += 1
+        subscriptions = list(session.scalars(select(PushSubscription)))
+        for subscription in subscriptions:
+            if subscription.disabled_at is None:
+                continue
+            delivery_exists = session.scalar(
+                select(NotificationDelivery.id)
+                .where(NotificationDelivery.subscription_id == subscription.id)
+                .limit(1)
+            )
+            if delivery_exists is None:
+                session.delete(subscription)
+                deleted_notification_subscriptions += 1
         session.commit()
 
     removed_sources = 0
@@ -105,6 +149,8 @@ def cleanup_controller(
         deleted_capability_records=deleted,
         removed_cover_sources=removed_sources,
         expired_cover_staging=expired_staging,
+        deleted_notification_events=deleted_notification_events,
+        deleted_notification_subscriptions=deleted_notification_subscriptions,
     )
     LOGGER.info(
         "cleanup complete stage=cleanup stale_part_files=%d expired_capabilities=%d "

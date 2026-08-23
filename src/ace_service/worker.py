@@ -17,6 +17,9 @@ from typing import Any, Protocol, cast
 from sqlalchemy import select
 
 from ace_service.artifact_store import materialize_remote_artifact
+from ace_service.capacity.base import CapacityError
+from ace_service.capacity.controller import CapacityController
+from ace_service.capacity.registry import CapacityRegistry
 from ace_service.config import ServiceSettings
 from ace_service.costs import resolve_gpu_alias, round_half_up_compute_cost_usd
 from ace_service.cover import CoverSourceError, finalize_cover_source, remove_cover_source
@@ -63,6 +66,7 @@ from ace_service.repository import (
     finalize_cover_job_duration,
     get_job,
     get_variation_attempt,
+    insert_notification_event,
     job_backend,
     job_provider,
     persist_variation_provider_job_ref,
@@ -141,6 +145,8 @@ class ControllerWorker:
         payload_builder: PayloadBuilder | None = None,
         home_ingest_client: HomeIngestService | None = None,
         poll_interval_seconds: float | None = None,
+        capacity_controller: CapacityController | None = None,
+        capacity_registry: CapacityRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
@@ -153,6 +159,8 @@ class ControllerWorker:
             self.runpod_client = provider_registry
         self.payload_builder = payload_builder or self._default_payload
         self.home_ingest_client = home_ingest_client
+        self.capacity_controller = capacity_controller
+        self.capacity_registry = capacity_registry
         self.poll_interval_seconds = poll_interval_seconds
         if self.poll_interval_seconds is not None and self.poll_interval_seconds < 0:
             raise ValueError("poll interval must not be negative")
@@ -314,6 +322,27 @@ class ControllerWorker:
 
     async def _submit_variation(self, job_id: str, variation_index: int) -> None:
         started = time.monotonic()
+        if self.capacity_controller is not None:
+            with self.session_factory() as session:
+                queued_job = get_job(session, job_id)
+                queued_backend = job_backend(queued_job) if queued_job is not None else None
+            if queued_backend is not None:
+                try:
+                    await self.capacity_controller.ensure_retained(queued_backend)
+                except CapacityError as exc:
+                    self._poll_delays[job_id] = min(
+                        60.0, max(15.0, self._base_poll_delay(job_id) * 2)
+                    )
+                    if self._accepting:
+                        self._enqueue_recovered(job_id)
+                    LOGGER.warning(
+                        "job=%s stage=capacity error_kind=%s operation=%s",
+                        job_id,
+                        exc.kind.value,
+                        exc.operation,
+                        extra={"component": "controller"},
+                    )
+                    return
         with self.session_factory() as session:
             job = get_job(session, job_id)
             if job is None:
@@ -538,6 +567,7 @@ class ControllerWorker:
                 transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
                 if job.status is JobStatus.CLOUD_QUEUED:
                     transition_job(session, job.id, JobStatus.GENERATING)
+                    self._insert_managed_generation_started(session, job, utc_now())
                 session.commit()
                 return
             if status.phase in {ProviderPhase.FAILED, ProviderPhase.CANCELLED}:
@@ -684,6 +714,7 @@ class ControllerWorker:
                     transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
                     if job.status is JobStatus.CLOUD_QUEUED:
                         transition_job(session, job.id, JobStatus.GENERATING)
+                        self._insert_managed_generation_started(session, job, utc_now())
                 session.commit()
                 return
             if ref.provider is ProviderName.RUNPOD:
@@ -887,6 +918,24 @@ class ControllerWorker:
             return True
         staging = normalized.get("cover_staging")
         return isinstance(staging, Mapping) and staging.get("status") == "confirmed"
+
+    def _insert_managed_generation_started(self, session: Any, job: Job, timestamp: Any) -> None:
+        """Emit the warm-up event only for an explicitly managed backend."""
+
+        registry = self.capacity_registry
+        if registry is None or registry.for_backend(job_backend(job)) is None:
+            return
+        insert_notification_event(
+            session,
+            event_key=f"generation-started:{job.id}",
+            kind="managed_generation_started",
+            title="Generation started",
+            body="GPU warm-up is complete and generation has started.",
+            target_path=f"/jobs/{job.id}",
+            job_id=job.id,
+            provider=job.inference_provider,
+            created_at=timestamp,
+        )
 
     def _materialize_legacy_attempt(self, session: Any, job: Job) -> VariationAttempt:
         attempt = create_variation_attempt(

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -507,6 +507,81 @@ def _cp8_ddl(connection: sqlite3.Connection) -> None:
     )
 
 
+def _cp9_ddl(connection: sqlite3.Connection) -> None:
+    """Add database-owned keep-warm state and the Web Push outbox."""
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS controller_settings ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "keep_warm_seconds INTEGER NOT NULL DEFAULT 900, "
+        "updated_at DATETIME NOT NULL, "
+        "CHECK (keep_warm_seconds IN (0, 60, 120, 180, 300, 600, 900, 1800, "
+        "2700, 3600, 7200, 10800, 14400)))"
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO controller_settings (id, keep_warm_seconds, updated_at) "
+        "VALUES (1, 900, ?)",
+        (_iso(utc_now()),),
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS capacity_leases ("
+        "capacity_key VARCHAR(256) PRIMARY KEY, provider VARCHAR(32) NOT NULL, "
+        "state VARCHAR(32) NOT NULL DEFAULT 'cold', session_id VARCHAR(36), "
+        "idle_epoch_id VARCHAR(36), last_activity_at DATETIME, release_due_at DATETIME, "
+        "warmed_at DATETIME, next_reminder_at DATETIME, release_requested_at DATETIME, "
+        "released_at DATETIME, last_reconciled_at DATETIME, last_error_code VARCHAR(64), "
+        "action_owner VARCHAR(128), action_lease_expires_at DATETIME, "
+        "fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at DATETIME NOT NULL, "
+        "CHECK (state IN ('cold', 'warming', 'retained', 'idle', 'releasing', 'release_overdue')), "
+        "CHECK (length(capacity_key) BETWEEN 1 AND 256))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS notification_events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, event_key VARCHAR(256) NOT NULL UNIQUE, "
+        "kind VARCHAR(64) NOT NULL, job_id VARCHAR(36) REFERENCES jobs(id) ON DELETE CASCADE, "
+        "provider VARCHAR(32), capacity_key VARCHAR(256), title VARCHAR(128) NOT NULL, "
+        "body VARCHAR(512) NOT NULL, target_path VARCHAR(1024) NOT NULL, "
+        "created_at DATETIME NOT NULL, "
+        "CHECK (kind IN ('generation_completed', 'managed_generation_started', "
+        "'capacity_retained_reminder', 'capacity_release_warning', 'capacity_released', "
+        "'capacity_release_overdue')))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS push_subscriptions ("
+        "id VARCHAR(36) PRIMARY KEY, endpoint VARCHAR(2048) NOT NULL UNIQUE, "
+        "endpoint_origin VARCHAR(256) NOT NULL, p256dh VARCHAR(256) NOT NULL, "
+        "auth VARCHAR(256) NOT NULL, "
+        "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, last_success_at DATETIME, "
+        "disabled_at DATETIME)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS notification_deliveries ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL "
+        "REFERENCES notification_events(id) ON DELETE CASCADE, "
+        "subscription_id VARCHAR(36) NOT NULL REFERENCES push_subscriptions(id) ON DELETE CASCADE, "
+        "status VARCHAR(16) NOT NULL DEFAULT 'pending', attempt_count INTEGER NOT NULL DEFAULT 0, "
+        "next_attempt_at DATETIME NOT NULL, last_status_code INTEGER, delivered_at DATETIME, "
+        "claimed_by VARCHAR(128), claim_expires_at DATETIME, "
+        "fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "UNIQUE (event_id, subscription_id), "
+        "CHECK (status IN ('pending', 'delivered', 'abandoned')), "
+        "CHECK (attempt_count BETWEEN 0 AND 12))"
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_capacity_leases_state ON capacity_leases (state)",
+        "CREATE INDEX IF NOT EXISTS ix_capacity_leases_release_due "
+        "ON capacity_leases (release_due_at)",
+        "CREATE INDEX IF NOT EXISTS ix_notification_events_created "
+        "ON notification_events (created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_notification_deliveries_due "
+        "ON notification_deliveries (status, next_attempt_at)",
+        "CREATE INDEX IF NOT EXISTS ix_push_subscriptions_active "
+        "ON push_subscriptions (disabled_at)",
+    ):
+        connection.execute(statement)
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
@@ -519,6 +594,11 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
         "runtime_calibrations",
         "billing_lease",
         "schema_version",
+        "controller_settings",
+        "capacity_leases",
+        "notification_events",
+        "push_subscriptions",
+        "notification_deliveries",
     }
     tables = {
         str(row[0])
@@ -599,6 +679,71 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     job_indexes = {str(row[1]) for row in connection.execute("PRAGMA index_list(jobs)").fetchall()}
     if "ix_jobs_project_id" not in job_indexes:
         raise MigrationError("migrated schema is missing the job membership index")
+    required_new_columns = {
+        "controller_settings": {"id", "keep_warm_seconds", "updated_at"},
+        "capacity_leases": {
+            "capacity_key",
+            "provider",
+            "state",
+            "session_id",
+            "idle_epoch_id",
+            "last_activity_at",
+            "release_due_at",
+            "warmed_at",
+            "next_reminder_at",
+            "release_requested_at",
+            "released_at",
+            "last_reconciled_at",
+            "last_error_code",
+            "action_owner",
+            "action_lease_expires_at",
+            "fencing_token",
+            "updated_at",
+        },
+        "notification_events": {
+            "id",
+            "event_key",
+            "kind",
+            "job_id",
+            "provider",
+            "capacity_key",
+            "title",
+            "body",
+            "target_path",
+            "created_at",
+        },
+        "push_subscriptions": {
+            "id",
+            "endpoint",
+            "endpoint_origin",
+            "p256dh",
+            "auth",
+            "created_at",
+            "updated_at",
+            "last_success_at",
+            "disabled_at",
+        },
+        "notification_deliveries": {
+            "id",
+            "event_id",
+            "subscription_id",
+            "status",
+            "attempt_count",
+            "next_attempt_at",
+            "last_status_code",
+            "delivered_at",
+            "claimed_by",
+            "claim_expires_at",
+            "fencing_token",
+        },
+    }
+    for table_name, required in required_new_columns.items():
+        actual = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table_name})")}
+        missing = required - actual
+        if missing:
+            raise MigrationError(
+                f"migrated schema table {table_name} is missing columns: {sorted(missing)}"
+            )
     invalid_membership = connection.execute(
         "SELECT COUNT(*) FROM jobs LEFT JOIN projects ON projects.id = jobs.project_id "
         "WHERE jobs.project_id IS NULL OR projects.id IS NULL "
@@ -709,7 +854,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -753,6 +898,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
                 _cp6_ddl(connection)
             _cp7_ddl(connection)
             _cp8_ddl(connection)
+            _cp9_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

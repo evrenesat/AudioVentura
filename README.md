@@ -30,6 +30,9 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   runbook](docs/FAL.md) before enabling paid endpoints.
 - The quality-evaluation CLI is intentionally quarantined until ordinary
   original and cover generation are stable.
+- Managed Salad and RunPod capacity use durable database leases. Browser
+  notifications are opt-in Web Push; Fal remains inference-only and never
+  enters capacity management.
 
 ## Repository map
 
@@ -96,8 +99,22 @@ Important groups are:
 - `RUNPOD_*`: Runpod API, endpoint, polling, and timeout settings;
 - `SALAD_*`: Salad API, organization, project, queue, container group, and
   timeout settings;
+- `SALAD_CAPACITY_EXPECTED_FINGERPRINT` and
+  `RUNPOD_CAPACITY_EXPECTED_FINGERPRINT`: reviewed immutable capacity
+  fingerprints derived from the pinned secret-free v1 fixture; omitting one
+  disables that capacity manager. `capacity-preflight --once` compares live
+  provider identity read-only before deployment;
+- `WEB_PUSH_VAPID_PUBLIC_KEY`, `WEB_PUSH_VAPID_PRIVATE_KEY`,
+  `WEB_PUSH_VAPID_SUBJECT`, `WEB_PUSH_ALLOWED_ENDPOINT_ORIGINS`, and
+  `WEB_PUSH_SEND_TIMEOUT_SECONDS`: optional browser notification settings;
+  the private key stays only in deployment-managed configuration;
 - `ACESTEP_*` and `RUNPOD_WORKER_RUNTIME_IDENTITY`: pinned model and worker
   identity recorded with jobs and outputs.
+
+Keep-warm is not an environment setting. After schema v9 migration, the
+authenticated dashboard stores the exact global value in SQLite, defaulting to
+15 minutes. Enable notifications from the explicit dashboard button; the
+service worker is scoped to the configured root path.
 
 Placeholder credentials are rejected. Never commit `.env`, API keys, database
 files, generated audio, private fixtures, or capability URLs.
@@ -109,6 +126,16 @@ Run the private controller:
 ```text
 uv run python -m ace_service
 ```
+
+The deployment watchdog can run dead-man reconciliation without starting a
+second controller:
+
+```text
+uv run python -m ace_service capacity-reconcile --once
+```
+
+Use `uv run python -m ace_service capacity-preflight --once` for an inspection
+only identity check. It never changes a provider floor.
 
 Run the public transfer app as a separate process using the same data root:
 

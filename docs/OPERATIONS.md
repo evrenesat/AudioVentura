@@ -287,3 +287,41 @@ uv run mypy src
 Also run the focused provider commands in [RUNPOD.md](RUNPOD.md) or
 [SALAD.md](SALAD.md), plus `shellcheck deploy/salad/entrypoint.sh` for Salad
 image changes.
+
+## Keep-warm, watchdog, and notifications
+
+Schema v9 adds the database-owned keep-warm setting, capacity leases, and the
+Web Push outbox. Back up SQLite and the protected environment before the
+explicit migration sequence. Confirm `migration-status` reports
+`exact_expected` after `migrate-upgrade`; application startup never migrates.
+
+The dashboard setting is authoritative. It accepts only `0, 60, 120, 180,
+300, 600, 900, 1800, 2700, 3600, 7200, 10800, 14400` seconds and defaults to
+900. Zero skips new retention. Capacity managers are enabled only when their
+reviewed `*_CAPACITY_EXPECTED_FINGERPRINT` is present and matches read-only
+provider inspection. Never substitute an environment keep-warm value.
+
+The controller reconciles every 15 seconds. A separate systemd timer invokes
+`capacity-reconcile --once` every minute as a dead-man path. Both paths inspect
+before acting, keep one worker maximum, wait for actual zero workers before
+marking release complete, and retry only cost-reducing actions after an outage.
+The deployment also runs `capacity-preflight --once`, which derives the
+expected digest from the reviewed fixture and compares live immutable identity
+read-only before service activation. The watchdog exits 2 for drift, malformed
+or missing provider identity, and confirmed release overdue; it exits 1 while
+release is still being observed or a transient/provider-work condition remains.
+`release_overdue` is degraded readiness and requires operator attention; it is
+not evidence that the provider has reached zero.
+
+For VAPID rotation, generate a new P-256 key pair offline, replace the private
+key only in the protected environment, update the public key and exact HTTPS
+origin allow-list, restart the controller, and have browsers re-enable
+notifications. Rotation invalidates existing subscriptions; do not log keys or
+subscription endpoints.
+
+If release is overdue, stop paid acceptance, inspect the exact provider
+resource read-only, and use the provider-specific manual release procedure
+only after proving no controller/provider work remains. Keep the controller and
+watchdog running for idempotent cost-reducing retries. Never submit a replacement
+generation to diagnose a release problem. Restore both providers to confirmed
+zero before handoff.

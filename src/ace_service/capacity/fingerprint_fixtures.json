@@ -1,0 +1,161 @@
+{
+  "runpod": {
+    "schema": "runpod-capacity-v1",
+    "payload": {
+      "endpoint": {
+        "id": "p1t6aef0dlpz5e",
+        "name": "audioventura-ace-step",
+        "template_id": "37lrt6ox2k",
+        "workers_max": 1,
+        "gpu_count": 1,
+        "min_cuda_version": "12.8",
+        "execution_timeout_ms": 1200000,
+        "idle_timeout_seconds": 30,
+        "flash_boot": true,
+        "network_volume_id": "bgh5crlzt8",
+        "network_volume_ids": [
+          "bgh5crlzt8"
+        ],
+        "gpu_type_ids": [
+          "NVIDIA GeForce RTX 5090",
+          "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+          "NVIDIA B200",
+          "NVIDIA L4",
+          "NVIDIA RTX 4000 Ada Generation"
+        ],
+        "scaler": {
+          "type": "QUEUE_DELAY",
+          "value": 2
+        }
+      },
+      "template": {
+        "id": "37lrt6ox2k",
+        "name": "audioventura-ace-step-worker-fff9851",
+        "category": "NVIDIA",
+        "container_disk_in_gb": 30,
+        "is_serverless": true,
+        "ports": [
+          "8888/http",
+          "22/tcp"
+        ],
+        "readme": "",
+        "volume_mount_path": "/workspace",
+        "image_name": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:bb0603760568535e3c93a7003766c0f3fc247f55a1e6a311022b55927aa5f2ca",
+        "environment": {
+          "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
+          "ACE_WORKER_CHECKPOINTS_DIR": "/runpod-volume/huggingface-cache/hub",
+          "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:bb0603760568535e3c93a7003766c0f3fc247f55a1e6a311022b55927aa5f2ca"
+        }
+      }
+    },
+    "sha256": "8282bdbc3b33be9270fb4fbd5f5b4f4e5b9d3082f24db4e5c0522bebf1038f1d"
+  },
+  "salad": {
+    "schema": "salad-capacity-v1",
+    "payload": {
+      "organization": "evrenesat",
+      "project": "audioventura",
+      "queue": {
+        "name": "audioventura-jobs",
+        "display_name": "AudioVentura jobs",
+        "description": "AudioVentura ACE-Step inference jobs"
+      },
+      "group": {
+        "name": "audioventura-ace-step-v2",
+        "display_name": "AudioVentura ACE-Step",
+        "autostart_policy": true,
+        "restart_policy": "always",
+        "container": {
+          "image": "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53",
+          "image_caching": true,
+          "priority": "medium",
+          "resources": {
+            "cpu": 8,
+            "memory": 32768,
+            "gpu_classes": [
+              "RTX 3090",
+              "RTX 3090 Ti",
+              "RTX A5000",
+              "RTX 4090",
+              "RTX 5090"
+            ],
+            "shm_size": 8192,
+            "storage_amount": 2147483648
+          },
+          "environment_variables": {
+            "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
+            "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53",
+            "SALAD_QUEUE_WORKER_LOG_LEVEL": "info"
+          }
+        },
+        "queue_connection": {
+          "path": "/process",
+          "port": 8080,
+          "queue_name": "audioventura-jobs"
+        },
+        "queue_autoscaler": {
+          "desired_queue_length": 1,
+          "max_downscale_per_minute": 1,
+          "max_replicas": 1,
+          "max_upscale_per_minute": 1,
+          "polling_period": 15
+        },
+        "startup_probe": {
+          "failure_threshold": 20,
+          "initial_delay_seconds": 0,
+          "period_seconds": 90,
+          "success_threshold": 1,
+          "timeout_seconds": 5,
+          "http": {
+            "headers": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "path": "/ready",
+            "port": 8080,
+            "scheme": "http"
+          }
+        },
+        "readiness_probe": {
+          "failure_threshold": 3,
+          "initial_delay_seconds": 0,
+          "period_seconds": 10,
+          "success_threshold": 1,
+          "timeout_seconds": 5,
+          "http": {
+            "headers": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "path": "/ready",
+            "port": 8080,
+            "scheme": "http"
+          }
+        },
+        "liveness_probe": {
+          "failure_threshold": 3,
+          "initial_delay_seconds": 0,
+          "period_seconds": 30,
+          "success_threshold": 1,
+          "timeout_seconds": 5,
+          "http": {
+            "headers": [
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "path": "/live",
+            "port": 8080,
+            "scheme": "http"
+          }
+        }
+      }
+    },
+    "sha256": "b96599508b58a7038e4a9628e4b16a215294f4cdd3710e4723bc0dfc687deddd"
+  }
+}

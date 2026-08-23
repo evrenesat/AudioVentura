@@ -27,6 +27,7 @@ _CREDENTIAL_FIELDS = (
     "home_ingest_token",
 )
 _WORKER_RUNTIME_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 _SERVICE_ROOT_PATH_RE = re.compile(r"^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)$")
 
 
@@ -282,6 +283,12 @@ class ServiceSettings(BaseSettings):
         validation_alias=AliasChoices("SALAD_POOL_TIMEOUT_SECONDS", "salad_pool_timeout_seconds"),
         gt=0,
     )
+    salad_capacity_expected_fingerprint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SALAD_CAPACITY_EXPECTED_FINGERPRINT", "salad_capacity_expected_fingerprint"
+        ),
+    )
     runpod_api_key: str = Field(
         default="change-me",
         validation_alias=AliasChoices("RUNPOD_API_KEY", "runpod_api_key"),
@@ -337,6 +344,12 @@ class ServiceSettings(BaseSettings):
         default=5,
         validation_alias=AliasChoices("RUNPOD_POOL_TIMEOUT_SECONDS", "runpod_pool_timeout_seconds"),
         gt=0,
+    )
+    runpod_capacity_expected_fingerprint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "RUNPOD_CAPACITY_EXPECTED_FINGERPRINT", "runpod_capacity_expected_fingerprint"
+        ),
     )
     acestep_model: str = Field(
         default="acestep-v15-xl-turbo",
@@ -427,6 +440,32 @@ class ServiceSettings(BaseSettings):
     eligible_gpu_ids: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("ACE_ELIGIBLE_GPU_IDS", "eligible_gpu_ids"),
+    )
+    web_push_vapid_public_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WEB_PUSH_VAPID_PUBLIC_KEY", "web_push_vapid_public_key"),
+    )
+    web_push_vapid_private_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WEB_PUSH_VAPID_PRIVATE_KEY", "web_push_vapid_private_key"),
+    )
+    web_push_vapid_subject: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WEB_PUSH_VAPID_SUBJECT", "web_push_vapid_subject"),
+    )
+    web_push_allowed_endpoint_origins: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "WEB_PUSH_ALLOWED_ENDPOINT_ORIGINS", "web_push_allowed_endpoint_origins"
+        ),
+    )
+    web_push_send_timeout_seconds: float = Field(
+        default=10,
+        validation_alias=AliasChoices(
+            "WEB_PUSH_SEND_TIMEOUT_SECONDS", "web_push_send_timeout_seconds"
+        ),
+        gt=0,
+        le=60,
     )
 
     @field_validator("eligible_gpu_ids")
@@ -545,6 +584,16 @@ class ServiceSettings(BaseSettings):
             )
         return normalized
 
+    @field_validator("salad_capacity_expected_fingerprint", "runpod_capacity_expected_fingerprint")
+    @classmethod
+    def validate_capacity_fingerprint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not _FINGERPRINT_RE.fullmatch(normalized):
+            raise ValueError("capacity fingerprint must be 64 lowercase hexadecimal characters")
+        return normalized
+
     @field_validator("host", "transfer_host")
     @classmethod
     def reject_wildcard_bind(cls, value: str) -> str:
@@ -655,6 +704,50 @@ class ServiceSettings(BaseSettings):
                 "runpod_worker_runtime_identity is required when eligible GPU IDs are configured"
             )
 
+        vapid_values = (
+            self.web_push_vapid_public_key,
+            self.web_push_vapid_private_key,
+            self.web_push_vapid_subject,
+        )
+        if any(value is not None and not value.strip() for value in vapid_values):
+            raise ValueError("Web Push VAPID values must not be empty")
+        if any(value is not None for value in vapid_values) and not all(vapid_values):
+            raise ValueError(
+                "Web Push VAPID public key, private key, and subject are required together"
+            )
+        if self.web_push_vapid_subject is not None:
+            subject = self.web_push_vapid_subject.strip()
+            parsed_subject = urlsplit(subject)
+            if not (
+                subject.lower().startswith("mailto:")
+                or (parsed_subject.scheme == "https" and parsed_subject.hostname)
+            ):
+                raise ValueError("WEB_PUSH_VAPID_SUBJECT must be a mailto or HTTPS contact URI")
+            self.web_push_vapid_subject = subject
+        origins = [
+            item.strip().rstrip("/")
+            for item in self.web_push_allowed_endpoint_origins.split(",")
+            if item.strip()
+        ]
+        for origin in origins:
+            parsed_origin = urlsplit(origin)
+            if (
+                parsed_origin.scheme != "https"
+                or not parsed_origin.hostname
+                or parsed_origin.port not in {None, 443}
+                or parsed_origin.path not in {"", "/"}
+                or parsed_origin.query
+                or parsed_origin.fragment
+                or parsed_origin.username
+                or parsed_origin.password
+            ):
+                raise ValueError("Web Push endpoint origins must be exact HTTPS origins")
+        if any(value is not None for value in vapid_values) and not origins:
+            raise ValueError("Web Push requires at least one endpoint origin")
+        if origins and not any(value is not None for value in vapid_values):
+            raise ValueError("Web Push endpoint origins require VAPID configuration")
+        self.web_push_allowed_endpoint_origins = ",".join(origins)
+
         self.data_root = self.data_root.expanduser().resolve()
         if self.evaluation_campaign_database is not None:
             campaign_database = self.evaluation_campaign_database.expanduser().resolve()
@@ -674,6 +767,21 @@ class ServiceSettings(BaseSettings):
     @property
     def fal_allowed_media_kind_values(self) -> frozenset[str]:
         return frozenset(item for item in self.fal_allowed_media_kinds.split(",") if item)
+
+    @property
+    def web_push_enabled(self) -> bool:
+        return all(
+            value is not None
+            for value in (
+                self.web_push_vapid_public_key,
+                self.web_push_vapid_private_key,
+                self.web_push_vapid_subject,
+            )
+        )
+
+    @property
+    def web_push_allowed_origins(self) -> frozenset[str]:
+        return frozenset(item for item in self.web_push_allowed_endpoint_origins.split(",") if item)
 
     @property
     def campaign_database_path(self) -> Path:

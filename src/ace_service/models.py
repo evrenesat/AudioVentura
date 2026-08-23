@@ -514,6 +514,186 @@ class BillingLease(Base):
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
+KEEP_WARM_SECONDS = (0, 60, 120, 180, 300, 600, 900, 1800, 2700, 3600, 7200, 10800, 14400)
+KEEP_WARM_LABELS = {
+    0: "0 minutes",
+    60: "1 minute",
+    120: "2 minutes",
+    180: "3 minutes",
+    300: "5 minutes",
+    600: "10 minutes",
+    900: "15 minutes",
+    1800: "30 minutes",
+    2700: "45 minutes",
+    3600: "1 hour",
+    7200: "2 hours",
+    10800: "3 hours",
+    14400: "4 hours",
+}
+CAPACITY_LEASE_STATES = frozenset(
+    {"cold", "warming", "retained", "idle", "releasing", "release_overdue"}
+)
+NOTIFICATION_EVENT_KINDS = frozenset(
+    {
+        "generation_completed",
+        "managed_generation_started",
+        "capacity_retained_reminder",
+        "capacity_release_warning",
+        "capacity_released",
+        "capacity_release_overdue",
+    }
+)
+
+
+class ControllerSetting(Base):
+    """The singleton settings row owned by the database, not the environment."""
+
+    __tablename__ = "controller_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_controller_settings_singleton"),
+        CheckConstraint(
+            "keep_warm_seconds IN (0, 60, 120, 180, 300, 600, 900, 1800, "
+            "2700, 3600, 7200, 10800, 14400)",
+            name="ck_controller_settings_keep_warm",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    keep_warm_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=900)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class CapacityLease(Base):
+    """Durable controller state for one provider-owned billable capacity key."""
+
+    __tablename__ = "capacity_leases"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('cold', 'warming', 'retained', 'idle', 'releasing', 'release_overdue')",
+            name="ck_capacity_leases_state",
+        ),
+    )
+
+    capacity_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="cold")
+    session_id: Mapped[str | None] = mapped_column(String(36))
+    idle_epoch_id: Mapped[str | None] = mapped_column(String(36))
+    last_activity_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    release_due_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    warmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    next_reminder_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    release_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    released_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    action_owner: Mapped[str | None] = mapped_column(String(128))
+    action_lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class NotificationEvent(Base):
+    """Safe, durable notification payload and its idempotency key."""
+
+    __tablename__ = "notification_events"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('generation_completed', 'managed_generation_started', "
+            "'capacity_retained_reminder', 'capacity_release_warning', "
+            "'capacity_released', 'capacity_release_overdue')",
+            name="ck_notification_events_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("jobs.id", ondelete="CASCADE")
+    )
+    provider: Mapped[str | None] = mapped_column(String(32))
+    capacity_key: Mapped[str | None] = mapped_column(String(256))
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    body: Mapped[str] = mapped_column(String(512), nullable=False)
+    target_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    deliveries: Mapped[list[NotificationDelivery]] = relationship(
+        "NotificationDelivery",
+        back_populates="event",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class PushSubscription(Base):
+    """One browser push subscription; endpoint and keys are never exposed."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    endpoint: Mapped[str] = mapped_column(String(2048), nullable=False, unique=True)
+    endpoint_origin: Mapped[str] = mapped_column(String(256), nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(256), nullable=False)
+    auth: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    disabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+    deliveries: Mapped[list[NotificationDelivery]] = relationship(
+        "NotificationDelivery",
+        back_populates="subscription",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class NotificationDelivery(Base):
+    """Per-event delivery state with bounded retry ownership."""
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("event_id", "subscription_id", name="uq_notification_delivery_target"),
+        CheckConstraint(
+            "status IN ('pending', 'delivered', 'abandoned')",
+            name="ck_notification_deliveries_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("notification_events.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    subscription_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("push_subscriptions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, nullable=False
+    )
+    last_status_code: Mapped[int | None] = mapped_column(Integer)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    claimed_by: Mapped[str | None] = mapped_column(String(128))
+    claim_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    event: Mapped[NotificationEvent] = relationship(
+        "NotificationEvent", back_populates="deliveries"
+    )
+    subscription: Mapped[PushSubscription] = relationship(
+        "PushSubscription", back_populates="deliveries"
+    )
+
+
 class TransferCapability(Base):
     __tablename__ = "transfer_capabilities"
 

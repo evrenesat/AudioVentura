@@ -115,6 +115,27 @@ temporary directories, and non-retained terminal cover sources. It does not
 remove completed outputs. Backups therefore contain private user media and
 must receive the same access controls as the live data root.
 
+## Web Push and capacity safety
+
+Push subscriptions contain endpoint URLs and browser authentication keys. They
+are stored only in the private SQLite database, never rendered into HTML,
+logged, or returned after creation. Accept only HTTPS endpoints whose exact
+origin is in `WEB_PUSH_ALLOWED_ENDPOINT_ORIGINS`; this allow-list is the SSRF
+boundary for the server-side dispatcher. VAPID private keys stay in the
+protected environment file.
+
+The service worker is authenticated, served with `Service-Worker-Allowed` for
+the configured root path, and accepts only finite event kinds, bounded copy,
+and same-origin paths below that scope. Notification payloads contain no
+prompts, lyrics, provider identifiers, subscription data, or capability URLs.
+Push failure is isolated from job completion and capacity release. A 404/410
+disables only the affected subscription.
+
+Capacity fingerprints are spend-side guards, not secrets. The controller
+refuses resource identity, maximum-one, GPU, deployment, or queue drift and
+uses a fenced durable action lease for every provider mutation. Release is not
+considered complete until provider-observed zero evidence exists.
+
 ## Release check
 
 Before deployment or public source publication:

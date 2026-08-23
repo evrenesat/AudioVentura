@@ -102,6 +102,26 @@ Pending cancellation is supported. Running cancellation is treated as too
 late. A not-found result becomes terminal only under the controller's bounded
 Runpod recovery rules; it is not permission to submit another job.
 
+## Automated keep-warm lease
+
+The managed capacity adapter is enabled only with the reviewed
+`RUNPOD_CAPACITY_EXPECTED_FINGERPRINT`. Its fingerprint covers the exact
+endpoint identity, GPU count, and immutable deployment contract. Read-only
+inspection refuses drift, `workersMax` values other than one, active provider
+work, or more than one observed worker.
+
+The lease changes only `workersMin`: retain is a partial PATCH to one and
+release is a partial PATCH to zero. It never changes `workersMax`, GPU
+selection, image, timeout, or endpoint deployment settings. A lost PATCH
+response is resolved by inspection, not a second generation submission. The
+controller waits for observed zero workers/jobs after the desired-zero write;
+nonzero capacity after the bounded grace period is durable `release_overdue`
+state and degraded readiness.
+
+Before enabling the adapter, perform the documented read-only preflight and a
+partial-PATCH canary only while the endpoint has no queue or active jobs. Keep
+the existing RunPod configuration repair tool available for emergency recovery.
+
 ## Verification
 
 The local worker contract suite does not require CUDA or model weights:

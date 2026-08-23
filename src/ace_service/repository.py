@@ -11,7 +11,8 @@ from decimal import Decimal
 from typing import Any, Literal, cast, overload
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from ace_service.costs import (
@@ -29,17 +30,24 @@ from ace_service.costs import (
 from ace_service.models import (
     ATTEMPT_UNAVAILABLE_REASONS,
     EVIDENCE_STATUSES,
+    KEEP_WARM_SECONDS,
+    NOTIFICATION_EVENT_KINDS,
     PROJECT_TITLE_MAX_LENGTH,
     QUOTE_UNAVAILABLE_REASONS,
     BillingObservation,
     BillingProjection,
+    CapacityLease,
+    ControllerSetting,
     GpuRateCatalog,
     Job,
     JobStatus,
     JobType,
+    NotificationDelivery,
+    NotificationEvent,
     Output,
     OutputFormat,
     Project,
+    PushSubscription,
     RuntimeCalibration,
     SubmissionQuote,
     TransferCapability,
@@ -78,6 +86,258 @@ _PROGRESS_SEQUENCES = {
     "finalizing": 30,
     "output_upload": 40,
 }
+
+
+def get_keep_warm_seconds(session: Session) -> int:
+    """Read the singleton keep-warm setting, creating the test/foundation row if needed."""
+
+    setting = session.get(ControllerSetting, 1)
+    if setting is None:
+        setting = ControllerSetting(id=1, keep_warm_seconds=900, updated_at=utc_now())
+        session.add(setting)
+        session.flush()
+    if setting.keep_warm_seconds not in KEEP_WARM_SECONDS:
+        raise ValueError("stored keep-warm setting is invalid")
+    return setting.keep_warm_seconds
+
+
+def set_keep_warm_seconds(session: Session, seconds: int, *, now: datetime | None = None) -> int:
+    """Persist one exact global keep-warm value."""
+
+    if isinstance(seconds, bool) or seconds not in KEEP_WARM_SECONDS:
+        raise ValueError("keep-warm value is not an allowed duration")
+    setting = session.get(ControllerSetting, 1)
+    if setting is None:
+        setting = ControllerSetting(id=1, keep_warm_seconds=seconds, updated_at=_utc_timestamp(now))
+        session.add(setting)
+    else:
+        setting.keep_warm_seconds = seconds
+        setting.updated_at = _utc_timestamp(now)
+    session.flush()
+    return seconds
+
+
+def get_capacity_lease(session: Session, capacity_key: str) -> CapacityLease | None:
+    return session.get(CapacityLease, capacity_key)
+
+
+def ensure_capacity_lease(
+    session: Session,
+    capacity_key: str,
+    provider: ProviderName | str,
+    *,
+    now: datetime | None = None,
+) -> CapacityLease:
+    """Create the durable cold row without changing an existing session identity."""
+
+    if not capacity_key or len(capacity_key) > 256 or any(ord(c) < 33 for c in capacity_key):
+        raise ValueError("capacity key is invalid")
+    normalized_provider = ProviderName(provider).value
+    lease = session.get(CapacityLease, capacity_key)
+    if lease is None:
+        lease = CapacityLease(
+            capacity_key=capacity_key,
+            provider=normalized_provider,
+            state="cold",
+            updated_at=_utc_timestamp(now),
+        )
+        session.add(lease)
+        session.flush()
+    elif lease.provider != normalized_provider:
+        raise ValueError("capacity key is already owned by another provider")
+    return lease
+
+
+def acquire_capacity_action_lease(
+    session: Session,
+    capacity_key: str,
+    owner: str,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: int = 45,
+) -> int | None:
+    """Acquire the short provider-mutation lease and increment its fencing token."""
+
+    if not owner or len(owner) > 128 or ttl_seconds <= 0:
+        raise ValueError("capacity action lease arguments are invalid")
+    current = _utc_timestamp(now)
+    lease = session.get(CapacityLease, capacity_key)
+    if lease is None:
+        raise KeyError(f"unknown capacity lease: {capacity_key}")
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(CapacityLease)
+            .where(
+                CapacityLease.capacity_key == capacity_key,
+                or_(
+                    CapacityLease.action_owner.is_(None),
+                    CapacityLease.action_lease_expires_at <= current,
+                    CapacityLease.action_owner == owner,
+                ),
+            )
+            .values(
+                action_owner=owner,
+                action_lease_expires_at=current + timedelta(seconds=ttl_seconds),
+                fencing_token=CapacityLease.fencing_token + 1,
+                updated_at=current,
+            ),
+        ),
+    )
+    if result.rowcount != 1:
+        return None
+    refreshed = session.get(CapacityLease, capacity_key)
+    return refreshed.fencing_token if refreshed is not None else None
+
+
+def mark_capacity_action_started(
+    session: Session,
+    capacity_key: str,
+    *,
+    owner: str,
+    fencing_token: int,
+    operation: str,
+    now: datetime | None = None,
+) -> CapacityLease | None:
+    """Persist a provider action's durable intent while its fence is held."""
+
+    if operation != "release":
+        raise ValueError("only release actions have a durable pre-call marker")
+    lease = session.get(CapacityLease, capacity_key)
+    if lease is None or lease.action_owner != owner or lease.fencing_token != fencing_token:
+        return None
+    timestamp = _utc_timestamp(now)
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(CapacityLease)
+            .where(
+                CapacityLease.capacity_key == capacity_key,
+                CapacityLease.action_owner == owner,
+                CapacityLease.fencing_token == fencing_token,
+            )
+            .values(
+                state="releasing",
+                release_requested_at=lease.release_requested_at or timestamp,
+                updated_at=timestamp,
+            ),
+        ),
+    )
+    if result.rowcount != 1:
+        session.expire_all()
+        return None
+    return session.get(CapacityLease, capacity_key)
+
+
+def update_capacity_lease_if_owner(
+    session: Session,
+    capacity_key: str,
+    *,
+    owner: str,
+    fencing_token: int,
+    now: datetime | None = None,
+    **changes: Any,
+) -> CapacityLease | None:
+    """Apply a reconciliation result only while its fencing token is current."""
+
+    lease = session.get(CapacityLease, capacity_key)
+    if lease is None or lease.action_owner != owner or lease.fencing_token != fencing_token:
+        return None
+    allowed = set(CapacityLease.__table__.columns.keys()) - {
+        "capacity_key",
+        "provider",
+        "action_owner",
+        "fencing_token",
+    }
+    if set(changes) - allowed:
+        raise ValueError("unknown capacity lease field")
+    timestamp = _utc_timestamp(now)
+    values = dict(changes)
+    values.update(
+        {
+            "updated_at": timestamp,
+            "action_owner": None,
+            "action_lease_expires_at": None,
+        }
+    )
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(CapacityLease)
+            .where(
+                CapacityLease.capacity_key == capacity_key,
+                CapacityLease.action_owner == owner,
+                CapacityLease.fencing_token == fencing_token,
+            )
+            .values(**values),
+        ),
+    )
+    if result.rowcount != 1:
+        session.expire_all()
+        return None
+    return session.get(CapacityLease, capacity_key)
+
+
+def insert_notification_event(
+    session: Session,
+    *,
+    event_key: str,
+    kind: str,
+    title: str,
+    body: str,
+    target_path: str,
+    job_id: str | None = None,
+    provider: ProviderName | str | None = None,
+    capacity_key: str | None = None,
+    created_at: datetime | None = None,
+) -> NotificationEvent:
+    """Insert one safe event and fan it out to subscriptions active at creation."""
+
+    if not event_key or len(event_key) > 256 or kind not in NOTIFICATION_EVENT_KINDS:
+        raise ValueError("notification event identity is invalid")
+    if not title or len(title) > 128 or not body or len(body) > 512:
+        raise ValueError("notification copy is invalid")
+    if (
+        not target_path
+        or not target_path.startswith("/")
+        or target_path.startswith("//")
+        or "://" in target_path
+        or len(target_path) > 1024
+    ):
+        raise ValueError("notification target path is invalid")
+    existing = session.scalar(
+        select(NotificationEvent).where(NotificationEvent.event_key == event_key)
+    )
+    if existing is not None:
+        return existing
+    timestamp = _utc_timestamp(created_at)
+    event = NotificationEvent(
+        event_key=event_key,
+        kind=kind,
+        job_id=job_id,
+        provider=ProviderName(provider).value if provider is not None else None,
+        capacity_key=capacity_key,
+        title=title,
+        body=body,
+        target_path=target_path,
+        created_at=timestamp,
+    )
+    session.add(event)
+    session.flush()
+    active = list(
+        session.scalars(select(PushSubscription).where(PushSubscription.disabled_at.is_(None)))
+    )
+    for subscription in active:
+        session.add(
+            NotificationDelivery(
+                event_id=event.id,
+                subscription_id=subscription.id,
+                status="pending",
+                next_attempt_at=timestamp,
+            )
+        )
+    session.flush()
+    return event
 
 
 def job_provider(job: Job) -> ProviderName:
@@ -1248,6 +1508,17 @@ def complete_variation_attempt(
         job.current_provider_job_id = None
         job.current_submission_nonce = None
         transition_job(session, job.id, JobStatus.COMPLETED, now=timestamp)
+        insert_notification_event(
+            session,
+            event_key=f"generation-completed:{job.id}",
+            kind="generation_completed",
+            title="Generation complete",
+            body="Your AudioVentura generation is ready.",
+            target_path=f"/jobs/{job.id}",
+            job_id=job.id,
+            provider=job.inference_provider,
+            created_at=timestamp,
+        )
         return job, attempt, True
     next_index = attempt.variation_index + 1
     create_variation_attempt(session, job_id=job.id, variation_index=next_index)

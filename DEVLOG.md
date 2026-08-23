@@ -795,3 +795,31 @@ production-default change, or commit. Checkpoint 3 remains unchecked.
   capability validation, continuation preservation, and backend detail views.
 - Added offline catalog, queue, CDN, and atomic artifact tests. No live paid Fal
   request or deployment mutation was performed.
+
+## 2026-08-23 (durable keep-warm and Web Push)
+
+- Added schema v9 controller settings, capacity leases, provider-neutral Salad
+  and RunPod capacity managers, a fenced one-shot reconciliation command, and
+  durable controller/watchdog recovery state. Fal remains outside capacity
+  management.
+- Added verified parent completion and managed-lifecycle notification events,
+  a bounded Web Push outbox/dispatcher, root-aware service worker, explicit
+  browser enablement, and database-owned keep-warm controls.
+- Added offline provider, UI, migration, notification, and root-path tests.
+  Product and Evreniops changes were validated locally only; no provider,
+  deployment, paid generation, or public publishing action was performed.
+
+## 2026-08-23 (keep-warm review fixes)
+
+- Persisted the release-attempt timestamp before provider mutation so a lost
+  release response reaches durable `release_overdue` state and remains
+  retryable.
+- Pinned complete secret-free Salad/RunPod v1 identity fixtures, fail-closed
+  environment/endpoint validation, read-only preflight, and exhaustive
+  watchdog exit mapping.
+- Restricted generation-start notifications to backends resolved by the
+  injected capacity registry and made legacy watchdog rollback verify absence.
+- Corrected readiness-timed retention sessions, expired-deadline warnings,
+  exhausted delivery health, VAPID browser-key conversion, and `/beta`
+  notification-click navigation. Provider preflight now loads the protected
+  environment explicitly and requests RunPod's embedded template identity.
