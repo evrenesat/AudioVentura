@@ -127,6 +127,7 @@ def desired_container_group(
         raise InfraError("Salad worker image must be the immutable AudioVentura GHCR digest")
     if not ghcr_username or not ghcr_token:
         raise InfraError("GHCR_USERNAME and GHCR_TOKEN are required for the private image")
+    image_digest = image_ref.rsplit("@", 1)[1]
     group = config["container_group"]
     queue = config["queue"]
     resources = config["resources"]
@@ -152,7 +153,7 @@ def desired_container_group(
                 "storage_amount": resources["storage_bytes"],
             },
             "environment_variables": {
-                "ACE_WORKER_IMAGE_DIGEST": image_ref,
+                "ACE_WORKER_IMAGE_DIGEST": image_digest,
                 "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
                 "SALAD_QUEUE_WORKER_LOG_LEVEL": "info",
             },

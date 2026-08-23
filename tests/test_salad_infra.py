@@ -79,6 +79,7 @@ def test_desired_state_is_scale_to_zero_and_secret_is_not_serialized_elsewhere(
     ]
     assert group["container"]["registry_authentication"]["basic"]["password"] == "token"
     environment = group["container"]["environment_variables"]
+    assert environment["ACE_WORKER_IMAGE_DIGEST"] == "sha256:" + "a" * 64
     assert environment["SALAD_QUEUE_WORKER_LOG_LEVEL"] == "info"
     assert "SALAD_LOG_LEVEL" not in environment
 

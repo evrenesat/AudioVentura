@@ -29,6 +29,9 @@ Job Queue Worker's direct JSON request body into the existing schema-v2
 ACE-Step models initialize; the queue worker starts only after that endpoint
 passes. Large audio still uses the controller's signed HTTPS capabilities and
 the Salad job response contains metadata only.
+`ACE_WORKER_IMAGE_DIGEST` carries the bare immutable manifest digest (without
+the registry/repository prefix), matching the controller's runtime identity
+and calibration contract.
 
 ## Build and size verification
 
