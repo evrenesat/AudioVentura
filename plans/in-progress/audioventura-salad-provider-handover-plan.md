@@ -1,5 +1,42 @@
 # AudioVentura Salad provider abstraction handoff plan
 
+## Live execution status — 2026-08-23
+
+Implementation, immutable image assembly, Salad provisioning, provider cutover,
+and controller deployment are complete. The deployed worker image is
+`sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53`
+(20 compressed layers, 28,979,331,889 bytes). Container group
+`audioventura-ace-step-v2` and queue `audioventura-jobs` are configured with
+the planned 0→1 autoscaler and five compatible GPU classes.
+
+Live acceptance is blocked by SaladCloud's capacity/control plane:
+
+- The first application submission reached an RTX 3090 and exposed a real
+  product mismatch: pinned ACE-Step locks cover duration to source duration.
+  The shared worker now streams/repeats/truncates custom cover sources to the
+  exact requested duration; focused and non-expired repository suites pass and
+  the corrected image is deployed.
+- The replacement acceptance job `69252486-2c26-4a79-80d3-284811ea0766`
+  persisted provider job `5640ff12-c5e1-454f-8bd4-80d0bed0bc13` at
+  `2026-08-23T09:06:46Z`. It remained pending for 54 minutes 23 seconds.
+  Batch priority received 30 minutes, low more than ten minutes, and medium
+  more than ten minutes. Desired replicas stayed one, but the instance API
+  never returned a machine and the job never received a dispatch event.
+- The exact pending provider job was cancelled at `2026-08-23T10:01:10Z` so it
+  could not incur later cost. Queue depth reached zero, but Salad did not
+  downscale desired replicas; `replicas=0` was restored explicitly. There are
+  no instances and no pending deployment change.
+- The continuation was not submitted. Two total application submissions were
+  used across live validation (the pre-fix generation and this allocation
+  probe), leaving eight under the owner's ten-test authorization.
+
+Do not submit another paid fixture until Salad can demonstrate that this exact
+group can allocate an instance. Resume by checking the existing queue/group,
+opening or following a Salad support incident with the sanitized IDs and UTC
+timeline above, and requiring `replicas=0`, empty queue, and zero instances
+before a fresh exact two-submission acceptance run. The final acceptance
+criteria in Section 10 remain unmet.
+
 ## 1. Objective and fixed starting point
 
 Implement a durable multi-provider inference boundary with SaladCloud as the

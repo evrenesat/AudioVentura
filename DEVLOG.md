@@ -25,6 +25,16 @@
   priority from batch to low without resubmitting the durable queue job. Low
   priority also produced no instance for more than ten minutes, so the same
   queue job was promoted to medium priority for the final capacity probe.
+- Medium priority likewise produced no instance for more than ten minutes.
+  The single Salad job stayed `pending` for 54 minutes 23 seconds with only
+  `created` and operator `cancelled` events; the instance API remained empty
+  throughout. After cancellation, the queue reached zero but desired replicas
+  remained one until explicitly restored to zero. This is a Salad-side
+  capacity/control-plane blocker, not an AudioVentura generation failure.
+- The second acceptance submission (local continuation) was never made. Across
+  live validation, two application submissions have been consumed: the first
+  exposed and enabled the custom-duration fix; the second established the
+  provider allocation blocker. Both are terminal and Salad is zero-at-rest.
 
 ## 2026-08-23 (Salad live pull-progress normalization)
 

@@ -104,3 +104,14 @@ Pending jobs can be cancelled. Running jobs return `too_late`, and the
 controller keeps polling the same durable UUID. Salad 404 responses are never
 terminal by assumption. Status uncertainty retains the exact job, transfers,
 source, progress, and provider reference; provider submission is never retried.
+
+## Current live blocker (2026-08-23)
+
+The corrected image and controller are deployed, but a clean acceptance queue
+job remained pending for 54 minutes 23 seconds without any instance record or
+dispatch event. The same UUID was observed at batch for 30 minutes, then low
+and medium for more than ten minutes each. After pending cancellation, Salad
+also left desired replicas at one until an explicit `replicas=0` patch. The
+queue is now empty and the group has no instances. Treat further paid
+acceptance as blocked on Salad capacity/control-plane recovery; do not infer an
+AudioVentura worker failure from this no-instance observation.
