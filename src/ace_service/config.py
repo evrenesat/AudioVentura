@@ -194,7 +194,7 @@ class ServiceSettings(BaseSettings):
         validation_alias=AliasChoices("SALAD_QUEUE_NAME", "salad_queue_name"),
     )
     salad_container_group_name: str = Field(
-        default="audioventura-ace-step-v1",
+        default="audioventura-ace-step-v2",
         validation_alias=AliasChoices("SALAD_CONTAINER_GROUP_NAME", "salad_container_group_name"),
     )
     salad_poll_interval_seconds: float = Field(

@@ -388,7 +388,7 @@ SALAD_API_KEY
 SALAD_ORGANIZATION
 SALAD_PROJECT
 SALAD_QUEUE_NAME                   default audioventura-jobs
-SALAD_CONTAINER_GROUP_NAME         default audioventura-ace-step-v1
+SALAD_CONTAINER_GROUP_NAME         default audioventura-ace-step-v2
 SALAD_POLL_INTERVAL_SECONDS        default 2
 SALAD_CONNECT_TIMEOUT_SECONDS      default 5
 SALAD_READ_TIMEOUT_SECONDS         default 30

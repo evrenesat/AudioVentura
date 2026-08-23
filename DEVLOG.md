@@ -11,6 +11,11 @@
   required non-empty HTTP probe headers before provisioning any live resource.
 - Matched configured GPU families to the live catalog's trailing VRAM labels
   exactly, after the first create attempt failed closed before making resources.
+- Changed repeat-apply verification to fetch the full container-group record
+  and account for Salad moving create-time container priority to the readable
+  group-level field; list summaries remain inspection-only.
+- Advanced the group identity to `audioventura-ace-step-v2` after Salad
+  retained the deleted, failed first-create name; the shared queue is unchanged.
 
 ## 2026-08-23 (Salad live-contract and retry-safety corrections)
 

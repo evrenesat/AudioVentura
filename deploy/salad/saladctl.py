@@ -196,12 +196,15 @@ def _require_desired_subset(actual: Any, desired: Any, label: str) -> None:
 
 
 def _verifiable_group_state(desired: Mapping[str, Any]) -> dict[str, Any]:
-    """Exclude the write-only registry password from remote drift checks."""
+    """Normalize create-only fields to Salad's readable group representation."""
 
     value = copy.deepcopy(dict(desired))
     container = value.get("container")
     if isinstance(container, dict):
         container.pop("registry_authentication", None)
+        priority = container.pop("priority", None)
+        if priority is not None:
+            value["priority"] = priority
     return value
 
 
@@ -267,6 +270,14 @@ def apply(
     if existing_queue is not None:
         _require_desired_subset(existing_queue, wanted_queue, "queue")
     if existing_group is not None:
+        existing_group = api.request(
+            "GET",
+            _resource_path(
+                organization,
+                project,
+                f"containers/{wanted_group['name']}",
+            ),
+        )
         _require_desired_subset(
             existing_group,
             _verifiable_group_state(wanted_group),

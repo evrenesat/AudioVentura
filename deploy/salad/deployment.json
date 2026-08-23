@@ -1,7 +1,7 @@
 {
   "container_group": {
     "display_name": "AudioVentura ACE-Step",
-    "name": "audioventura-ace-step-v1"
+    "name": "audioventura-ace-step-v2"
   },
   "gpu_names": [
     "RTX 3090",

@@ -108,6 +108,9 @@ class _FakeSaladApi:
             return {"items": self.queues}
         if method == "GET" and path.endswith("/containers"):
             return {"items": self.groups}
+        if method == "GET" and "/containers/" in path:
+            name = path.rsplit("/", 1)[-1]
+            return next(group for group in self.groups if group["name"] == name)
         if method == "POST" and path.endswith("/queues"):
             assert isinstance(json_body, dict)
             self.posts.append(path)
@@ -119,6 +122,7 @@ class _FakeSaladApi:
             self.posts.append(path)
             group = json.loads(json.dumps(json_body))
             group["container"].pop("registry_authentication")
+            group["priority"] = group["container"].pop("priority")
             self.groups.append(group)
             return group
         raise AssertionError(f"unexpected fake request: {method} {path}")
@@ -203,6 +207,7 @@ def test_apply_detects_group_drift_before_creating_missing_queue(tmp_path: Path)
         ghcr_token="token",
     )
     group["container"].pop("registry_authentication")
+    group["priority"] = group["container"].pop("priority")
     group["container"]["image"] = (
         "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:" + "b" * 64
     )
