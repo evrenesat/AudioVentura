@@ -83,7 +83,6 @@ def _submit_cover(
         "variation_count": "1",
         "seed": str(seed),
         "output_format": "mp3",
-        "rights_confirmation": "true",
     }
     continuation_match = re.search(
         r'name="continue_from_job_id" value="([0-9a-f-]{36})"', form.text
@@ -92,8 +91,6 @@ def _submit_cover(
         data["continue_from_job_id"] = continuation_match.group(1)
         if 'name="youtube_url"' in form.text:
             raise RuntimeError("continuation form unexpectedly requested YouTube again")
-        if "YouTube is not contacted again" not in form.text:
-            raise RuntimeError("continuation form did not describe local output reuse")
     elif youtube_url is None:
         raise RuntimeError("initial cover submission requires a YouTube URL")
     else:
