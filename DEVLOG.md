@@ -5,7 +5,7 @@
 - Corrected managed-capacity inspection to fetch RunPod's complete template
   record and to normalize Salad's readable group-level priority while excluding
   its consumed create-time autostart action. Salad instance inspection now uses
-  the live `instances` response envelope.
+  the live `instances` response envelope and its `state`/`ready` fields.
 - Successful cold reconciliation now clears resolved historical inspection
   errors so readiness recovers after a corrected provider contract.
 - Pinned Salad's reviewed production organization, image identity, and five GPU

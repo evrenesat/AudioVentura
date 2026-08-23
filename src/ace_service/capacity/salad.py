@@ -165,6 +165,17 @@ class SaladCapacityManager:
             raise CapacityError(
                 CapacityErrorKind.DRIFT, "inspect", "Salad has more than one worker"
             )
+        if any(
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("state"), str)
+            or not isinstance(item.get("ready"), bool)
+            for item in instances
+        ):
+            raise CapacityError(
+                CapacityErrorKind.INVALID_RESPONSE,
+                "inspect",
+                "Salad instance state is invalid",
+            )
         return queue, group, {"jobs": jobs}, instances
 
     def _fingerprint(self, queue: Mapping[str, Any], group: Mapping[str, Any]) -> str:
@@ -225,12 +236,7 @@ class SaladCapacityManager:
         observed = len(instances)
         ready = (
             1
-            if observed
-            and replicas == 1
-            and any(
-                isinstance(item, Mapping) and item.get("status") in {"running", "ready", "healthy"}
-                for item in instances
-            )
+            if observed and replicas == 1 and any(item.get("ready") is True for item in instances)
             else 0
         )
         if floor == 0 and observed == 0:

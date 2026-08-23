@@ -86,6 +86,7 @@ def test_salad_capacity_inspection_is_fingerprint_pinned() -> None:
             },
         },
     }
+    instances: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/queues/jobs"):
@@ -95,7 +96,7 @@ def test_salad_capacity_inspection_is_fingerprint_pinned() -> None:
         if request.url.path.endswith("/queues/jobs/jobs"):
             return httpx.Response(200, json={"items": []})
         if request.url.path.endswith("/containers/group/instances"):
-            return httpx.Response(200, json={"instances": []})
+            return httpx.Response(200, json={"instances": instances})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -113,4 +114,10 @@ def test_salad_capacity_inspection_is_fingerprint_pinned() -> None:
     snapshot = asyncio.run(manager.inspect())
     assert snapshot.configured_floor == 0
     assert snapshot.phase.value == "cold"
+    group["replicas"] = 1
+    group["queue_autoscaler"]["min_replicas"] = 1
+    instances.append({"state": "running", "ready": True})
+    snapshot = asyncio.run(manager.inspect())
+    assert snapshot.phase.value == "ready"
+    assert snapshot.ready_instances == 1
     asyncio.run(manager.aclose())
