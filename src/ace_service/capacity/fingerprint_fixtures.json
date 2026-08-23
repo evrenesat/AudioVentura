@@ -42,13 +42,22 @@
         "volume_mount_path": "/workspace",
         "image_name": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846",
         "environment": {
+          "ACE_STEP_COMMIT": "dce621408bee8c31b4fcf4811682eb9359e1bc94",
+          "ACE_STEP_TAG": "v0.1.8",
           "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
-          "ACE_WORKER_CHECKPOINTS_DIR": "/runpod-volume/huggingface-cache/hub",
-          "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846"
+          "ACE_WORKER_HF_CACHE_ROOT": "/runpod-volume/huggingface-cache/hub",
+          "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846",
+          "ACE_WORKER_MODEL_MANIFEST_SHA256": "39a8180ef6852e2dfccb9088efa7231ca7de7e4c05c8d65e3ac5a3e7a5bfd0fc",
+          "ACE_WORKER_MODEL_REPO": "evrenesat/audioventura-ace-step-v0.1.8",
+          "ACE_WORKER_MODEL_REVISION": "88b8c7fa089446b53382c1040037492463430bed",
+          "ACE_WORKER_MODEL_TAG": "av-v0.1.8-bundle-2",
+          "HF_HUB_OFFLINE": "1",
+          "RUNPOD_INIT_TIMEOUT": "1800",
+          "TRANSFORMERS_OFFLINE": "1"
         }
       }
     },
-    "sha256": "442260e64a51e5d7b25962027cd42caddfad7f6aa10d6108fb46145b56897cd8"
+    "sha256": "11b5e5ad481e3a1ac5ccd4aaac6d030e744912313eb8c8a818c63268c396f937"
   },
   "salad": {
     "schema": "salad-capacity-v1",

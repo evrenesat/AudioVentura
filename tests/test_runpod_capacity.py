@@ -36,9 +36,20 @@ def test_runpod_capacity_patches_only_workers_min() -> None:
             "readme": "",
             "volumeMountPath": "/workspace",
             "env": {
+                "ACE_STEP_COMMIT": "dce621408bee8c31b4fcf4811682eb9359e1bc94",
+                "ACE_STEP_TAG": "v0.1.8",
                 "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
-                "ACE_WORKER_CHECKPOINTS_DIR": "/runpod-volume/huggingface-cache/hub",
+                "ACE_WORKER_HF_CACHE_ROOT": "/runpod-volume/huggingface-cache/hub",
                 "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/example",
+                "ACE_WORKER_MODEL_MANIFEST_SHA256": (
+                    "39a8180ef6852e2dfccb9088efa7231ca7de7e4c05c8d65e3ac5a3e7a5bfd0fc"
+                ),
+                "ACE_WORKER_MODEL_REPO": "evrenesat/audioventura-ace-step-v0.1.8",
+                "ACE_WORKER_MODEL_REVISION": "88b8c7fa089446b53382c1040037492463430bed",
+                "ACE_WORKER_MODEL_TAG": "av-v0.1.8-bundle-2",
+                "HF_HUB_OFFLINE": "1",
+                "RUNPOD_INIT_TIMEOUT": "1800",
+                "TRANSFORMERS_OFFLINE": "1",
             },
         },
     }

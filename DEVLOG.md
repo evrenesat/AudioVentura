@@ -829,3 +829,6 @@ production-default change, or commit. Checkpoint 3 remains unchecked.
 - Reconciled the RunPod capacity fixture with the reviewed `0310…` worker base
   already pinned by the current product build, avoiding a stale worker-image
   rollback during capacity enablement.
+- Expanded the RunPod identity contract to the complete revision-pinned model,
+  offline-runtime, cache-root, source, and initialization environment already
+  declared by tracked worker sources.
