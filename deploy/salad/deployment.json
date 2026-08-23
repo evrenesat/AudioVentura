@@ -13,7 +13,8 @@
   "probes": {
     "liveness_failure_threshold": 3,
     "readiness_failure_threshold": 3,
-    "startup_failure_threshold": 180
+    "startup_failure_threshold": 20,
+    "startup_period_seconds": 90
   },
   "queue": {
     "description": "AudioVentura ACE-Step inference jobs",
@@ -23,7 +24,7 @@
   "resources": {
     "cpu": 8,
     "memory_mb": 32768,
-    "shm_bytes": 8589934592,
+    "shm_mb": 8192,
     "storage_bytes": 2147483648
   }
 }

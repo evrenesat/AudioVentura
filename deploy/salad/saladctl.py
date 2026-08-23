@@ -103,7 +103,12 @@ def _http_probe(path: str, failure_threshold: int, *, period: int) -> dict[str, 
         "period_seconds": period,
         "success_threshold": 1,
         "timeout_seconds": 5,
-        "http": {"headers": [], "path": path, "port": 8080, "scheme": "http"},
+        "http": {
+            "headers": [{"name": "Accept", "value": "application/json"}],
+            "path": path,
+            "port": 8080,
+            "scheme": "http",
+        },
     }
 
 
@@ -140,7 +145,7 @@ def desired_container_group(
                 "cpu": resources["cpu"],
                 "memory": resources["memory_mb"],
                 "gpu_classes": gpu_ids,
-                "shm_size": resources["shm_bytes"],
+                "shm_size": resources["shm_mb"],
                 "storage_amount": resources["storage_bytes"],
             },
             "environment_variables": {
@@ -158,7 +163,11 @@ def desired_container_group(
             "min_replicas": 0,
             "polling_period": 15,
         },
-        "startup_probe": _http_probe("/ready", probes["startup_failure_threshold"], period=10),
+        "startup_probe": _http_probe(
+            "/ready",
+            probes["startup_failure_threshold"],
+            period=probes["startup_period_seconds"],
+        ),
         "readiness_probe": _http_probe("/ready", probes["readiness_failure_threshold"], period=10),
         "liveness_probe": _http_probe("/live", probes["liveness_failure_threshold"], period=30),
     }

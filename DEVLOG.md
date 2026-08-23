@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-23 (Salad OpenAPI contract correction)
+
+- Validated the tracked queue and container-group request shape against the
+  current official SaladCloud OpenAPI source at revision
+  `3e10d1f0d7830bce2fc4584853f783681b7ae5c9`.
+- Corrected the container shared-memory request from bytes to Salad's required
+  megabyte unit (`8192` MiB for 8 GiB), bounded the startup probe to the API's
+  20-failure maximum while retaining a 30-minute window, and supplied the
+  required non-empty HTTP probe headers before provisioning any live resource.
+
 ## 2026-08-23 (Salad live-contract and retry-safety corrections)
 
 - Corrected Container Engine lookup paths, queue-depth parsing, official

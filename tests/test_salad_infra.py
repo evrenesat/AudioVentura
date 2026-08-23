@@ -24,13 +24,14 @@ def _config(tmp_path: Path) -> dict[str, object]:
                 "probes": {
                     "liveness_failure_threshold": 3,
                     "readiness_failure_threshold": 3,
-                    "startup_failure_threshold": 180,
+                    "startup_failure_threshold": 20,
+                    "startup_period_seconds": 90,
                 },
                 "queue": {"description": "Jobs", "display_name": "Queue", "name": "queue-name"},
                 "resources": {
                     "cpu": 8,
                     "memory_mb": 32768,
-                    "shm_bytes": 8589934592,
+                    "shm_mb": 8192,
                     "storage_bytes": 2147483648,
                 },
             }
@@ -69,6 +70,12 @@ def test_desired_state_is_scale_to_zero_and_secret_is_not_serialized_elsewhere(
         "queue_name": "queue-name",
     }
     assert group["container"]["image"] == image
+    assert group["container"]["resources"]["shm_size"] == 8192
+    assert group["startup_probe"]["failure_threshold"] == 20
+    assert group["startup_probe"]["period_seconds"] == 90
+    assert group["startup_probe"]["http"]["headers"] == [
+        {"name": "Accept", "value": "application/json"}
+    ]
     assert group["container"]["registry_authentication"]["basic"]["password"] == "token"
     environment = group["container"]["environment_variables"]
     assert environment["SALAD_QUEUE_WORKER_LOG_LEVEL"] == "info"
