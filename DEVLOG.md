@@ -1,5 +1,21 @@
 # Development Log
 
+## 2026-08-23 (durable inference providers)
+
+- Added provider-neutral capabilities, requests, refs, lifecycle, results,
+  cancellation, health, bounded errors, and an explicit registry. Runpod is
+  wrapped by an adapter; Salad Job Queues are implemented with bounded HTTP
+  responses and deployment-scope cold-start enrichment.
+- Advanced the product schema to v7 with additive provider provenance and a
+  transactional Runpod backfill while retaining legacy columns for one
+  rollback window. Runpod writes mirror legacy fields; Salad writes do not.
+- Moved submission, polling, result, deadline cancellation, and transient
+  backoff to persisted provider refs. A single status failure no longer
+  terminally fails schema-v2 work, and submission is never retried.
+- Added provider-neutral readiness/UI language and Salad configuration. No
+  live provider call, deployment, paid request, or external mutation occurred
+  in this implementation checkpoint.
+
 ## 2026-08-23 (SaladCloud infrastructure gate)
 
 - Expanded p100's thin-provisioned root disk from 100 GiB to 180 GiB so the

@@ -18,6 +18,13 @@ reports structured source-transfer, generation, finalization, and upload
 phases. Unknown provider internals are represented as waiting rather than an
 invented percentage or sub-step.
 
+Provider ownership is durable per job and variation attempt. The controller
+owns deadlines, status uncertainty, cancellation, and cleanup; adapters only
+translate provider APIs into one finite lifecycle. Transient status/result
+failures keep the exact persisted reference and never trigger resubmission.
+Capabilities are the server-authoritative seam for a later provider selector
+and fal.ai fallback with unsupported request controls disabled in the UI.
+
 See [the detailed architecture](docs/ARCHITECTURE.md),
 [operations](docs/OPERATIONS.md), [Runpod runtime](docs/RUNPOD.md), and the
 [prepared SaladCloud boundary](docs/SALAD.md).

@@ -2,7 +2,12 @@
 
 This runbook describes the first-release deployment split. The controller and
 transfer service run on Hetzner, the home agent is a separate private service,
-and the Runpod worker is the only inference runtime.
+and the shared ACE-Step worker is reached through Runpod or Salad Job Queues.
+
+Set `INFERENCE_PROVIDER` to `runpod` or `salad`. Selection is persisted before
+enqueue and must not be changed on active rows. Keep credentials for every
+provider that owns nonterminal historical work. Status uncertainty is
+nonterminal before the durable attempt deadline; never submit a replacement.
 
 ## Hetzner setup
 

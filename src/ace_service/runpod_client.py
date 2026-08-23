@@ -47,6 +47,10 @@ class RunpodError(RuntimeError):
 class RunpodAPIError(RunpodError):
     """Raised when Runpod rejects or cannot complete an API request."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
 
 class RunpodResponseError(RunpodError):
     """Raised when Runpod returns a body outside the expected contract."""
@@ -366,7 +370,8 @@ class RunpodClient:
                 extra={"component": "controller"},
             )
             raise RunpodAPIError(
-                f"Runpod {operation} request failed with HTTP {response.status_code}"
+                f"Runpod {operation} request failed with HTTP {response.status_code}",
+                status_code=response.status_code,
             )
         if len(response.content) > _MAX_RESPONSE_BYTES:
             raise RunpodResponseError(f"Runpod {operation} response is too large")

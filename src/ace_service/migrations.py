@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -363,6 +363,86 @@ def _cp6_ddl(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS ix_jobs_project_id ON jobs (project_id)")
 
 
+def _cp7_ddl(connection: sqlite3.Connection) -> None:
+    """Add durable provider ownership and backfill legacy Runpod provenance."""
+
+    additions = {
+        "jobs": {
+            "inference_provider": "VARCHAR(32)",
+            "current_provider_job_id": "VARCHAR(128)",
+            "provider_result_json": "JSON",
+        },
+        "variation_attempts": {
+            "inference_provider": "VARCHAR(32)",
+            "provider_job_id": "VARCHAR(128)",
+            "provider_result_json": "JSON",
+        },
+        "outputs": {
+            "inference_provider": "VARCHAR(32)",
+            "provider_job_id": "VARCHAR(128)",
+        },
+    }
+    for table_name, columns in additions.items():
+        existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table_name})")}
+        for name, declaration in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {declaration}")
+
+    conflicts = connection.execute(
+        "SELECT COUNT(*) FROM jobs WHERE "
+        "(inference_provider IS NOT NULL AND inference_provider != 'runpod' AND "
+        " (NULLIF(current_runpod_job_id, '') IS NOT NULL OR runpod_result_json IS NOT NULL)) OR "
+        "(NULLIF(current_provider_job_id, '') IS NOT NULL AND "
+        " NULLIF(current_runpod_job_id, '') IS NOT NULL "
+        " AND current_provider_job_id != current_runpod_job_id) OR "
+        "(provider_result_json IS NOT NULL AND runpod_result_json IS NOT NULL "
+        " AND json(provider_result_json) != json(runpod_result_json))"
+    ).fetchone()
+    if conflicts is None or int(conflicts[0]):
+        raise MigrationError("provider migration found conflicting job provenance")
+    conflicts = connection.execute(
+        "SELECT COUNT(*) FROM variation_attempts WHERE "
+        "(inference_provider IS NOT NULL AND inference_provider != 'runpod' AND "
+        " (NULLIF(runpod_job_id, '') IS NOT NULL OR runpod_result_json IS NOT NULL)) OR "
+        "(NULLIF(provider_job_id, '') IS NOT NULL AND NULLIF(runpod_job_id, '') IS NOT NULL "
+        " AND provider_job_id != runpod_job_id) OR "
+        "(provider_result_json IS NOT NULL AND runpod_result_json IS NOT NULL "
+        " AND json(provider_result_json) != json(runpod_result_json))"
+    ).fetchone()
+    if conflicts is None or int(conflicts[0]):
+        raise MigrationError("provider migration found conflicting attempt provenance")
+    conflicts = connection.execute(
+        "SELECT COUNT(*) FROM outputs WHERE "
+        "(inference_provider IS NOT NULL AND inference_provider != 'runpod' "
+        " AND NULLIF(runpod_job_id, '') IS NOT NULL) OR "
+        "(NULLIF(provider_job_id, '') IS NOT NULL AND NULLIF(runpod_job_id, '') IS NOT NULL "
+        " AND provider_job_id != runpod_job_id)"
+    ).fetchone()
+    if conflicts is None or int(conflicts[0]):
+        raise MigrationError("provider migration found conflicting output provenance")
+
+    connection.execute(
+        "UPDATE jobs SET inference_provider = COALESCE(inference_provider, 'runpod'), "
+        "current_provider_job_id = COALESCE(current_provider_job_id, "
+        " NULLIF(current_runpod_job_id, '')), "
+        "provider_result_json = COALESCE(provider_result_json, runpod_result_json)"
+    )
+    connection.execute(
+        "UPDATE variation_attempts SET "
+        "inference_provider = COALESCE(inference_provider, "
+        " (SELECT inference_provider FROM jobs WHERE jobs.id = variation_attempts.job_id), "
+        " 'runpod'), "
+        "provider_job_id = COALESCE(provider_job_id, NULLIF(runpod_job_id, '')), "
+        "provider_result_json = COALESCE(provider_result_json, runpod_result_json)"
+    )
+    connection.execute(
+        "UPDATE outputs SET inference_provider = CASE "
+        "WHEN NULLIF(runpod_job_id, '') IS NOT NULL "
+        "THEN COALESCE(inference_provider, 'runpod') ELSE inference_provider END, "
+        "provider_job_id = COALESCE(provider_job_id, NULLIF(runpod_job_id, ''))"
+    )
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
@@ -416,6 +496,13 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
             "captured_at",
         },
     }
+    required_table_columns.update(
+        {
+            "jobs": {"inference_provider", "current_provider_job_id", "provider_result_json"},
+            "variation_attempts": {"inference_provider", "provider_job_id", "provider_result_json"},
+            "outputs": {"inference_provider", "provider_job_id"},
+        }
+    )
     for table_name, required in required_table_columns.items():
         actual = {
             str(row[1]) for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -547,7 +634,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -587,7 +674,9 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
                 _cp4_ddl(connection)
             if state == _STATE_UNVERSIONED_LEGACY or report["version"] == 4:
                 _cp5_ddl(connection)
-            _cp6_ddl(connection)
+            if state == _STATE_UNVERSIONED_LEGACY or report["version"] in {4, 5}:
+                _cp6_ddl(connection)
+            _cp7_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

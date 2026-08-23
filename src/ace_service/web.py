@@ -92,7 +92,7 @@ _STATUS_LABELS = {
     JobStatus.FAILED: "Failed",
 }
 _PHASE_LABELS = {
-    "cloud_wait": "Waiting for Runpod to allocate a GPU",
+    "cloud_wait": "Waiting for the cloud provider",
     "worker_initializing": "Cloud worker initializing",
     "worker_running": "Worker started",
     "source_download": "Transferring source audio",
@@ -372,7 +372,12 @@ def register_web_routes(app: FastAPI) -> None:
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
-            job = create_original_job(session, job_request, project=project_id)
+            job = create_original_job(
+                session,
+                job_request,
+                project=project_id,
+                inference_provider=app.state.provider_registry.default,
+            )
             # TODO(re-enable): legacy submission-quote capture is disconnected
             # during the usability recovery; restore after ordinary original
             # and cover generation is stable. Quotes are inert historical data
@@ -442,7 +447,12 @@ def register_web_routes(app: FastAPI) -> None:
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
-            job = create_cover_job(session, cover_request, project=project_id)
+            job = create_cover_job(
+                session,
+                cover_request,
+                project=project_id,
+                inference_provider=app.state.provider_registry.default,
+            )
             job_id = job.id
             if continuation_source is not None:
                 try:
@@ -1079,7 +1089,11 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
             (item for item in attempts if item.variation_index == (job.current_variation or 1)),
             None,
         )
-        progress = active_attempt.runpod_result_json if active_attempt is not None else None
+        progress = (
+            active_attempt.provider_result_json or active_attempt.runpod_result_json
+            if active_attempt is not None
+            else None
+        )
         if isinstance(progress, dict) and progress.get("kind") == "audioventura_progress_v1":
             candidate_phase = progress.get("phase")
             candidate_observed_at = progress.get("observed_at")
@@ -1089,6 +1103,7 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
                     phase_observed_at = candidate_observed_at
     view = {
         "job_id": job.id,
+        "inference_provider": job.inference_provider or "runpod",
         "job_type": job.job_type.value,
         "job_type_label": "Cover" if job.job_type is JobType.COVER else "Original song",
         "status": job.status.value,
@@ -1140,7 +1155,7 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
 
 
 def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
-    result_value = attempt.runpod_result_json
+    result_value = attempt.provider_result_json or attempt.runpod_result_json
     result = cast(dict[str, Any], result_value) if isinstance(result_value, dict) else {}
     output_value = result.get("output")
     output = cast(dict[str, Any], output_value) if isinstance(output_value, dict) else {}
@@ -1148,6 +1163,7 @@ def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
     worker = cast(dict[str, Any], worker_value) if isinstance(worker_value, dict) else {}
     return {
         "variation_index": attempt.variation_index,
+        "inference_provider": attempt.inference_provider or "runpod",
         "status": attempt.status.value,
         "status_label": _STATUS_LABELS[attempt.status],
         "queue_delay_ms": result.get("runpod_queue_delay_ms"),
@@ -1198,6 +1214,7 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
     components: dict[str, dict[str, Any]] = {
         "controller_database": {"ok": False, "message": "unavailable"},
         "runpod_api": {"ok": False, "message": "unavailable"},
+        "inference_provider": {"ok": False, "message": "unavailable"},
         "home_ingest": {"ok": False, "message": "unavailable"},
         "public_transfer": {"ok": False, "message": "unavailable"},
     }
@@ -1232,12 +1249,19 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
         except Exception:
             components[name] = {"ok": False, "message": "unreachable"}
 
+    active_provider = app.state.provider_registry.get(app.state.provider_registry.default)
     await asyncio.gather(
-        probe("runpod_api", app.state.runpod_client, "health"),
+        probe("inference_provider", active_provider, "health"),
+        probe("runpod_api", app.state.runpod_client, "health")
+        if app.state.runpod_client is not None
+        else asyncio.sleep(0),
         probe("home_ingest", app.state.home_ingest_client, "health"),
     )
+    if app.state.provider_registry.default.value == "runpod":
+        components["runpod_api"] = dict(components["inference_provider"])
     required_ok = all(
-        components[key]["ok"] for key in ("controller_database", "runpod_api", "public_transfer")
+        components[key]["ok"]
+        for key in ("controller_database", "inference_provider", "public_transfer")
     )
     return {
         "status": "ok" if required_ok and components["home_ingest"]["ok"] else "degraded",

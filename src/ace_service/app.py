@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI
 
@@ -21,6 +21,10 @@ from ace_service.db import (
     initialize_database,
 )
 from ace_service.home_ingest import HomeIngestClient
+from ace_service.providers.base import ProviderName
+from ace_service.providers.registry import ProviderRegistry
+from ace_service.providers.runpod import RunpodProvider
+from ace_service.providers.salad import SaladProvider
 from ace_service.runpod_client import RunpodClient
 from ace_service.web import register_web_routes
 from ace_service.worker import ControllerWorker, RunpodWorkerClient
@@ -72,7 +76,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cleanup_task
         if hasattr(worker, "stop"):
             await worker.stop()
-        for client in (app.state.runpod_client, app.state.home_ingest_client):
+        clients = [app.state.home_ingest_client]
+        clients.extend(
+            getattr(provider, "client", provider)
+            for provider in app.state.provider_registry.providers
+        )
+        for client in clients:
             close = getattr(client, "aclose", None)
             if close is not None:
                 with suppress(Exception):
@@ -87,6 +96,7 @@ def create_app(
     *,
     session_factory: SessionFactory | None = None,
     runpod_client: RunpodWorkerClient | None = None,
+    provider_registry: ProviderRegistry | None = None,
     home_ingest_client: Any | None = None,
     worker: Any | None = None,
 ) -> FastAPI:
@@ -110,12 +120,45 @@ def create_app(
         ensure_schema_readiness(engine)
         session_factory = create_session_factory(engine)
 
-    resolved_runpod = runpod_client or RunpodClient.from_settings(resolved_settings)
+    resolved_runpod = runpod_client
+    if provider_registry is None:
+        providers: list[Any] = []
+        if runpod_client is not None:
+            providers.append(RunpodProvider(cast(Any, runpod_client)))
+        elif resolved_settings.inference_provider == ProviderName.RUNPOD.value or all(
+            value.strip().lower() not in {"", "change-me", "changeme", "replace-me", "replace_me"}
+            for value in (
+                resolved_settings.runpod_api_key,
+                resolved_settings.runpod_endpoint_id,
+            )
+        ):
+            resolved_runpod = RunpodClient.from_settings(resolved_settings)
+            providers.append(RunpodProvider(cast(Any, resolved_runpod)))
+        if resolved_settings.inference_provider == ProviderName.SALAD.value:
+            assert resolved_settings.salad_api_key is not None
+            assert resolved_settings.salad_organization is not None
+            assert resolved_settings.salad_project is not None
+            providers.append(
+                SaladProvider(
+                    resolved_settings.salad_api_key,
+                    resolved_settings.salad_organization,
+                    resolved_settings.salad_project,
+                    resolved_settings.salad_queue_name,
+                    resolved_settings.salad_container_group_name,
+                    connect_timeout=resolved_settings.salad_connect_timeout_seconds,
+                    read_timeout=resolved_settings.salad_read_timeout_seconds,
+                    write_timeout=resolved_settings.salad_write_timeout_seconds,
+                    pool_timeout=resolved_settings.salad_pool_timeout_seconds,
+                )
+            )
+        provider_registry = ProviderRegistry(
+            providers, default=ProviderName(resolved_settings.inference_provider)
+        )
     resolved_home = home_ingest_client or HomeIngestClient(resolved_settings)
     resolved_worker = worker or ControllerWorker(
         resolved_settings,
         session_factory,
-        resolved_runpod,
+        provider_registry,
         home_ingest_client=resolved_home,
     )
 
@@ -131,6 +174,7 @@ def create_app(
     app.state.session_factory = session_factory
     app.state.engine = engine
     app.state.runpod_client = resolved_runpod
+    app.state.provider_registry = provider_registry
     app.state.home_ingest_client = resolved_home
     app.state.worker = resolved_worker
     app.state.cleanup_task = None

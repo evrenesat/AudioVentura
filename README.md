@@ -64,7 +64,10 @@ Operational deployment, Tailscale/proxy policy, cleanup, backups, and live
 acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md). The
 prepared SaladCloud image and scale-to-zero infrastructure boundary are
 documented separately in [docs/SALAD.md](docs/SALAD.md); the controller is not
-wired to that provider until the provider-abstraction migration lands.
+wired through a durable provider registry. New jobs persist the configured
+`INFERENCE_PROVIDER` before enqueue; existing jobs always reconcile through
+their own persisted provider and external ID. Runpod remains supported and
+Salad Job Queues are the first alternate implementation.
 
 The detailed deployment and distributed-runtime handoff follows below.
 

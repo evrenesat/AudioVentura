@@ -39,3 +39,12 @@ def test_controller_logging_rotates_and_keeps_private_permissions(settings) -> N
     assert log_path.is_file()
     assert (Path(f"{log_path}.1")).is_file()
     assert log_path.stat().st_mode & 0o077 == 0
+
+
+def test_controller_logging_redacts_salad_key(settings) -> None:
+    settings.salad_api_key = "salad-secret-value"
+    handler = configure_logging(settings, component="salad-redaction")
+    logging.getLogger("ace_service.salad").error("api_key=%s", settings.salad_api_key)
+    handler.flush()
+    content = (Path(settings.paths.logs) / "salad-redaction.log").read_text()
+    assert "salad-secret-value" not in content

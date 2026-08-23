@@ -10,6 +10,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -30,7 +31,24 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
+from ace_service.providers.base import (
+    CancelOutcome,
+    InferenceMode,
+    InferenceRequest,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderJobNotComplete,
+    ProviderJobRef,
+    ProviderName,
+    ProviderPhase,
+    RequestFeature,
+    unsupported_features,
+)
+from ace_service.providers.registry import ProviderRegistry
+from ace_service.providers.runpod import RunpodProvider
 from ace_service.repository import (
+    attempt_provider_ref,
+    attempt_provider_result,
     complete_variation_attempt,
     confirm_cover_job,
     create_variation_attempt,
@@ -38,14 +56,15 @@ from ace_service.repository import (
     finalize_cover_job_duration,
     get_job,
     get_variation_attempt,
-    persist_variation_runpod_job_id,
+    job_provider,
+    persist_variation_provider_job_ref,
     prepare_variation_submission,
     record_attempt_evidence,
     recover_uncertain_submissions,
     recover_uncertain_variation_submissions,
     revoke_active_transfers,
     set_variation_progress,
-    set_variation_runpod_result,
+    set_variation_provider_result,
     transition_job,
     transition_variation_attempt,
 )
@@ -53,7 +72,6 @@ from ace_service.runpod_client import (
     RunpodHealth,
     RunpodState,
     RunpodStatusResult,
-    parse_worker_counts,
 )
 from ace_service.schemas import (
     LEGACY_WORKER_SCHEMA_VERSION,
@@ -96,7 +114,7 @@ class ControllerWorker:
         self,
         settings: ServiceSettings,
         session_factory: SessionFactory,
-        runpod_client: RunpodWorkerClient,
+        provider_registry: ProviderRegistry | RunpodWorkerClient,
         *,
         payload_builder: PayloadBuilder | None = None,
         home_ingest_client: HomeIngestService | None = None,
@@ -104,15 +122,17 @@ class ControllerWorker:
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
-        self.runpod_client = runpod_client
+        if isinstance(provider_registry, ProviderRegistry):
+            self.provider_registry = provider_registry
+            self.runpod_client = None
+        else:
+            adapter = RunpodProvider(cast(Any, provider_registry))
+            self.provider_registry = ProviderRegistry([adapter], default=ProviderName.RUNPOD)
+            self.runpod_client = provider_registry
         self.payload_builder = payload_builder or self._default_payload
         self.home_ingest_client = home_ingest_client
-        self.poll_interval_seconds = (
-            poll_interval_seconds
-            if poll_interval_seconds is not None
-            else settings.runpod_poll_interval_seconds
-        )
-        if self.poll_interval_seconds < 0:
+        self.poll_interval_seconds = poll_interval_seconds
+        if self.poll_interval_seconds is not None and self.poll_interval_seconds < 0:
             raise ValueError("poll interval must not be negative")
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._enqueued: set[str] = set()
@@ -120,6 +140,8 @@ class ControllerWorker:
         self._controller_lock: ControllerLock | None = None
         self._task: asyncio.Task[None] | None = None
         self._accepting = False
+        self._poll_error_counts: dict[str, int] = {}
+        self._poll_delays: dict[str, float] = {}
 
     @property
     def queue(self) -> asyncio.Queue[str]:
@@ -158,6 +180,8 @@ class ControllerWorker:
         """Cancel the queue task and release the data-root ownership lock."""
 
         self._accepting = False
+        self._poll_error_counts.clear()
+        self._poll_delays.clear()
         task = self._task
         self._task = None
         if task is not None:
@@ -211,8 +235,9 @@ class ControllerWorker:
             try:
                 await self.process_job(job_id)
                 if self._job_needs_poll(job_id) and self._accepting:
-                    if self.poll_interval_seconds:
-                        await asyncio.sleep(self.poll_interval_seconds)
+                    delay = self._poll_delays.pop(job_id, self._base_poll_delay(job_id))
+                    if delay:
+                        await asyncio.sleep(delay)
                     self.enqueue(job_id)
             except asyncio.CancelledError:
                 raise
@@ -268,7 +293,13 @@ class ControllerWorker:
     async def _submit_variation(self, job_id: str, variation_index: int) -> None:
         started = time.monotonic()
         with self.session_factory() as session:
-            job, attempt, nonce = prepare_variation_submission(session, job_id, variation_index)
+            job = get_job(session, job_id)
+            if job is None:
+                raise ValueError("job is missing")
+            provider_name = job_provider(job)
+            job, attempt, nonce = prepare_variation_submission(
+                session, job_id, variation_index, inference_provider=provider_name
+            )
             payload = dict(self.payload_builder(job, attempt))
             output_path = self._output_relative_path(job, attempt.variation_index)
             output_issued = issue_transfer_url(
@@ -309,24 +340,41 @@ class ControllerWorker:
 
         # The nonce-only commit is the no-duplicate boundary. Any exception
         # below is persisted as an uncertain submission by the task handler.
-        runpod_job_id = await self.runpod_client.submit(
-            payload,
-            execution_timeout_ms=self.settings.runpod_execution_timeout_ms,
-            ttl_ms=self.settings.runpod_job_ttl_ms,
+        provider = self.provider_registry.get(provider_name)
+        mode = (
+            InferenceMode.AUDIO_TO_AUDIO
+            if job.job_type is JobType.COVER
+            else InferenceMode.PROMPT_TO_AUDIO
         )
+        features = self._requested_features(job, payload)
+        request = InferenceRequest(
+            application_job_id=job_id,
+            variation_index=variation_index,
+            submission_nonce=nonce,
+            mode=mode,
+            requested_features=features,
+            worker_payload=payload,
+            execution_timeout_ms=self.settings.runpod_execution_timeout_ms,
+            queue_timeout_ms=self.settings.runpod_job_ttl_ms,
+        )
+        missing = unsupported_features(provider.capabilities, request)
+        worker_schema = request.worker_payload.get("schema_version", LEGACY_WORKER_SCHEMA_VERSION)
+        if missing or worker_schema not in provider.capabilities.accepts_worker_schema:
+            raise ValueError("inference provider does not support requested features")
+        provider_ref = await provider.submit(request)
         with self.session_factory() as session:
-            persist_variation_runpod_job_id(
+            persist_variation_provider_job_ref(
                 session,
                 attempt.id,
-                runpod_job_id,
+                provider_ref,
                 submission_nonce=nonce,
             )
             session.commit()
         LOGGER.info(
-            "job=%s stage=submit component=controller variation=%d runpod_job_id=%s elapsed_ms=%d",
+            "job=%s stage=submit component=controller variation=%d provider=%s elapsed_ms=%d",
             job_id,
             variation_index,
-            runpod_job_id,
+            provider_name.value,
             int((time.monotonic() - started) * 1000),
             extra={"component": "controller"},
         )
@@ -337,144 +385,105 @@ class ControllerWorker:
             attempt = get_variation_attempt(session, job_id, variation_index)
             if job is None or attempt is None:
                 raise ValueError("active job has no durable variation attempt")
-            runpod_job_id = attempt.runpod_job_id or job.current_runpod_job_id
-            if not runpod_job_id:
+            ref = attempt_provider_ref(attempt, job)
+            if ref is None:
                 if attempt.submission_nonce or job.current_submission_nonce:
-                    raise ValueError("uncertain cloud submission has no Runpod job ID")
-                raise ValueError("active job is missing its Runpod job ID")
+                    raise ValueError("uncertain cloud submission has no provider job ID")
+                raise ValueError("active job is missing its provider job ID")
+            deadline = (attempt.started_at or job.started_at or job.created_at) + timedelta(
+                seconds=self.settings.inference_job_timeout_seconds
+            )
+
+        provider = self.provider_registry.get(ref.provider)
 
         started = time.monotonic()
         try:
-            result = await self.runpod_client.status(runpod_job_id)
+            status = await provider.status(ref)
         except asyncio.CancelledError:
             raise
-        except Exception as status_error:
-            # A durable output is stronger evidence than expired Runpod status
-            # after controller downtime, but only when every local invariant is
-            # independently verified.
-            with self.session_factory() as session:
-                attempt = get_variation_attempt(session, job_id, variation_index)
-                job = get_job(session, job_id)
-                output = (
-                    self._validated_output(session, job, variation_index)
-                    if job is not None
-                    else None
-                )
-                v2_metadata = None
-                if attempt is not None and job is not None:
-                    if _stored_schema_version(job) == WORKER_SCHEMA_VERSION:
-                        v2_metadata = _validated_v2_completion_metadata(attempt, job, output)
-                        completion_evidence_is_valid = v2_metadata is not None
-                    else:
-                        completion_evidence_is_valid = True
-                else:
-                    completion_evidence_is_valid = False
-                if (
-                    attempt is not None
-                    and job is not None
-                    and output is not None
-                    and completion_evidence_is_valid
-                ):
-                    if v2_metadata is not None:
-                        # The output may have been finalized after the worker
-                        # result was persisted. Reapply the same bounded
-                        # completion projection before completing the attempt.
-                        set_variation_runpod_result(session, attempt.id, v2_metadata)
-                    _ensure_terminal_evidence(
-                        session,
-                        attempt,
-                        metadata=v2_metadata,
-                        unavailable_reason="timing_unavailable",
-                    )
-                    completed_job, _, parent_completed = complete_variation_attempt(
-                        session,
-                        attempt.id,
-                        note="runpod_status_unavailable_after_output",
-                    )
-                    if parent_completed and completed_job.job_type is JobType.COVER:
-                        revoke_active_transfers(session, completed_job.id)
-                    session.commit()
-                    if parent_completed:
-                        remove_cover_source(self.settings, job_id)
-                    return
-                if job is not None and _stored_schema_version(job) == WORKER_SCHEMA_VERSION:
-                    raise ValueError(
-                        "schema-v2 status is unavailable without validated completion metadata"
-                    ) from status_error
-            raise
+        except ProviderError as exc:
+            await self._handle_provider_uncertainty(
+                job_id, variation_index, ref, provider, deadline, exc
+            )
+            return
+
+        if not self._ref_is_current(job_id, variation_index, ref):
+            return
+        self._clear_poll_error(job_id)
+        if (
+            status.phase
+            in {
+                ProviderPhase.QUEUED,
+                ProviderPhase.PROVISIONING,
+                ProviderPhase.STARTING,
+                ProviderPhase.RUNNING,
+                ProviderPhase.UNKNOWN,
+            }
+            and utc_now() >= deadline
+        ):
+            if await self._cancel_at_deadline(job_id, variation_index, ref, provider):
+                return
 
         LOGGER.info(
-            "job=%s stage=poll component=controller variation=%d runpod_job_id=%s "
+            "job=%s stage=poll component=controller variation=%d provider=%s "
             "status=%s elapsed_ms=%d",
             job_id,
             variation_index,
-            runpod_job_id,
-            result.raw_status,
+            ref.provider.value,
+            status.phase.value,
             int((time.monotonic() - started) * 1000),
             extra={"component": "controller"},
         )
-
-        queued_phase: str | None = None
-        if result.category is RunpodState.CLOUD_QUEUED:
-            queued_phase = "cloud_wait"
-            try:
-                counts = parse_worker_counts(await self.runpod_client.health())
-                if counts.initializing > 0:
-                    queued_phase = "worker_initializing"
-                if counts.unhealthy > 0:
-                    LOGGER.warning(
-                        "job=%s stage=poll component=controller "
-                        "error_code=runpod_workers_unhealthy count=%d",
-                        job_id,
-                        counts.unhealthy,
-                        extra={"component": "controller"},
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                LOGGER.warning(
-                    "job=%s stage=poll component=controller "
-                    "error_code=runpod_health_unavailable exception_class=%s",
-                    job_id,
-                    type(exc).__name__,
-                    extra={"component": "controller"},
-                )
 
         with self.session_factory() as session:
             attempt = get_variation_attempt(session, job_id, variation_index)
             job = get_job(session, job_id)
             if attempt is None or job is None:
                 raise ValueError("polled job no longer has a durable variation attempt")
-            if result.category is RunpodState.CLOUD_QUEUED:
-                set_variation_progress(session, attempt.id, queued_phase or "cloud_wait")
+            if attempt_provider_ref(attempt, job) != ref:
+                session.rollback()
+                return
+            if status.phase in {
+                ProviderPhase.QUEUED,
+                ProviderPhase.PROVISIONING,
+                ProviderPhase.STARTING,
+                ProviderPhase.UNKNOWN,
+            }:
+                phase = (
+                    "worker_initializing"
+                    if status.phase in {ProviderPhase.PROVISIONING, ProviderPhase.STARTING}
+                    else "cloud_wait"
+                )
+                set_variation_progress(session, attempt.id, phase)
                 session.commit()
                 return
-            if result.category is RunpodState.GENERATING:
-                if result.progress is None:
-                    set_variation_progress(session, attempt.id, "worker_running")
-                else:
-                    set_variation_progress(
-                        session,
-                        attempt.id,
-                        str(result.progress["phase"]),
-                        sequence=int(result.progress["sequence"]),
-                    )
+            if status.phase is ProviderPhase.RUNNING:
+                phase = (
+                    status.provider_reason
+                    if status.provider_reason
+                    in {
+                        "source_download",
+                        "generation",
+                        "finalizing",
+                        "output_upload",
+                    }
+                    else "worker_running"
+                )
+                set_variation_progress(session, attempt.id, phase)
                 transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
                 if job.status is JobStatus.CLOUD_QUEUED:
                     transition_job(session, job.id, JobStatus.GENERATING)
                 session.commit()
                 return
-            if result.category is RunpodState.FAILED:
-                # Record evidence before the terminal transition so the whole
-                # transaction is all-or-nothing: an evidence conflict aborts
-                # while the attempt is still nonterminal and the task error
-                # handler fails the job closed without losing stored evidence.
-                _record_poll_evidence(session, attempt.id, result, None)
+            if status.phase in {ProviderPhase.FAILED, ProviderPhase.CANCELLED}:
+                _ensure_terminal_evidence(
+                    session, attempt, metadata=None, unavailable_reason="worker_no_evidence"
+                )
                 failed_job = fail_variation_attempt(
                     session,
                     attempt.id,
-                    error_code="runpod_generation_failed",
-                    user_facing_error="Runpod did not complete this generation.",
+                    error_code="provider_generation_failed",
+                    user_facing_error="The cloud provider did not complete this generation.",
                 )
                 if failed_job.job_type is JobType.COVER:
                     revoke_active_transfers(session, failed_job.id)
@@ -483,26 +492,41 @@ class ControllerWorker:
                     remove_cover_source(self.settings, failed_job.id)
                 return
 
-            expected_schema_version = _stored_schema_version(job)
-            metadata = _runpod_result_metadata(
-                result, expected_schema_version=expected_schema_version
+        try:
+            provider_result = await provider.result(ref)
+        except (ProviderError, ProviderJobNotComplete) as exc:
+            await self._handle_provider_uncertainty(
+                job_id, variation_index, ref, provider, deadline, exc
             )
+            return
+        if not self._ref_is_current(job_id, variation_index, ref):
+            return
+        self._clear_poll_error(job_id)
+        with self.session_factory() as session:
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            job = get_job(session, job_id)
+            if attempt is None or job is None or attempt_provider_ref(attempt, job) != ref:
+                session.rollback()
+                return
+            expected_schema_version = _stored_schema_version(job)
+            metadata = dict(provider_result.metadata)
+            if expected_schema_version is not None or "schema_version" in metadata:
+                metadata = validate_worker_result_metadata(
+                    metadata, expected_schema_version=expected_schema_version
+                )
             if expected_schema_version == WORKER_SCHEMA_VERSION:
-                if metadata is None:
+                if not metadata:
                     raise ValueError("schema-v2 worker completion is missing result metadata")
             output = self._validated_output(session, job, variation_index)
             if expected_schema_version == WORKER_SCHEMA_VERSION:
                 assert metadata is not None
                 _validate_completion_metadata(metadata, job, attempt, output)
-            set_variation_runpod_result(
+            set_variation_provider_result(
                 session,
                 attempt.id,
                 metadata,
                 project_to_output=output is not None,
             )
-            if result.result is not None:
-                attempt = get_variation_attempt(session, job_id, variation_index)
-                assert attempt is not None
             if output is None:
                 # Keep the attempt active. The output capability may be
                 # consumed just before or just after this status observation.
@@ -512,7 +536,29 @@ class ControllerWorker:
                         transition_job(session, job.id, JobStatus.GENERATING)
                 session.commit()
                 return
-            _record_poll_evidence(session, attempt.id, result, metadata)
+            if ref.provider is ProviderName.RUNPOD:
+                execution_ms = metadata.get("runpod_execution_ms")
+                delay_ms = metadata.get("runpod_queue_delay_ms")
+                _record_poll_evidence(
+                    session,
+                    attempt.id,
+                    RunpodStatusResult(
+                        ref.external_id,
+                        RunpodState.COMPLETED,
+                        "COMPLETED",
+                        metadata,
+                        delay_ms=delay_ms if isinstance(delay_ms, int) else None,
+                        execution_ms=execution_ms if isinstance(execution_ms, int) else None,
+                    ),
+                    metadata,
+                )
+            else:
+                _ensure_terminal_evidence(
+                    session,
+                    attempt,
+                    metadata=metadata,
+                    unavailable_reason="timing_unavailable",
+                )
             completed_job, _, parent_completed = complete_variation_attempt(session, attempt.id)
             if parent_completed and completed_job.job_type is JobType.COVER:
                 revoke_active_transfers(session, completed_job.id)
@@ -636,9 +682,9 @@ class ControllerWorker:
                         # The previous variation completed durably and the
                         # next one has not crossed its nonce boundary yet.
                         self._enqueue_recovered(job.id)
-                    elif attempt is not None and attempt.runpod_job_id:
+                    elif attempt is not None and attempt_provider_ref(attempt, job):
                         self._enqueue_recovered(job.id)
-                    elif job.current_runpod_job_id:
+                    elif job.current_provider_job_id or job.current_runpod_job_id:
                         self._materialize_legacy_attempt(session, job)
                         self._enqueue_recovered(job.id)
                     elif (
@@ -655,8 +701,8 @@ class ControllerWorker:
                         self._fail_recovered_job(
                             session,
                             job,
-                            "missing_runpod_job_id",
-                            "Controller state is missing its Runpod job ID.",
+                            "missing_provider_job_id",
+                            "Controller state is missing its provider job ID.",
                         )
             terminal_cover_ids = list(
                 dict.fromkeys(
@@ -704,7 +750,11 @@ class ControllerWorker:
                 if job.status is JobStatus.GENERATING
                 else JobStatus.CLOUD_QUEUED,
             )
-        attempt.runpod_job_id = job.current_runpod_job_id
+        provider = job_provider(job)
+        attempt.inference_provider = provider.value
+        attempt.provider_job_id = job.current_provider_job_id or job.current_runpod_job_id
+        if provider is ProviderName.RUNPOD:
+            attempt.runpod_job_id = attempt.provider_job_id
         attempt.submission_nonce = job.current_submission_nonce
         return attempt
 
@@ -723,7 +773,7 @@ class ControllerWorker:
             _ensure_terminal_evidence(
                 session,
                 attempt,
-                metadata=attempt.runpod_result_json,
+                metadata=attempt_provider_result(attempt),
                 unavailable_reason="worker_no_evidence",
             )
             transition_variation_attempt(
@@ -759,8 +809,8 @@ class ControllerWorker:
                 return
             attempt = get_variation_attempt(session, job_id, job.current_variation or 1)
             uncertain = bool(
-                (attempt is not None and attempt.submission_nonce and not attempt.runpod_job_id)
-                or (job.current_submission_nonce and not job.current_runpod_job_id)
+                (attempt is not None and attempt.submission_nonce and not attempt.provider_job_id)
+                or (job.current_submission_nonce and not job.current_provider_job_id)
             )
             if uncertain:
                 code = "uncertain_cloud_submission"
@@ -774,7 +824,7 @@ class ControllerWorker:
                 _ensure_terminal_evidence(
                     session,
                     attempt,
-                    metadata=attempt.runpod_result_json,
+                    metadata=attempt_provider_result(attempt),
                     unavailable_reason="worker_no_evidence",
                 )
                 fail_variation_attempt(
@@ -805,6 +855,198 @@ class ControllerWorker:
                 JobStatus.CLOUD_QUEUED,
                 JobStatus.GENERATING,
             }
+
+    def _base_poll_delay(self, job_id: str) -> float:
+        if self.poll_interval_seconds is not None:
+            return self.poll_interval_seconds
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is not None and job_provider(job) is ProviderName.SALAD:
+                return self.settings.salad_poll_interval_seconds
+        return self.settings.runpod_poll_interval_seconds
+
+    def _record_poll_error(self, job_id: str, provider: ProviderName, exc: Exception) -> None:
+        count = self._poll_error_counts.get(job_id, 0) + 1
+        self._poll_error_counts[job_id] = count
+        delay = min(60.0, max(self._base_poll_delay(job_id), 1.0) * (2 ** (count - 1)))
+        self._poll_delays[job_id] = delay
+        LOGGER.warning(
+            "job=%s provider=%s operation=status exception_class=%s "
+            "status=%s count=%d next_delay=%s",
+            job_id,
+            provider.value,
+            type(exc).__name__,
+            getattr(exc, "status_code", None),
+            count,
+            delay,
+            extra={"component": "controller"},
+        )
+
+    def _clear_poll_error(self, job_id: str) -> None:
+        self._poll_error_counts.pop(job_id, None)
+        self._poll_delays.pop(job_id, None)
+
+    def _ref_is_current(self, job_id: str, variation_index: int, ref: Any) -> bool:
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            return (
+                job is not None
+                and attempt is not None
+                and attempt_provider_ref(attempt, job) == ref
+            )
+
+    async def _handle_provider_uncertainty(
+        self,
+        job_id: str,
+        variation_index: int,
+        ref: Any,
+        provider: Any,
+        deadline: Any,
+        exc: Exception,
+    ) -> None:
+        self._record_poll_error(job_id, ref.provider, exc)
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            output = self._validated_output(session, job, variation_index)
+            metadata = (
+                _validated_v2_completion_metadata(attempt, job, output)
+                if attempt is not None
+                and job is not None
+                and _stored_schema_version(job) == WORKER_SCHEMA_VERSION
+                else None
+            )
+            legacy_recovery = (
+                job is not None and _stored_schema_version(job) != WORKER_SCHEMA_VERSION
+            )
+            if (
+                attempt is not None
+                and job is not None
+                and output is not None
+                and (legacy_recovery or metadata is not None)
+            ):
+                if metadata is not None:
+                    set_variation_provider_result(session, attempt.id, metadata)
+                _ensure_terminal_evidence(
+                    session,
+                    attempt,
+                    metadata=metadata,
+                    unavailable_reason="timing_unavailable",
+                )
+                completed, _, parent_completed = complete_variation_attempt(
+                    session, attempt.id, note="provider_status_unavailable_after_output"
+                )
+                if parent_completed and completed.job_type is JobType.COVER:
+                    revoke_active_transfers(session, completed.id)
+                session.commit()
+                self._clear_poll_error(job_id)
+                return
+        if utc_now() < deadline:
+            return
+        if (
+            isinstance(exc, ProviderError)
+            and exc.kind is ProviderErrorKind.NOT_FOUND
+            and provider.capabilities.not_found_after_deadline_is_terminal
+        ):
+            outcome = CancelOutcome.CANCELLED
+            error_code = "provider_job_expired"
+        else:
+            if not self._ref_is_current(job_id, variation_index, ref):
+                return
+            try:
+                outcome = await provider.cancel(ref)
+            except ProviderError as cancel_error:
+                self._record_poll_error(job_id, ref.provider, cancel_error)
+                return
+            if not self._ref_is_current(job_id, variation_index, ref):
+                return
+            error_code = "provider_job_timeout"
+        if outcome is not CancelOutcome.CANCELLED:
+            return
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            if job is None or attempt is None or attempt_provider_ref(attempt, job) != ref:
+                session.rollback()
+                return
+            _ensure_terminal_evidence(
+                session, attempt, metadata=None, unavailable_reason="timing_unavailable"
+            )
+            failed = fail_variation_attempt(
+                session,
+                attempt.id,
+                error_code=error_code,
+                user_facing_error="The cloud provider did not complete before its deadline.",
+            )
+            if failed.job_type is JobType.COVER:
+                revoke_active_transfers(session, failed.id)
+            session.commit()
+        self._clear_poll_error(job_id)
+
+    async def _cancel_at_deadline(
+        self,
+        job_id: str,
+        variation_index: int,
+        ref: ProviderJobRef,
+        provider: Any,
+    ) -> bool:
+        if not self._ref_is_current(job_id, variation_index, ref):
+            return True
+        try:
+            outcome = await provider.cancel(ref)
+        except ProviderError as exc:
+            self._record_poll_error(job_id, ref.provider, exc)
+            return True
+        if not self._ref_is_current(job_id, variation_index, ref):
+            return True
+        if outcome is not CancelOutcome.CANCELLED:
+            return False
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            if job is None or attempt is None or attempt_provider_ref(attempt, job) != ref:
+                session.rollback()
+                return True
+            _ensure_terminal_evidence(
+                session,
+                attempt,
+                metadata=None,
+                unavailable_reason="timing_unavailable",
+            )
+            failed = fail_variation_attempt(
+                session,
+                attempt.id,
+                error_code="provider_job_timeout",
+                user_facing_error="The cloud provider did not complete before its deadline.",
+            )
+            if failed.job_type is JobType.COVER:
+                revoke_active_transfers(session, failed.id)
+            session.commit()
+        self._clear_poll_error(job_id)
+        return True
+
+    @staticmethod
+    def _requested_features(job: Job, payload: Mapping[str, Any]) -> frozenset[RequestFeature]:
+        features = {RequestFeature.PROMPT}
+        if job.lyrics:
+            features.add(RequestFeature.LYRICS)
+        if job.job_type is JobType.COVER:
+            features.update({RequestFeature.SOURCE_AUDIO, RequestFeature.COVER_STRENGTH})
+        fields = {
+            "bpm": RequestFeature.BPM,
+            "key": RequestFeature.KEY,
+            "time_signature": RequestFeature.TIME_SIGNATURE,
+            "language": RequestFeature.LANGUAGE,
+            "instrumental": RequestFeature.INSTRUMENTAL,
+            "prompt_mode": RequestFeature.PROMPT_MODE,
+            "duration": RequestFeature.CUSTOM_DURATION,
+            "duration_seconds": RequestFeature.CUSTOM_DURATION,
+        }
+        for key, feature in fields.items():
+            if payload.get(key) is not None:
+                features.add(feature)
+        return frozenset(features)
 
     def _incoming_source_is_valid(self, job_id: str) -> bool:
         with self.session_factory() as session:
@@ -1107,7 +1349,7 @@ def _validated_v2_completion_metadata(
 ) -> dict[str, Any] | None:
     """Return persisted v2 completion evidence only when it still validates."""
 
-    raw_metadata = attempt.runpod_result_json
+    raw_metadata = attempt_provider_result(attempt)
     if not isinstance(raw_metadata, dict):
         return None
     try:

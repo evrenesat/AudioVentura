@@ -13,8 +13,8 @@
   </div>
 </section>
 
-{% if not readiness.components.runpod_api.ok %}
-<div class="banner warning" role="status">Runpod is unavailable. New jobs will remain safely queued or fail with a clear status.</div>
+{% if not readiness.components.inference_provider.ok %}
+<div class="banner warning" role="status">The cloud provider is unavailable. New jobs will remain safely queued or fail with a clear status.</div>
 {% endif %}
 {% if not readiness.components.home_ingest.ok %}
 <div class="banner warning" role="status">Home ingest is unavailable. Original songs remain available; cover preparation will wait or fail safely.</div>

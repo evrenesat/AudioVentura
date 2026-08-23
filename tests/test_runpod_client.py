@@ -97,6 +97,7 @@ def test_runpod_api_and_malformed_errors_do_not_echo_secret() -> None:
             with pytest.raises(RunpodAPIError) as error:
                 await client.health()
             assert "secret-key" not in str(error.value)
+            assert error.value.status_code == 500
 
         malformed = httpx.MockTransport(
             lambda request: httpx.Response(200, json={"id": "job-123", "status": "UNKNOWN"})

@@ -26,10 +26,13 @@ from ace_service.models import (
     utc_now,
 )
 from ace_service.repository import (
+    attempt_provider_ref,
     consume_transfer,
     create_output,
+    get_job,
     get_output_by_path,
     get_transfer_by_token,
+    get_variation_attempt,
     issue_transfer_capability,
 )
 from ace_service.schemas import normalize_extension, normalize_relative_path, resolve_relative_path
@@ -420,6 +423,13 @@ def _finalize_output(
             moved = True
             _fsync_directory(final_path.parent)
             variation_index, result_index = _output_indexes(session, capability.job_id, final_path)
+            job = get_job(session, capability.job_id)
+            attempt = get_variation_attempt(session, capability.job_id, variation_index)
+            provider_ref = (
+                attempt_provider_ref(attempt, job)
+                if attempt is not None and job is not None
+                else None
+            )
             create_output(
                 session,
                 job_id=capability.job_id,
@@ -429,6 +439,7 @@ def _finalize_output(
                 mime_type=_MIME_TYPES[normalize_extension(capability.expected_extension)],
                 byte_size=byte_count,
                 sha256=sha256,
+                provider_ref=provider_ref,
             )
             consume_transfer(session, capability.id)
             session.commit()

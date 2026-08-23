@@ -113,6 +113,7 @@ def configure_logging(
                 settings.home_ingest_token,
                 settings.runpod_api_key,
                 settings.runpod_endpoint_id,
+                settings.salad_api_key or "",
             )
         )
     )

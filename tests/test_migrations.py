@@ -317,12 +317,18 @@ class TestUpgrade:
                 ).fetchall()
                 == jobs_before
             )
-            assert connection.execute(
-                "SELECT * FROM variation_attempts ORDER BY id"
-            ).fetchall() == (attempts_before)
-            assert (
-                connection.execute("SELECT * FROM outputs ORDER BY id").fetchall() == outputs_before
-            )
+            attempt_width = len(attempts_before[0])
+            assert [
+                row[:attempt_width]
+                for row in connection.execute(
+                    "SELECT * FROM variation_attempts ORDER BY id"
+                ).fetchall()
+            ] == attempts_before
+            output_width = len(outputs_before[0])
+            assert [
+                row[:output_width]
+                for row in connection.execute("SELECT * FROM outputs ORDER BY id").fetchall()
+            ] == outputs_before
             assert connection.execute("SELECT id, project_id FROM jobs ORDER BY id").fetchall() == [
                 ("cover-label", "cover-label"),
                 ("original-label", "original-label"),
@@ -330,6 +336,10 @@ class TestUpgrade:
                 ("original-prompt", "original-prompt"),
                 ("original-title", "original-title"),
             ]
+            provider_attempt = connection.execute(
+                "SELECT inference_provider, provider_job_id FROM variation_attempts"
+            ).fetchone()
+            assert provider_attempt == ("runpod", "runpod-1")
             assert connection.execute(
                 "SELECT id, job_type, title FROM projects ORDER BY id"
             ).fetchall() == [

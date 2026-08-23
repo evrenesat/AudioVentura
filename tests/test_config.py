@@ -102,3 +102,30 @@ def test_service_root_path_rejects_unsafe_or_unnormalized_values(
 ) -> None:
     with pytest.raises(ValidationError, match="service root path"):
         ServiceSettings(**_settings_kwargs(tmp_path), service_root_path=value)
+
+
+def test_salad_default_requires_scoped_credentials_and_accepts_runpod_as_secondary(
+    tmp_path: Path,
+) -> None:
+    kwargs = _settings_kwargs(tmp_path)
+    kwargs.update(
+        inference_provider="salad",
+        salad_api_key="real-salad-key",
+        salad_organization="audio-org",
+        salad_project="audio-project",
+    )
+    settings = ServiceSettings(**kwargs)
+    assert settings.inference_provider == "salad"
+    assert settings.salad_queue_name == "audioventura-jobs"
+
+    kwargs["salad_organization"] = "Not DNS"
+    with pytest.raises(ValidationError, match="DNS-compatible"):
+        ServiceSettings(**kwargs)
+
+
+def test_generic_timeout_accepts_runpod_environment_alias(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("RUNPOD_JOB_TIMEOUT_SECONDS", "321")
+    settings = ServiceSettings(**_settings_kwargs(tmp_path))
+    assert settings.inference_job_timeout_seconds == 321

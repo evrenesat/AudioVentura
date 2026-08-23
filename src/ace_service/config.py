@@ -22,9 +22,8 @@ _PLACEHOLDERS = frozenset(
 _CREDENTIAL_FIELDS = (
     "service_password",
     "home_ingest_token",
-    "runpod_api_key",
-    "runpod_endpoint_id",
 )
+_SALAD_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _WORKER_RUNTIME_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SERVICE_ROOT_PATH_RE = re.compile(r"^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)$")
 
@@ -165,6 +164,64 @@ class ServiceSettings(BaseSettings):
         default="change-me",
         validation_alias=AliasChoices("ACE_HOME_INGEST_TOKEN", "home_ingest_token"),
         min_length=1,
+    )
+    inference_provider: str = Field(
+        default="runpod",
+        validation_alias=AliasChoices("INFERENCE_PROVIDER", "inference_provider"),
+    )
+    inference_job_timeout_seconds: int = Field(
+        default=7200,
+        validation_alias=AliasChoices(
+            "INFERENCE_JOB_TIMEOUT_SECONDS",
+            "RUNPOD_JOB_TIMEOUT_SECONDS",
+            "inference_job_timeout_seconds",
+            "runpod_job_timeout_seconds",
+        ),
+        gt=0,
+    )
+    salad_api_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("SALAD_API_KEY", "salad_api_key")
+    )
+    salad_organization: str | None = Field(
+        default=None, validation_alias=AliasChoices("SALAD_ORGANIZATION", "salad_organization")
+    )
+    salad_project: str | None = Field(
+        default=None, validation_alias=AliasChoices("SALAD_PROJECT", "salad_project")
+    )
+    salad_queue_name: str = Field(
+        default="audioventura-jobs",
+        validation_alias=AliasChoices("SALAD_QUEUE_NAME", "salad_queue_name"),
+    )
+    salad_container_group_name: str = Field(
+        default="audioventura-ace-step-v1",
+        validation_alias=AliasChoices("SALAD_CONTAINER_GROUP_NAME", "salad_container_group_name"),
+    )
+    salad_poll_interval_seconds: float = Field(
+        default=2,
+        validation_alias=AliasChoices("SALAD_POLL_INTERVAL_SECONDS", "salad_poll_interval_seconds"),
+        gt=0,
+    )
+    salad_connect_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "SALAD_CONNECT_TIMEOUT_SECONDS", "salad_connect_timeout_seconds"
+        ),
+        gt=0,
+    )
+    salad_read_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("SALAD_READ_TIMEOUT_SECONDS", "salad_read_timeout_seconds"),
+        gt=0,
+    )
+    salad_write_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("SALAD_WRITE_TIMEOUT_SECONDS", "salad_write_timeout_seconds"),
+        gt=0,
+    )
+    salad_pool_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices("SALAD_POOL_TIMEOUT_SECONDS", "salad_pool_timeout_seconds"),
+        gt=0,
     )
     runpod_api_key: str = Field(
         default="change-me",
@@ -325,6 +382,21 @@ class ServiceSettings(BaseSettings):
             raise ValueError("eligible GPU IDs must not contain duplicates")
         return normalized
 
+    @field_validator("inference_provider")
+    @classmethod
+    def validate_inference_provider(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"runpod", "salad"}:
+            raise ValueError("inference provider must be runpod or salad")
+        return normalized
+
+    @field_validator("salad_queue_name", "salad_container_group_name")
+    @classmethod
+    def validate_salad_names(cls, value: str) -> str:
+        if not _SALAD_NAME_RE.fullmatch(value):
+            raise ValueError("Salad resource names must be DNS-compatible")
+        return value
+
     @field_validator("service_root_path")
     @classmethod
     def validate_service_root_path(cls, value: str) -> str:
@@ -393,6 +465,22 @@ class ServiceSettings(BaseSettings):
             value = getattr(self, field_name).strip().lower()
             if value in _PLACEHOLDERS or value.endswith(".example.invalid"):
                 raise ValueError(f"{field_name} still contains a configuration placeholder")
+
+        if self.inference_provider == "runpod":
+            for field_name in ("runpod_api_key", "runpod_endpoint_id"):
+                value = getattr(self, field_name).strip().lower()
+                if value in _PLACEHOLDERS:
+                    raise ValueError(f"{field_name} still contains a configuration placeholder")
+        else:
+            for field_name in ("salad_api_key", "salad_organization", "salad_project"):
+                value = getattr(self, field_name)
+                if value is None or not value.strip() or value.strip().lower() in _PLACEHOLDERS:
+                    raise ValueError(f"{field_name} is required for Salad")
+            assert self.salad_organization is not None and self.salad_project is not None
+            if not _SALAD_NAME_RE.fullmatch(
+                self.salad_organization
+            ) or not _SALAD_NAME_RE.fullmatch(self.salad_project):
+                raise ValueError("Salad organization and project must be DNS-compatible")
 
         if self.eligible_gpu_ids and self.runpod_worker_runtime_identity is None:
             raise ValueError(

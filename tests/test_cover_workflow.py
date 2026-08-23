@@ -303,7 +303,7 @@ def test_cover_flow_stages_source_downloads_it_and_cleans_up_after_success(setti
         assert payload["generation"]["cover_noise_strength"] == 0.25
         assert payload["generation"]["duration"] == 42.0
         assert payload["resolved_parameters"]["duration"] == 42.0
-        assert len(runpod.status_calls) == 2
+        assert len(runpod.status_calls) == 4
         with factory() as session:
             job = get_job(session, job_id)
             assert job is not None and job.status is JobStatus.COMPLETED

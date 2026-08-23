@@ -8,13 +8,28 @@ from datetime import timedelta
 import pytest
 
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
-from ace_service.models import JobStatus, JobType
+from ace_service.models import JobStatus, JobType, utc_now
+from ace_service.providers.base import (
+    CancelOutcome,
+    InferenceMode,
+    ProviderCapabilities,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderHealth,
+    ProviderJobRef,
+    ProviderName,
+    ProviderPhase,
+    ProviderStatus,
+    RequestFeature,
+)
+from ace_service.providers.registry import ProviderRegistry
 from ace_service.repository import (
     create_job,
     create_original_job,
     create_output,
     get_job,
     get_variation_attempt,
+    persist_variation_provider_job_ref,
     persist_variation_runpod_job_id,
     prepare_variation_submission,
     set_variation_progress,
@@ -36,6 +51,41 @@ def _database(settings):
     engine = create_database_engine(settings)
     initialize_database(engine)
     return engine, create_session_factory(engine)
+
+
+class _GenericSalad:
+    capabilities = ProviderCapabilities(
+        ProviderName.SALAD,
+        frozenset(InferenceMode),
+        frozenset(RequestFeature),
+        frozenset({2}),
+        True,
+        False,
+        False,
+    )
+
+    def __init__(self, *, error: bool = False, cancel: CancelOutcome = CancelOutcome.TOO_LATE):
+        self.error = error
+        self.cancel_outcome = cancel
+        self.cancelled: list[str] = []
+
+    async def submit(self, request):
+        raise AssertionError("poll tests do not submit")
+
+    async def status(self, ref):
+        if self.error:
+            raise ProviderError(ProviderErrorKind.TRANSIENT, "status", "temporary")
+        return ProviderStatus(ProviderPhase.QUEUED)
+
+    async def result(self, ref):
+        raise AssertionError("queued jobs have no result")
+
+    async def cancel(self, ref):
+        self.cancelled.append(ref.external_id)
+        return self.cancel_outcome
+
+    async def health(self):
+        return ProviderHealth(True, "ready")
 
 
 class _FakeRunpod:
@@ -376,16 +426,20 @@ def test_schema_v2_completion_evidence_mismatch_fails_closed(
 
         async def scenario() -> None:
             worker = ControllerWorker(settings, factory, runpod, poll_interval_seconds=0)
-            await worker.start()
-            await worker.wait_idle()
-            await worker.stop()
+            if result_before_upload:
+                await worker._poll_variation(job_id, 1)
+            else:
+                await worker.start()
+                await worker.wait_idle()
+                await worker.stop()
 
         _run(scenario())
         with factory() as session:
             job = get_job(session, job_id)
             attempt = get_variation_attempt(session, job_id, 1)
-            assert job is not None and job.status is JobStatus.FAILED
-            assert attempt is not None and attempt.status is JobStatus.FAILED
+            expected = JobStatus.GENERATING if result_before_upload else JobStatus.FAILED
+            assert job is not None and job.status is expected
+            assert attempt is not None and attempt.status is expected
             output = job.outputs[0]
             assert output.seed_metadata_json is None
             assert output.generation_metadata_json is None
@@ -458,7 +512,7 @@ def test_enqueue_deduplicates_and_restart_polls_without_resubmission(settings) -
             job = get_job(session, "job-restart")
             assert job is not None and job.status is JobStatus.COMPLETED
         assert fake.submissions == []
-        assert fake.status_calls == ["persisted-runpod"]
+        assert fake.status_calls == ["persisted-runpod", "persisted-runpod"]
     finally:
         engine.dispose()
 
@@ -515,7 +569,7 @@ def test_restart_recovery_handles_interrupted_ingest_and_missing_cloud_id(settin
             interrupted = get_job(session, "job-ingest")
             missing = get_job(session, "job-missing")
             assert interrupted is not None and interrupted.error_code == "ingest_interrupted"
-            assert missing is not None and missing.error_code == "missing_runpod_job_id"
+            assert missing is not None and missing.error_code == "missing_provider_job_id"
         assert fake.submissions == []
     finally:
         engine.dispose()
@@ -648,7 +702,7 @@ def test_status_expiry_recovers_from_valid_local_upload(settings) -> None:
             assert job is not None and job.status is JobStatus.COMPLETED
             assert attempt is not None
             assert attempt.runpod_result_json == {
-                "recovery_note": "runpod_status_unavailable_after_output"
+                "recovery_note": "provider_status_unavailable_after_output"
             }
             assert attempt.status is JobStatus.COMPLETED
             assert attempt.evidence_status == "unavailable"
@@ -663,7 +717,7 @@ def test_status_expiry_recovers_from_valid_local_upload(settings) -> None:
         engine.dispose()
 
 
-def test_schema_v2_status_expiry_does_not_complete_from_output_alone(settings) -> None:
+def test_schema_v2_status_uncertainty_keeps_exact_ref_active(settings) -> None:
     engine, factory = _database(settings)
     try:
         with factory() as session:
@@ -684,20 +738,18 @@ def test_schema_v2_status_expiry_does_not_complete_from_output_alone(settings) -
 
         async def scenario() -> None:
             worker = ControllerWorker(settings, factory, fake, poll_interval_seconds=0)
-            await worker.start()
-            await worker.wait_idle()
-            await worker.stop()
+            await worker._poll_variation("job-v2-missing-result", 1)
 
         _run(scenario())
         with factory() as session:
             job = get_job(session, "job-v2-missing-result")
             attempt = get_variation_attempt(session, "job-v2-missing-result", 1)
-            assert job is not None and job.status is JobStatus.FAILED
-            assert job.error_code == "controller_task_error"
-            assert attempt is not None and attempt.status is JobStatus.FAILED
+            assert job is not None and job.status is JobStatus.GENERATING
+            assert job.current_provider_job_id == "v2-missing-result"
+            assert attempt is not None and attempt.status is JobStatus.GENERATING
+            assert attempt.provider_job_id == "v2-missing-result"
             assert attempt.runpod_result_json is None
-            assert attempt.evidence_status == "unavailable"
-            assert attempt.unavailable_reason == "worker_no_evidence"
+            assert attempt.evidence_status == "pending"
         assert fake.submissions == []
     finally:
         engine.dispose()
@@ -797,7 +849,7 @@ def test_schema_v2_status_expiry_uses_persisted_completion_metadata(settings) ->
             assert attempt.runpod_result_json["output"]["effective_seed"] == 123456
             assert (
                 attempt.runpod_result_json["recovery_note"]
-                == "runpod_status_unavailable_after_output"
+                == "provider_status_unavailable_after_output"
             )
             output = job.outputs[0]
             assert output.seed_metadata_json == {
@@ -811,5 +863,71 @@ def test_schema_v2_status_expiry_uses_persisted_completion_metadata(settings) ->
             assert output.generation_metadata_json["worker"]["gpu"] == "test-gpu"
             assert "runpod_queue_delay_ms" not in output.generation_metadata_json
         assert fake.submissions == []
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("cancel_outcome", "expected_status"),
+    [
+        (CancelOutcome.TOO_LATE, JobStatus.CLOUD_QUEUED),
+        (CancelOutcome.CANCELLED, JobStatus.FAILED),
+    ],
+)
+def test_salad_deadline_requires_confirmed_pending_cancel(
+    settings, cancel_outcome: CancelOutcome, expected_status: JobStatus
+) -> None:
+    settings.inference_job_timeout_seconds = 1
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id="salad-deadline",
+                inference_provider=ProviderName.SALAD,
+            )
+            _, attempt, nonce = prepare_variation_submission(
+                session, job.id, 1, inference_provider=ProviderName.SALAD
+            )
+            persist_variation_provider_job_ref(
+                session,
+                attempt.id,
+                ProviderJobRef(ProviderName.SALAD, "11111111-1111-4111-8111-111111111111"),
+                submission_nonce=nonce,
+            )
+            attempt.started_at = utc_now() - timedelta(seconds=2)
+            session.commit()
+        provider = _GenericSalad(cancel=cancel_outcome)
+        registry = ProviderRegistry([provider], default=ProviderName.SALAD)
+        worker = ControllerWorker(settings, factory, registry, poll_interval_seconds=0)
+        _run(worker._poll_variation("salad-deadline", 1))
+        with factory() as session:
+            job = get_job(session, "salad-deadline")
+            assert job is not None and job.status is expected_status
+        assert provider.cancelled == ["11111111-1111-4111-8111-111111111111"]
+    finally:
+        engine.dispose()
+
+
+def test_provider_error_backoff_caps_and_valid_status_resets(settings) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            create_job(session, job_type=JobType.ORIGINAL, job_id="backoff")
+            session.commit()
+        worker = ControllerWorker(
+            settings,
+            factory,
+            _FakeRunpod(settings, factory),
+            poll_interval_seconds=0,
+        )
+        error = ProviderError(ProviderErrorKind.TRANSIENT, "status", "temporary")
+        for _ in range(10):
+            worker._record_poll_error("backoff", ProviderName.RUNPOD, error)
+        assert worker._poll_delays["backoff"] == 60
+        worker._clear_poll_error("backoff")
+        assert "backoff" not in worker._poll_error_counts
+        assert "backoff" not in worker._poll_delays
     finally:
         engine.dispose()

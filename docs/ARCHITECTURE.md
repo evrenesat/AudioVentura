@@ -456,7 +456,13 @@ seed, and worker identity, and are never completed from the output file alone.
 
 ## Checkpoint 3 boundary
 
-The controller's Runpod adapter is an asynchronous metadata-only client for
+The controller provider registry owns Runpod and Salad metadata-only adapters.
+Each job and attempt persists its provider and external ID before polling, so
+a default change cannot orphan active work. Lifecycle and deadlines remain in
+the controller; deployment scaling, GPUs, logs, and revisions do not enter the
+runtime provider protocol.
+
+The low-level Runpod adapter is an asynchronous metadata-only client for
 the queue endpoint at /v2/<endpoint-id>. It uses separate connect, read,
 write, and pool timeouts, sends the API key only in an authorization header,
 validates response IDs and states, and maps Runpod's queue/running/terminal

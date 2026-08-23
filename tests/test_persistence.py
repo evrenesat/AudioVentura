@@ -17,6 +17,7 @@ from ace_service.models import (
     TransferStatus,
     utc_now,
 )
+from ace_service.providers.base import ProviderJobRef, ProviderName
 from ace_service.repository import (
     check_schema_v1_rollback_readiness,
     consume_transfer,
@@ -29,12 +30,16 @@ from ace_service.repository import (
     get_job,
     get_project,
     get_transfer_by_token,
+    get_variation_attempt,
     issue_transfer_capability,
     list_project_jobs,
     list_projects,
+    persist_variation_provider_job_ref,
+    prepare_variation_submission,
     rename_project,
     resolve_continuation_source,
     revoke_transfer,
+    set_variation_provider_result,
 )
 from ace_service.rollback_readiness import main as rollback_readiness_main
 from ace_service.schemas import (
@@ -53,6 +58,29 @@ def test_sqlite_initialization_enables_required_pragmas(settings) -> None:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA busy_timeout")).scalar() == 5000
     engine.dispose()
+
+
+def test_salad_provider_ownership_never_populates_legacy_runpod_fields(session) -> None:
+    job = create_job(
+        session,
+        job_type=JobType.ORIGINAL,
+        inference_provider=ProviderName.SALAD,
+    )
+    _, attempt, nonce = prepare_variation_submission(
+        session, job.id, 1, inference_provider=ProviderName.SALAD
+    )
+    ref = ProviderJobRef(ProviderName.SALAD, "11111111-1111-4111-8111-111111111111")
+    persist_variation_provider_job_ref(session, attempt.id, ref, submission_nonce=nonce)
+    set_variation_provider_result(session, attempt.id, {"schema_version": 2})
+    session.commit()
+    session.expire_all()
+
+    persisted = get_job(session, job.id)
+    persisted_attempt = get_variation_attempt(session, job.id, 1)
+    assert persisted is not None and persisted.current_provider_job_id == ref.external_id
+    assert persisted.current_runpod_job_id is None and persisted.runpod_result_json is None
+    assert persisted_attempt is not None and persisted_attempt.provider_job_id == ref.external_id
+    assert persisted_attempt.runpod_job_id is None
 
 
 def test_sqlite_round_trip_for_job_output_and_transfer(session) -> None:

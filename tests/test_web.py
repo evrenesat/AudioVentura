@@ -1723,7 +1723,7 @@ def test_status_polling_and_timing_metadata(web_app) -> None:
 @pytest.mark.parametrize(
     ("phase", "phase_label"),
     [
-        ("cloud_wait", "Waiting for Runpod to allocate a GPU"),
+        ("cloud_wait", "Waiting for the cloud provider"),
         ("worker_initializing", "Cloud worker initializing"),
     ],
 )
@@ -1770,7 +1770,7 @@ def test_readiness_reports_components_and_preserves_original_availability(settin
         with TestClient(app) as client:
             dashboard = client.get("/", auth=_auth(client))
             assert dashboard.status_code == 200
-            assert "Runpod is unavailable" in dashboard.text
+            assert "cloud provider is unavailable" in dashboard.text
             assert "Home ingest is unavailable" in dashboard.text
             ready = client.get("/readyz", auth=_auth(client))
             assert ready.status_code == 503

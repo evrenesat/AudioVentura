@@ -80,9 +80,11 @@ class ProviderName(StrEnum):
     RUNPOD = "runpod"
     SALAD = "salad"
 
+
 class InferenceMode(StrEnum):
     PROMPT_TO_AUDIO = "prompt_to_audio"
     AUDIO_TO_AUDIO = "audio_to_audio"
+
 
 class RequestFeature(StrEnum):
     PROMPT = "prompt"
@@ -97,6 +99,7 @@ class RequestFeature(StrEnum):
     COVER_STRENGTH = "cover_strength"
     PROMPT_MODE = "prompt_mode"
 
+
 class ProviderPhase(StrEnum):
     QUEUED = "queued"
     PROVISIONING = "provisioning"
@@ -107,14 +110,17 @@ class ProviderPhase(StrEnum):
     CANCELLED = "cancelled"
     UNKNOWN = "unknown"
 
+
 class CancelOutcome(StrEnum):
     CANCELLED = "cancelled"
     TOO_LATE = "too_late"
     UNSUPPORTED = "unsupported"
 
+
 class DetailScope(StrEnum):
     JOB = "job"
     DEPLOYMENT = "deployment"
+
 
 class ProviderErrorKind(StrEnum):
     TRANSIENT = "transient"
@@ -147,6 +153,8 @@ The async `InferenceProvider` protocol exposes only:
 
 ```python
 capabilities: ProviderCapabilities
+
+
 async def submit(request: InferenceRequest) -> ProviderJobRef: ...
 async def status(ref: ProviderJobRef) -> ProviderStatus: ...
 async def result(ref: ProviderJobRef) -> InferenceResult: ...

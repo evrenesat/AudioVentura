@@ -48,6 +48,7 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
+from ace_service.providers.base import ProviderJobRef, ProviderName
 from ace_service.schemas import (
     CoverRequest,
     OriginalSongRequest,
@@ -76,6 +77,29 @@ _PROGRESS_SEQUENCES = {
     "finalizing": 30,
     "output_upload": 40,
 }
+
+
+def job_provider(job: Job) -> ProviderName:
+    return ProviderName(job.inference_provider or ProviderName.RUNPOD)
+
+
+def attempt_provider_ref(
+    attempt: VariationAttempt, job: Job | None = None
+) -> ProviderJobRef | None:
+    provider = attempt.inference_provider or (job.inference_provider if job is not None else None)
+    external_id = attempt.provider_job_id
+    if provider is None and attempt.runpod_job_id:
+        provider, external_id = ProviderName.RUNPOD, attempt.runpod_job_id
+    if provider and external_id:
+        return ProviderJobRef(ProviderName(provider), external_id)
+    return None
+
+
+def attempt_provider_result(attempt: VariationAttempt) -> dict[str, Any] | None:
+    value = attempt.provider_result_json
+    if value is None and (attempt.inference_provider in {None, ProviderName.RUNPOD.value}):
+        value = attempt.runpod_result_json
+    return dict(value) if isinstance(value, dict) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +246,7 @@ def resolve_cover_continuation_output(job: Job) -> tuple[Output, float]:
         ),
         None,
     )
-    result = attempt.runpod_result_json if attempt is not None else None
+    result = attempt_provider_result(attempt) if attempt is not None else None
     result_output = result.get("output") if isinstance(result, dict) else None
     duration = result_output.get("duration_seconds") if isinstance(result_output, dict) else None
     if (
@@ -298,6 +322,7 @@ def create_job(
     normalized_request_json: dict[str, Any] | None = None,
     job_id: str | UUID | None = None,
     project: Project | str | UUID | None = None,
+    inference_provider: ProviderName | str = ProviderName.RUNPOD,
 ) -> Job:
     if variation_count < 1 or variation_count > 4:
         raise ValueError("variation_count must be between 1 and 4")
@@ -310,6 +335,7 @@ def create_job(
         sanitized_source_title=sanitized_source_title,
         prompt=prompt,
     )
+    provider = ProviderName(inference_provider)
     job = Job(
         id=_id_string(job_id),
         project_id=persisted_project.id,
@@ -326,6 +352,7 @@ def create_job(
         variation_count=variation_count,
         current_variation=1,
         normalized_request_json=normalized_request_json,
+        inference_provider=provider.value,
     )
     session.add(job)
     persisted_project.updated_at = utc_now()
@@ -339,6 +366,7 @@ def create_original_job(
     *,
     job_id: str | UUID | None = None,
     project: Project | str | UUID | None = None,
+    inference_provider: ProviderName | str = ProviderName.RUNPOD,
 ) -> Job:
     """Persist one validated original-song request before it is enqueued."""
 
@@ -352,6 +380,7 @@ def create_original_job(
         normalized_request_json=request.to_normalized_request_json(),
         job_id=job_id,
         project=project,
+        inference_provider=inference_provider,
     )
 
 
@@ -362,6 +391,7 @@ def create_cover_job(
     rights_confirmation_at: datetime | None = None,
     job_id: str | UUID | None = None,
     project: Project | str | UUID | None = None,
+    inference_provider: ProviderName | str = ProviderName.RUNPOD,
 ) -> Job:
     """Persist one validated cover request before home ingestion is queued."""
 
@@ -381,6 +411,7 @@ def create_cover_job(
         normalized_request_json=request.to_normalized_request_json(),
         job_id=job_id,
         project=project,
+        inference_provider=inference_provider,
     )
 
 
@@ -403,7 +434,7 @@ def finalize_cover_job_duration(
     duration = float(source_duration_seconds)
     target_duration = float(finalized["resolved_target_duration_seconds"])
     job.source_duration = duration
-    result = dict(job.runpod_result_json or {})
+    result = dict(job.provider_result_json or job.runpod_result_json or {})
     result.update(
         {
             "schema_version": 2,
@@ -412,7 +443,9 @@ def finalize_cover_job_duration(
             "ace_duration_seconds": target_duration,
         }
     )
-    job.runpod_result_json = result
+    job.provider_result_json = result
+    if job_provider(job) is ProviderName.RUNPOD:
+        job.runpod_result_json = result
     normalized = dict(job.normalized_request_json)
     normalized["cover_staging"] = {
         "status": "awaiting_confirmation",
@@ -711,7 +744,11 @@ def create_variation_attempt(
     existing = get_variation_attempt(session, job.id, variation_index)
     if existing is not None:
         return existing
-    attempt = VariationAttempt(job_id=job.id, variation_index=variation_index)
+    attempt = VariationAttempt(
+        job_id=job.id,
+        variation_index=variation_index,
+        inference_provider=job_provider(job).value,
+    )
     session.add(attempt)
     session.flush()
     return attempt
@@ -754,6 +791,7 @@ def prepare_variation_submission(
     *,
     submission_nonce: str | UUID | None = None,
     now: datetime | None = None,
+    inference_provider: ProviderName | str | None = None,
 ) -> tuple[Job, VariationAttempt, str]:
     """Commit the variation's nonce before the external Runpod request."""
 
@@ -761,8 +799,11 @@ def prepare_variation_submission(
     if job is None:
         raise KeyError(f"unknown job: {job_id}")
     attempt = create_variation_attempt(session, job_id=job.id, variation_index=variation_index)
-    if attempt.runpod_job_id:
-        raise ValueError("variation already has a Runpod job ID")
+    provider = ProviderName(inference_provider or job_provider(job))
+    if provider is not job_provider(job):
+        raise ValueError("variation provider does not match its job")
+    if attempt_provider_ref(attempt, job):
+        raise ValueError("variation already has a provider job ID")
     if attempt.submission_nonce:
         raise ValueError("variation submission outcome is uncertain")
     if attempt.status is not JobStatus.QUEUED:
@@ -778,12 +819,46 @@ def prepare_variation_submission(
         raise ValueError(f"job is not ready for cloud submission: {job.status.value}")
     job.current_variation = variation_index
     job.current_submission_nonce = nonce
+    job.current_provider_job_id = None
     job.current_runpod_job_id = None
     job.updated_at = timestamp
     attempt.submission_nonce = nonce
+    attempt.inference_provider = provider.value
     attempt.updated_at = timestamp
     session.flush()
     return job, attempt, nonce
+
+
+def persist_variation_provider_job_ref(
+    session: Session,
+    attempt_id: int,
+    ref: ProviderJobRef,
+    *,
+    submission_nonce: str,
+    now: datetime | None = None,
+) -> VariationAttempt:
+    attempt = session.get(VariationAttempt, attempt_id)
+    if attempt is None:
+        raise KeyError(f"unknown variation attempt: {attempt_id}")
+    job = get_job(session, attempt.job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {attempt.job_id}")
+    if attempt.submission_nonce != submission_nonce:
+        raise ValueError("submission nonce does not match the pending variation")
+    if ref.provider is not job_provider(job) or attempt.inference_provider != ref.provider.value:
+        raise ValueError("provider reference does not match persisted provider")
+    if attempt.provider_job_id and attempt.provider_job_id != ref.external_id:
+        raise ValueError("variation already has a different provider job ID")
+    attempt.provider_job_id = ref.external_id
+    job.current_provider_job_id = ref.external_id
+    if ref.provider is ProviderName.RUNPOD:
+        attempt.runpod_job_id = ref.external_id
+        job.current_runpod_job_id = ref.external_id
+    timestamp = _utc_timestamp(now)
+    attempt.updated_at = timestamp
+    job.updated_at = timestamp
+    session.flush()
+    return attempt
 
 
 def persist_variation_runpod_job_id(
@@ -796,23 +871,13 @@ def persist_variation_runpod_job_id(
 ) -> VariationAttempt:
     """Persist a Runpod ID immediately after an accepted variation submission."""
 
-    if not runpod_job_id or len(runpod_job_id) > 128:
-        raise ValueError("Runpod job ID is invalid")
-    attempt = session.get(VariationAttempt, attempt_id)
-    if attempt is None:
-        raise KeyError(f"unknown variation attempt: {attempt_id}")
-    if attempt.submission_nonce != submission_nonce:
-        raise ValueError("submission nonce does not match the pending variation")
-    if attempt.runpod_job_id and attempt.runpod_job_id != runpod_job_id:
-        raise ValueError("variation already has a different Runpod job ID")
-    attempt.runpod_job_id = runpod_job_id
-    job = get_job(session, attempt.job_id)
-    if job is not None:
-        job.current_runpod_job_id = runpod_job_id
-        job.updated_at = _utc_timestamp(now)
-    attempt.updated_at = _utc_timestamp(now)
-    session.flush()
-    return attempt
+    return persist_variation_provider_job_ref(
+        session,
+        attempt_id,
+        ProviderJobRef(ProviderName.RUNPOD, runpod_job_id),
+        submission_nonce=submission_nonce,
+        now=now,
+    )
 
 
 def recover_uncertain_variation_submissions(
@@ -825,7 +890,7 @@ def recover_uncertain_variation_submissions(
         session.scalars(
             select(VariationAttempt).where(
                 VariationAttempt.submission_nonce.is_not(None),
-                VariationAttempt.runpod_job_id.is_(None),
+                VariationAttempt.provider_job_id.is_(None),
                 VariationAttempt.status == JobStatus.CLOUD_QUEUED,
             )
         )
@@ -870,15 +935,32 @@ def set_variation_runpod_result(
     project_to_output: bool = True,
     now: datetime | None = None,
 ) -> VariationAttempt:
+    return set_variation_provider_result(
+        session, attempt_id, result, project_to_output=project_to_output, now=now
+    )
+
+
+def set_variation_provider_result(
+    session: Session,
+    attempt_id: int,
+    result: dict[str, Any] | None,
+    *,
+    project_to_output: bool = True,
+    now: datetime | None = None,
+) -> VariationAttempt:
     attempt = session.get(VariationAttempt, attempt_id)
     if attempt is None:
         raise KeyError(f"unknown variation attempt: {attempt_id}")
-    attempt.runpod_result_json = result
+    attempt.provider_result_json = result
+    if attempt.inference_provider in {None, ProviderName.RUNPOD.value}:
+        attempt.runpod_result_json = result
     job = get_job(session, attempt.job_id)
     if job is not None and result is not None:
-        merged_job_result = dict(job.runpod_result_json or {})
+        merged_job_result = dict(job.provider_result_json or job.runpod_result_json or {})
         merged_job_result.update(result)
-        job.runpod_result_json = merged_job_result
+        job.provider_result_json = merged_job_result
+        if job_provider(job) is ProviderName.RUNPOD:
+            job.runpod_result_json = merged_job_result
         if project_to_output:
             output_records = list(
                 session.scalars(
@@ -916,19 +998,22 @@ def set_variation_progress(
     resolved_sequence = expected_sequence if sequence is None else sequence
     if resolved_sequence != expected_sequence:
         raise ValueError("variation progress sequence does not match its phase")
-    current = attempt.runpod_result_json
+    current = attempt_provider_result(attempt)
     if isinstance(current, dict) and current.get("kind") == _PROGRESS_KIND:
         current_sequence = current.get("sequence")
         if isinstance(current_sequence, int) and not isinstance(current_sequence, bool):
             if current_sequence > resolved_sequence:
                 return attempt
     timestamp = _utc_timestamp(now)
-    attempt.runpod_result_json = {
+    progress = {
         "kind": _PROGRESS_KIND,
         "phase": phase,
         "sequence": resolved_sequence,
         "observed_at": timestamp.isoformat(),
     }
+    attempt.provider_result_json = progress
+    if attempt.inference_provider in {None, ProviderName.RUNPOD.value}:
+        attempt.runpod_result_json = progress
     attempt.updated_at = timestamp
     session.flush()
     return attempt
@@ -982,15 +1067,18 @@ def complete_variation_attempt(
         raise KeyError(f"unknown job: {attempt.job_id}")
     timestamp = _utc_timestamp(now)
     if note:
-        result = dict(attempt.runpod_result_json or {})
+        result = dict(attempt_provider_result(attempt) or {})
         result["recovery_note"] = note
-        attempt.runpod_result_json = result
+        attempt.provider_result_json = result
+        if attempt.inference_provider in {None, ProviderName.RUNPOD.value}:
+            attempt.runpod_result_json = result
     if attempt.status is not JobStatus.COMPLETED:
         transition_variation_attempt(session, attempt.id, JobStatus.COMPLETED, now=timestamp)
     attempt = session.get(VariationAttempt, attempt.id)
     assert attempt is not None
     if attempt.variation_index >= job.variation_count:
         job.current_runpod_job_id = None
+        job.current_provider_job_id = None
         job.current_submission_nonce = None
         transition_job(session, job.id, JobStatus.COMPLETED, now=timestamp)
         return job, attempt, True
@@ -1000,6 +1088,7 @@ def complete_variation_attempt(
         transition_job(session, job.id, JobStatus.GENERATING, now=timestamp)
     job.current_variation = next_index
     job.current_runpod_job_id = None
+    job.current_provider_job_id = None
     job.current_submission_nonce = None
     job.updated_at = timestamp
     session.flush()
@@ -1084,6 +1173,8 @@ def prepare_runpod_submission(
         raise ValueError("submission nonce must not be empty")
     timestamp = _utc_timestamp(now)
     job.current_submission_nonce = nonce
+    job.inference_provider = ProviderName.RUNPOD.value
+    job.current_provider_job_id = None
     job.current_runpod_job_id = None
     job.status = JobStatus.CLOUD_QUEUED
     job.updated_at = timestamp
@@ -1111,6 +1202,8 @@ def persist_runpod_job_id(
     if job.current_runpod_job_id and job.current_runpod_job_id != runpod_job_id:
         raise ValueError("job already has a different Runpod job ID")
     job.current_runpod_job_id = runpod_job_id
+    job.inference_provider = ProviderName.RUNPOD.value
+    job.current_provider_job_id = runpod_job_id
     job.updated_at = _utc_timestamp(now)
     session.flush()
     return job
@@ -1125,7 +1218,7 @@ def recover_uncertain_submissions(session: Session, *, now: datetime | None = No
             select(Job).where(
                 and_(
                     Job.current_submission_nonce.is_not(None),
-                    Job.current_runpod_job_id.is_(None),
+                    Job.current_provider_job_id.is_(None),
                     Job.status == JobStatus.CLOUD_QUEUED,
                 )
             )
@@ -1153,16 +1246,27 @@ def create_output(
     byte_size: int,
     sha256: str,
     runpod_job_id: str | None = None,
+    provider_ref: ProviderJobRef | None = None,
     seed_metadata_json: dict[str, Any] | None = None,
     generation_metadata_json: dict[str, Any] | None = None,
 ) -> Output:
     if variation_index < 1 or result_index < 0 or byte_size < 0:
         raise ValueError("output indexes and byte size are invalid")
+    if provider_ref is not None and runpod_job_id is not None:
+        raise ValueError("output provider reference is ambiguous")
+    if provider_ref is None and runpod_job_id is not None:
+        provider_ref = ProviderJobRef(ProviderName.RUNPOD, runpod_job_id)
     output = Output(
         job_id=str(job_id),
         variation_index=variation_index,
         result_index=result_index,
-        runpod_job_id=runpod_job_id,
+        runpod_job_id=(
+            provider_ref.external_id
+            if provider_ref and provider_ref.provider is ProviderName.RUNPOD
+            else None
+        ),
+        inference_provider=provider_ref.provider.value if provider_ref else None,
+        provider_job_id=provider_ref.external_id if provider_ref else None,
         relative_path=normalize_relative_path(relative_path),
         mime_type=mime_type,
         byte_size=byte_size,

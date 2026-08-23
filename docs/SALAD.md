@@ -1,7 +1,7 @@
 # SaladCloud deployment boundary
 
-SaladCloud is the prepared first alternate inference backend. The controller
-still uses Runpod until the provider-abstraction migration lands. This module
+SaladCloud is the first alternate inference backend. The controller provider
+registry submits metadata-only schema-v2 requests to Job Queues. This module
 owns only the Salad image, local queue-worker adapter, and infrastructure
 desired state; provider submission and durable job ownership stay in the
 controller.
@@ -84,3 +84,14 @@ After creation, require the exact image digest/config, `replicas=0`, an empty
 queue, no instances, and no pending change before controller deployment. A
 cold live job is the first authorized action that should scale the group to
 one; after completion, observe the queue empty and the group return to zero.
+
+## Controller contract
+
+Set `INFERENCE_PROVIDER=salad` plus `SALAD_API_KEY`, `SALAD_ORGANIZATION`, and
+`SALAD_PROJECT`. Keep valid Runpod credentials during the rollback window so
+old Runpod references remain reconcilable after the default changes.
+
+Pending jobs can be cancelled. Running jobs return `too_late`, and the
+controller keeps polling the same durable UUID. Salad 404 responses are never
+terminal by assumption. Status uncertainty retains the exact job, transfers,
+source, progress, and provider reference; provider submission is never retried.
