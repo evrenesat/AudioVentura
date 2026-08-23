@@ -580,6 +580,51 @@ def _openapi_field_type(schema: Any) -> str:
     return value if value in {"string", "integer", "number", "boolean"} else "string"
 
 
+def _openapi_field_contract(
+    name: str, schema: Any, required: set[str], components: Mapping[str, Any]
+) -> dict[str, Any]:
+    resolved = _resolve_openapi_ref(schema, components)
+    return {
+        "fal_name": name,
+        "type": _openapi_field_type(resolved),
+        "required": name in required,
+        "minimum": resolved.get("minimum") if isinstance(resolved, Mapping) else None,
+        "maximum": resolved.get("maximum") if isinstance(resolved, Mapping) else None,
+        "choices": list(resolved.get("enum", []))
+        if isinstance(resolved, Mapping) and isinstance(resolved.get("enum"), list)
+        else [],
+    }
+
+
+def _openapi_required_paths(
+    schema: Any,
+    components: Mapping[str, Any],
+    *,
+    prefix: str = "",
+    depth: int = 0,
+) -> set[str]:
+    """Return required object-property paths from a bounded response schema."""
+
+    if depth > 12:
+        return set()
+    resolved = _resolve_openapi_ref(schema, components)
+    if not isinstance(resolved, Mapping):
+        return set()
+    properties = _openapi_schema_properties(resolved, components)
+    required = resolved.get("required")
+    required_names = set(required) if isinstance(required, list) else set()
+    paths: set[str] = set()
+    for name in required_names:
+        if not isinstance(name, str):
+            continue
+        path = f"{prefix}.{name}" if prefix else name
+        paths.add(path)
+        child = properties.get(name)
+        if child is not None:
+            paths.update(_openapi_required_paths(child, components, prefix=path, depth=depth + 1))
+    return paths
+
+
 def normalize_openapi_schema(
     openapi: Mapping[str, Any],
     *,
@@ -621,56 +666,83 @@ def normalize_openapi_schema(
     request_required = set(request_required) if isinstance(request_required, list) else set()
     fields: dict[str, Any] = {}
     if descriptor is not None:
+        declared_names = {policy.fal_name for policy in descriptor.fields.values()}
         for name, policy in sorted(descriptor.fields.items()):
             actual = request_properties.get(policy.fal_name)
             if actual is None:
                 fields[name] = {"missing": True}
                 continue
-            actual = _resolve_openapi_ref(actual, components)
-            fields[name] = {
-                "fal_name": policy.fal_name,
-                "type": _openapi_field_type(actual),
-                "required": policy.fal_name in request_required,
-                "minimum": actual.get("minimum") if isinstance(actual, Mapping) else None,
-                "maximum": actual.get("maximum") if isinstance(actual, Mapping) else None,
-                "choices": list(actual.get("enum", []))
-                if isinstance(actual, Mapping) and isinstance(actual.get("enum"), list)
-                else [],
+            fields[name] = _openapi_field_contract(
+                policy.fal_name, actual, request_required, components
+            )
+        for fal_name, actual in sorted(request_properties.items()):
+            if fal_name not in declared_names:
+                fields[f"__unexpected__:{fal_name}"] = _openapi_field_contract(
+                    fal_name, actual, request_required, components
+                )
+        for fal_name in sorted(request_required - set(request_properties)):
+            fields[f"__unexpected_required__:{fal_name}"] = {
+                "fal_name": fal_name,
+                "required": True,
+                "missing": True,
             }
     else:
         for name, actual_value in sorted(request_properties.items()):
-            actual = _resolve_openapi_ref(actual_value, components)
-            fields[name] = {
-                "fal_name": name,
-                "type": _openapi_field_type(actual),
-                "required": name in request_required,
-                "minimum": actual.get("minimum") if isinstance(actual, Mapping) else None,
-                "maximum": actual.get("maximum") if isinstance(actual, Mapping) else None,
-                "choices": list(actual.get("enum", []))
-                if isinstance(actual, Mapping) and isinstance(actual.get("enum"), list)
-                else [],
-            }
+            fields[name] = _openapi_field_contract(name, actual_value, request_required, components)
     output = descriptor.output if descriptor is not None else None
     response_schema = _openapi_response_schema(openapi, components)
-    if (
-        output is not None
-        and _openapi_path_schema(response_schema, output.result_path, components) is None
-    ):
-        result_path = "__missing__"
-    else:
-        result_path = output.result_path if output is not None else "audio.url"
+    result_schema = (
+        _openapi_path_schema(response_schema, output.result_path, components)
+        if output is not None
+        else _openapi_path_schema(response_schema, "audio.url", components)
+    )
+    result_path = (
+        "__missing__"
+        if output is not None and result_schema is None
+        else output.result_path
+        if output is not None
+        else "audio.url"
+    )
+    normalized_output = {
+        "result_path": result_path,
+        "native_formats": list(output.native_formats) if output is not None else [],
+        "format_field": output.format_field if output is not None else None,
+        "seed_path": output.seed_path if output is not None else None,
+        "duration_path": output.duration_path if output is not None else None,
+    }
+    if output is not None and result_schema is not None:
+        result_type = _openapi_field_type(result_schema)
+        if result_type != "url":
+            normalized_output["result_type"] = result_type
+    if output is not None:
+        expected_paths = {
+            path for path in (output.result_path, output.seed_path, output.duration_path) if path
+        }
+        missing_paths = sorted(
+            path
+            for path in (output.seed_path, output.duration_path)
+            if path and _openapi_path_schema(response_schema, path, components) is None
+        )
+        if missing_paths:
+            normalized_output["__missing_paths__"] = missing_paths
+        unexpected_required = sorted(
+            path
+            for path in _openapi_required_paths(response_schema, components)
+            if not any(
+                expected == path
+                or expected.startswith(f"{path}.")
+                or path.startswith(f"{expected}.")
+                for expected in expected_paths
+            )
+        )
+        if unexpected_required:
+            normalized_output["__unexpected_required__"] = unexpected_required
     return {
         "endpoint_id": resolved_endpoint,
         "operation": resolved_operation,
         "media_kind": resolved_media,
         "fields": fields,
-        "output": {
-            "result_path": result_path,
-            "native_formats": list(output.native_formats) if output is not None else [],
-            "format_field": output.format_field if output is not None else None,
-            "seed_path": output.seed_path if output is not None else None,
-            "duration_path": output.duration_path if output is not None else None,
-        },
+        "output": normalized_output,
     }
 
 

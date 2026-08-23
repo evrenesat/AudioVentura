@@ -241,6 +241,7 @@ def create_app(
     app.state.runpod_client = resolved_runpod
     app.state.provider_registry = provider_registry
     app.state.fal_pricing = resolved_pricing
+    app.state.fal_health_cache = {}
     app.state.home_ingest_client = resolved_home
     app.state.worker = resolved_worker
     app.state.cleanup_task = None

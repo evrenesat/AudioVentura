@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import timedelta
 
+import httpx
 import pytest
 
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
@@ -24,12 +26,16 @@ from ace_service.providers.base import (
     ProviderStatus,
     RequestFeature,
 )
+from ace_service.providers.fal import FalProvider, FalQueueTransport
+from ace_service.providers.fal_catalog import load_catalog
 from ace_service.providers.registry import ProviderRegistry
 from ace_service.repository import (
+    create_cover_job,
     create_job,
     create_original_job,
     create_output,
     create_variation_attempt,
+    finalize_cover_job_duration,
     get_job,
     get_variation_attempt,
     persist_variation_provider_job_ref,
@@ -42,7 +48,7 @@ from ace_service.repository import (
     transition_variation_attempt,
 )
 from ace_service.runpod_client import RunpodError, RunpodHealth, RunpodState, RunpodStatusResult
-from ace_service.schemas import OriginalSongRequest
+from ace_service.schemas import CoverRequest, OriginalSongRequest
 from ace_service.worker import ControllerWorker
 
 
@@ -125,6 +131,79 @@ class _ExpiredFal:
     async def cancel(self, ref):
         self.cancel_calls += 1
         return CancelOutcome.TOO_LATE
+
+
+def test_fal_worker_submits_text_and_audio_edit_requests_with_string_fields(settings) -> None:
+    engine, factory = _database(settings)
+    calls: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            calls.append(json.loads(request.content))
+            return httpx.Response(202, json={"request_id": f"fal-{len(calls)}"})
+        raise AssertionError(f"unexpected Fal request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    transport = FalQueueTransport("test-fal-key", http_client=client)
+    catalog = load_catalog()
+    text_descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+    edit_descriptor = catalog.by_backend_id("fal/fal-ai/ace-step/audio-to-audio")
+    registry = ProviderRegistry(
+        [
+            FalProvider(text_descriptor, transport),
+            FalProvider(edit_descriptor, transport),
+        ]
+    )
+    worker = ControllerWorker(settings, factory, registry, poll_interval_seconds=0)
+    try:
+        with factory() as session:
+            text_job = create_original_job(
+                session,
+                OriginalSongRequest(
+                    description="cassette piano",
+                    duration_mode="custom",
+                    duration_seconds=30,
+                ),
+                inference_provider=ProviderName.FAL,
+                inference_backend=text_descriptor.backend_id,
+                backend_snapshot_json=text_descriptor.snapshot(),
+            )
+            edit_job = create_cover_job(
+                session,
+                CoverRequest(
+                    youtube_url="https://youtu.be/dQw4w9WgXcQ",
+                    target_style="bright synthwave",
+                    source_style="original acoustic ballad",
+                    rights_confirmation=True,
+                    output_format="wav",
+                ),
+                inference_provider=ProviderName.FAL,
+                inference_backend=edit_descriptor.backend_id,
+                backend_snapshot_json=edit_descriptor.snapshot(),
+            )
+            finalize_cover_job_duration(session, edit_job.id, 30)
+            edit_job.source_sha256 = "a" * 64
+            edit_job.source_byte_size = 128
+            session.commit()
+            text_job_id = text_job.id
+            edit_job_id = edit_job.id
+
+        _run(worker._submit_variation(text_job_id, 1))
+        _run(worker._submit_variation(edit_job_id, 1))
+
+        assert calls[0]["prompt"] == "cassette piano"
+        assert calls[0]["duration"] == 30
+        assert calls[1]["tags"] == "bright synthwave"
+        assert calls[1]["original_tags"] == "original acoustic ballad"
+        assert isinstance(calls[1]["audio_url"], str)
+        with factory() as session:
+            text_attempt = get_variation_attempt(session, text_job_id, 1)
+            edit_attempt = get_variation_attempt(session, edit_job_id, 1)
+            assert text_attempt is not None and text_attempt.provider_job_id == "fal-1"
+            assert edit_attempt is not None and edit_attempt.provider_job_id == "fal-2"
+    finally:
+        _run(client.aclose())
+        engine.dispose()
 
 
 class _FakeRunpod:

@@ -12,6 +12,7 @@ from ace_service.providers.base import (
     GenerationRequest,
     InferenceMode,
     InferenceRequest,
+    ProviderHealth,
     ProviderName,
     ProviderPhase,
 )
@@ -19,7 +20,7 @@ from ace_service.providers.fal import FalProvider, FalQueueTransport, build_fal_
 from ace_service.providers.fal_catalog import load_catalog
 from ace_service.providers.registry import BackendRegistry
 from ace_service.schemas import CoverRequest
-from ace_service.web import _select_backend
+from ace_service.web import _backend_choices, _readiness, _refresh_fal_health, _select_backend
 
 
 def _request(
@@ -169,3 +170,63 @@ def test_edit_backend_invariants_are_server_side() -> None:
             )
     finally:
         asyncio.run(client.aclose())
+
+
+def test_inactive_fal_endpoint_is_cached_out_of_choices_and_readiness() -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"models": []})
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = FalProvider(
+            descriptor,
+            FalQueueTransport("test-key", http_client=client),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+        app.state.provider_registry = BackendRegistry([provider])
+        app.state.fal_health_cache = {}
+        app.state.settings = SimpleNamespace(transfer_public_base_url="https://controller.test")
+        app.state.runpod_client = None
+        app.state.home_ingest_client = SimpleNamespace()
+
+        await _refresh_fal_health(app)
+        assert _backend_choices(app, BackendOperation.TEXT_TO_MUSIC) == []
+        readiness = await _readiness(app, only={"inference_provider"})
+        assert readiness["components"]["inference_provider"] == {
+            "ok": False,
+            "message": "Fal endpoint is not active",
+        }
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_readiness_preserves_negative_provider_health() -> None:
+    class InactiveProvider:
+        capabilities = SimpleNamespace(
+            name=ProviderName.SALAD,
+            backend_id="salad/test",
+            operation=BackendOperation.TEXT_TO_MUSIC,
+        )
+
+        async def health(self) -> ProviderHealth:
+            return ProviderHealth(False, "provider is warming up")
+
+    async def scenario() -> None:
+        app = SimpleNamespace(state=SimpleNamespace())
+        app.state.provider_registry = BackendRegistry([InactiveProvider()])
+        app.state.fal_health_cache = {}
+        app.state.settings = SimpleNamespace(transfer_public_base_url="https://controller.test")
+        app.state.runpod_client = None
+        app.state.home_ingest_client = SimpleNamespace()
+        readiness = await _readiness(app, only={"inference_provider"})
+        assert readiness["components"]["inference_provider"] == {
+            "ok": False,
+            "message": "provider is warming up",
+        }
+
+    asyncio.run(scenario())

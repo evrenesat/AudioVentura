@@ -1248,9 +1248,13 @@ class ControllerWorker:
             if before <= 0 and after <= 0:
                 raise ValueError("outpaint must extend before or after the source")
         for name, policy in provider.descriptor.fields.items():
+            if policy.type not in {"number", "integer"}:
+                continue
             value = number(name)
             if value is None:
                 continue
+            if policy.type == "integer" and not value.is_integer():
+                raise ValueError(f"{policy.ui_name} must be an integer")
             if policy.minimum is not None and value < policy.minimum:
                 raise ValueError(f"{policy.ui_name} is below its minimum")
             if policy.maximum is not None and value > policy.maximum:
@@ -1350,6 +1354,8 @@ class ControllerWorker:
             else None
         )
         generation = generation if isinstance(generation, Mapping) else {}
+        if isinstance(generation.get("fields"), Mapping):
+            generation = {**generation, **generation["fields"]}
         mode = (
             InferenceMode.AUDIO_TO_AUDIO
             if job.job_type is JobType.COVER

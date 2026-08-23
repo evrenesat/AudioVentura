@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
+import pytest
 
 from ace_service.providers.base import BackendOperation
 from ace_service.providers.fal_catalog import audit_catalog, load_catalog
@@ -129,3 +131,39 @@ def test_audit_normalizes_live_openapi_shape_before_fingerprinting() -> None:
     assert result["schema_changed"] == []
     assert result["unclassified"] == []
     assert result["removed"]
+
+
+@pytest.mark.parametrize("drift", ["input", "output"])
+def test_audit_detects_new_required_live_contract_fields(drift: str) -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+    live = _openapi_fixture(descriptor)
+    paths = live["paths"]
+    assert isinstance(paths, dict)
+    operation = paths["/"]["post"]
+    assert isinstance(operation, dict)
+    if drift == "input":
+        request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+        assert isinstance(request_schema, dict)
+        properties = request_schema["properties"]
+        assert isinstance(properties, dict)
+        properties["new_required"] = {"type": "string"}
+        request_schema["required"] = [*request_schema.get("required", []), "new_required"]
+    else:
+        response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        assert isinstance(response_schema, dict)
+        properties = response_schema["properties"]
+        assert isinstance(properties, dict)
+        properties["new_required"] = {"type": "string"}
+        response_schema["required"] = ["new_required"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": descriptor.endpoint_id, "openapi": deepcopy(live)}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client)
+    assert result["schema_changed"] == [descriptor.endpoint_id]

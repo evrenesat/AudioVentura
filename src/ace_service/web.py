@@ -8,6 +8,7 @@ import inspect
 import math
 import os
 import tempfile
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -53,7 +54,8 @@ from ace_service.models import (
     SubmissionQuote,
     VariationAttempt,
 )
-from ace_service.providers.base import BackendId, BackendOperation, ProviderName
+from ace_service.providers.base import BackendId, BackendOperation, ProviderHealth, ProviderName
+from ace_service.providers.fal import FalProvider
 from ace_service.repository import (
     PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH,
     cancel_cover_staging,
@@ -82,6 +84,7 @@ _TEMPLATES = Path(__file__).with_name("templates")
 _STATIC = Path(__file__).with_name("static")
 _MIME_TYPES = {"audio/mpeg", "audio/flac", "audio/wav"}
 _READINESS_PROBE_TIMEOUT_SECONDS = 5.0
+_FAL_HEALTH_CACHE_TTL_SECONDS = 30.0
 _FORMAT_MIME = {
     OutputFormat.MP3: "audio/mpeg",
     OutputFormat.FLAC: "audio/flac",
@@ -316,7 +319,19 @@ def _backend_choices(
     operations = (operation,) if isinstance(operation, BackendOperation) else operation
     seen: set[str] = set()
     providers = [
-        provider for item in operations for provider in app.state.provider_registry.selectable(item)
+        provider
+        for item in operations
+        for provider in app.state.provider_registry.selectable(item)
+        if not isinstance(provider, FalProvider)
+        or (
+            (
+                health_entry := getattr(app.state, "fal_health_cache", {}).get(
+                    str(provider.capabilities.backend_id)
+                )
+            )
+            is None
+            or health_entry[1].ok
+        )
     ]
     for provider in providers:
         capabilities = provider.capabilities
@@ -385,6 +400,44 @@ def _backend_choices(
             }
         )
     return sorted(choices, key=lambda item: (item["provider"], item["label"], item["backend_id"]))
+
+
+async def _refresh_fal_health(app: FastAPI, *, force: bool = False) -> None:
+    """Refresh endpoint-scoped Fal health into the selection cache."""
+
+    cache = getattr(app.state, "fal_health_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        app.state.fal_health_cache = cache
+    now = time.monotonic()
+    providers = {
+        str(provider.capabilities.backend_id): provider
+        for provider in app.state.provider_registry.providers
+        if isinstance(provider, FalProvider)
+    }
+
+    async def refresh(backend_id: str, provider: FalProvider) -> None:
+        cached = cache.get(backend_id)
+        if (
+            not force
+            and isinstance(cached, tuple)
+            and len(cached) == 2
+            and now - float(cached[0]) < _FAL_HEALTH_CACHE_TTL_SECONDS
+        ):
+            return
+        try:
+            health = await asyncio.wait_for(
+                provider.health(), timeout=_READINESS_PROBE_TIMEOUT_SECONDS
+            )
+            if not isinstance(health, ProviderHealth):
+                health = ProviderHealth(True, "ready")
+        except Exception:
+            health = ProviderHealth(False, "unreachable")
+        cache[backend_id] = (time.monotonic(), health)
+
+    await asyncio.gather(
+        *(refresh(backend_id, provider) for backend_id, provider in providers.items())
+    )
 
 
 def _backend_form_context(
@@ -585,6 +638,7 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
+        await _refresh_fal_health(app)
         estimate = None
         form = {"backend": request.query_params.get("backend", "")}
         with app.state.session_factory() as session:
@@ -610,6 +664,7 @@ def register_web_routes(app: FastAPI) -> None:
         # _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
+        await _refresh_fal_health(app)
         form = dict(fields)
         with app.state.session_factory() as session:
             continuation_source = _continuation_source(
@@ -682,6 +737,7 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.get("/cover", dependencies=[Depends(authenticated)], name="cover_form")
     async def cover_form(request: Request) -> Response:
+        await _refresh_fal_health(app)
         readiness = await _readiness(app, only={"home_ingest"})
         estimate = None
         form = {"backend": request.query_params.get("backend", "")}
@@ -725,6 +781,7 @@ def register_web_routes(app: FastAPI) -> None:
         # _assert_public_enqueue_allowed(app)
         fields = await parse_form(request)
         require_csrf(request, fields)
+        await _refresh_fal_health(app)
         form = dict(fields)
         with app.state.session_factory() as session:
             continuation_source = _continuation_source(
@@ -970,6 +1027,7 @@ def register_web_routes(app: FastAPI) -> None:
         name="continue_job",
     )
     async def continue_job(request: Request, job_id: str) -> Response:
+        await _refresh_fal_health(app)
         with app.state.session_factory() as session:
             job = get_job(session, job_id)
             if job is None:
@@ -1693,6 +1751,15 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
     async def probe(name: str, client: Any, method_name: str) -> None:
         if only is not None and name not in only:
             return
+        if isinstance(client, FalProvider):
+            cached = getattr(app.state, "fal_health_cache", {}).get(
+                str(client.capabilities.backend_id)
+            )
+            if isinstance(cached, tuple) and len(cached) == 2:
+                health = cached[1]
+                if isinstance(health, ProviderHealth):
+                    components[name] = {"ok": health.ok, "message": health.message}
+                    return
         method = getattr(client, method_name, None)
         if method is None:
             components[name] = {"ok": False, "message": "health probe unavailable"}
@@ -1700,11 +1767,15 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
         try:
             result = method()
             if inspect.isawaitable(result):
-                await asyncio.wait_for(result, timeout=_READINESS_PROBE_TIMEOUT_SECONDS)
-            components[name] = {"ok": True, "message": "ready"}
+                result = await asyncio.wait_for(result, timeout=_READINESS_PROBE_TIMEOUT_SECONDS)
+            if isinstance(result, ProviderHealth):
+                components[name] = {"ok": result.ok, "message": result.message}
+            else:
+                components[name] = {"ok": True, "message": "ready"}
         except Exception:
             components[name] = {"ok": False, "message": "unreachable"}
 
+    await _refresh_fal_health(app)
     active_provider = app.state.provider_registry.get(app.state.provider_registry.default)
     await asyncio.gather(
         probe("inference_provider", active_provider, "health"),

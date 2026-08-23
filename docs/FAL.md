@@ -22,6 +22,11 @@ every added, removed, inactive, unclassified, or schema-drifted result by
 reviewing the endpoint contract and updating the catalog and fixture in one
 change. The audit never edits or enables a backend.
 
+The audit canonicalizes the live OpenAPI request and response shapes. Extra
+live input properties, newly required fields, missing result metadata paths,
+and incompatible result types are schema drift and must be reviewed before
+deployment.
+
 Set `FAL_KEY`, then add exact reviewed IDs to
 `INFERENCE_ENABLED_BACKENDS`. Use `FAL_ALLOWED_MEDIA_KINDS=music` by default;
 hybrid music/SFX entries remain omitted until an operator intentionally allows
@@ -33,6 +38,11 @@ Disabling an ID removes it from new-job selectors only. The controller unions
 the enabled list with backend IDs owned by nonterminal jobs, keeps those
 adapters available for exact-request recovery, and requires `FAL_KEY` while
 any retained Fal request is nonterminal.
+
+Fal endpoint activity is cached per backend for a short interval. An endpoint
+reported inactive or unreachable is omitted from new-job selectors and is
+reported as unhealthy by readiness; existing jobs still retain their exact
+backend for recovery.
 
 ## Request and result boundary
 
