@@ -1,117 +1,172 @@
-# SaladCloud deployment boundary
+# SaladCloud
 
-SaladCloud is the first alternate inference backend. The controller provider
-registry submits metadata-only schema-v2 requests to Job Queues. This module
-owns only the Salad image, local queue-worker adapter, and infrastructure
-desired state; provider submission and durable job ownership stay in the
-controller.
+SaladCloud is the first alternate inference backend. The controller submits
+schema-2 metadata to a Salad Job Queue. A scale-to-zero container group runs
+the same ACE-Step handler used by Runpod.
+
+## Current deployment status
+
+The image, queue, and container group are deployed. A corrected cold
+acceptance job remained pending for 54 minutes without an instance or dispatch
+event, including attempts at batch, low, and medium priority. After the job was
+cancelled, desired replicas also had to be reset explicitly to zero.
+
+The queue is empty and the group has no instances. Further paid acceptance is
+blocked on Salad capacity or control-plane recovery. This no-instance result
+does not indicate a worker-image or ACE-Step failure.
+
+## Runtime shape
+
+```text
+Controller
+    | Salad Job Queue API
+    v
+Salad queue
+    | queue autoscaler: 0 -> 1
+    v
+GPU container
+    | Salad HTTP Job Queue Worker
+    v
+local worker_api.py -> shared ACE-Step handler
+```
+
+`deploy/salad/worker_api.py` accepts the queue worker's direct JSON body and
+wraps it for the shared handler. `/ready` remains unavailable until CUDA and
+all models are initialized. The queue worker starts only after readiness
+passes.
+
+Audio still uses controller-issued HTTPS capabilities. The Salad queue request
+and response contain metadata only.
 
 ## Immutable image receipt
 
-- Base worker: `ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846`
-- Model repo: `evrenesat/audioventura-ace-step-v0.1.8`
-- Model commit: `88b8c7fa089446b53382c1040037492463430bed`
-- Model tag: `av-v0.1.8-bundle-2`
-- Model manifest SHA-256: `39a8180ef6852e2dfccb9088efa7231ca7de7e4c05c8d65e3ac5a3e7a5bfd0fc`
-- Checkpoint inventory: 29 files, 25,253,680,505 bytes
-- Salad HTTP Job Queue Worker: `v0.7.0`, archive SHA-256
-  `074a329cf6462e77fc7b72100f59d8a690831456d9420186a834a8f30634c9e4`
-- Private GHCR tag: `ghcr.io/evrenesat/audioventura-ace-step-salad-worker:infra-b46ab36-20260823`
-- Deployable amd64 digest: `sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53`
-- Image config: `sha256:aec1c56ea33dd071a888508dbe5dc2b5ce7d5ae254199c083a96ee38527faa1c`
-- Compressed amd64 layers: 20 layers, 28,979,331,889 bytes
-- Salad 35 GB margin: 6,020,668,111 bytes
+```text
+Base worker digest:
+  sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846
 
-The image keeps model transfer in an immutable layer so Salad performs it
-before billed container execution. `deploy/salad/worker_api.py` converts the
-Job Queue Worker's direct JSON request body into the existing schema-v2
-`{"input": ...}` handler event. `/ready` stays unavailable until CUDA and all
-ACE-Step models initialize; the queue worker starts only after that endpoint
-passes. Large audio still uses the controller's signed HTTPS capabilities and
-the Salad job response contains metadata only.
-`ACE_WORKER_IMAGE_DIGEST` carries the bare immutable manifest digest (without
-the registry/repository prefix), matching the controller's runtime identity
-and calibration contract.
+Model repository:
+  evrenesat/audioventura-ace-step-v0.1.8
+Model revision:
+  88b8c7fa089446b53382c1040037492463430bed
+Model bundle tag:
+  av-v0.1.8-bundle-2
+Model manifest SHA-256:
+  39a8180ef6852e2dfccb9088efa7231ca7de7e4c05c8d65e3ac5a3e7a5bfd0fc
+Model inventory:
+  29 files, 25,253,680,505 bytes
 
-## Build and size verification
+Salad queue worker:
+  v0.7.0
+Deployable amd64 image digest:
+  sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53
+Compressed image size:
+  28,979,331,889 bytes
+```
 
-Use BuildKit and push directly; do not use `--load` for this image because a
-classic Docker import duplicates tens of gigabytes locally.
+The model bundle is a stable image layer. Salad downloads container layers
+before the runtime starts, avoiding a separate model download after startup.
+The image remains below Salad's 35 GB compressed-image limit.
+
+## Build
+
+Use BuildKit and push directly. Do not use `--load`; importing this image into
+the classic Docker store duplicates tens of gigabytes locally.
 
 ```text
-docker buildx build --platform linux/amd64 --provenance=false --push \
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --push \
   -f deploy/salad/Dockerfile \
   -t ghcr.io/evrenesat/audioventura-ace-step-salad-worker:<immutable-tag> .
 ```
 
-Resolve the pushed manifest and sum `.layers[].size`. Require a conservative
-decimal total no greater than 35,000,000,000 bytes before provisioning.
+Resolve the amd64 manifest digest and sum its layer sizes. Do not provision an
+image larger than 35,000,000,000 compressed bytes.
 
-## Desired remote state
+## Desired infrastructure
 
-`deploy/salad/deployment.json` defines queue `audioventura-jobs` and container
-group `audioventura-ace-step-v2` with medium priority, 8 vCPU, 32 GiB RAM,
-compatible 24+ GiB GPU classes, startup/readiness/liveness probes, and:
+`deploy/salad/deployment.json` is the tracked input for:
 
-```text
-replicas=0
-min_replicas=0
-max_replicas=1
-desired_queue_length=1
-polling_period=15
-```
+- queue `audioventura-jobs`;
+- container group `audioventura-ace-step-v2`;
+- 8 vCPU, 32 GiB RAM, and 8 GiB shared memory;
+- compatible 24+ GiB GPU classes;
+- startup, readiness, and liveness probes;
+- medium priority;
+- zero minimum and one maximum replica;
+- desired queue length 1 and 15-second autoscaler polling.
 
-The Salad API key is read only from `SALAD_API_KEY`. Private GHCR credentials
-are read only from `GHCR_USERNAME` and `GHCR_TOKEN` during creation; never put
-them in Git, command output, or the image. Organization and project slugs are
-explicit because Salad's public API cannot enumerate them from an API key.
+Infrastructure management stays outside the provider interface.
+`deploy/salad/saladctl.py` can inspect or apply this desired state. `apply` is
+idempotent for a matching deployment, stops on drift, and does not create queue
+jobs or delete resources automatically.
 
-Inspect before applying:
+Inspect first:
 
 ```text
 SALAD_API_KEY="$(< /root/salad_api_key)" \
 uv run python deploy/salad/saladctl.py inspect \
-  --organization <organization> --project <project>
+  --organization <organization> \
+  --project <project>
 ```
 
-Apply only the reviewed amd64 digest. The command creates no queue jobs:
+Apply only a reviewed immutable digest:
 
 ```text
 SALAD_API_KEY="$(< /root/salad_api_key)" \
-GHCR_USERNAME=<username> GHCR_TOKEN=<read-package-token> \
+GHCR_USERNAME=<username> \
+GHCR_TOKEN=<read-package-token> \
 uv run python deploy/salad/saladctl.py apply \
-  --organization <organization> --project <project> \
-  --image-ref ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:16d09990275aa9e261d427be48817c035ceddc0ea75a18498d62a74abdacbf53
+  --organization <organization> \
+  --project <project> \
+  --image-ref ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:<digest>
 ```
 
-`apply` is idempotent when the existing queue and container group match the
-tracked desired state. It stops on drift and never replaces or deletes a
-resource automatically; the write-only GHCR registry password is the sole
-field that cannot be read back for comparison.
+The API key and private-registry credentials are environment-only values. Do
+not place them in Git, shell output, image layers, or incident records.
 
-After creation, require the exact image digest/config, `replicas=0`, an empty
-queue, no instances, and no pending change before controller deployment. A
-cold live job is the first authorized action that should scale the group to
-one; after completion, observe the queue empty and the group return to zero.
+## Controller configuration
 
-## Controller contract
+Set:
 
-Set `INFERENCE_PROVIDER=salad` plus `SALAD_API_KEY`, `SALAD_ORGANIZATION`, and
-`SALAD_PROJECT`. Keep valid Runpod credentials during the rollback window so
-old Runpod references remain reconcilable after the default changes.
+```text
+INFERENCE_PROVIDER=salad
+SALAD_API_KEY=<secret>
+SALAD_ORGANIZATION=<organization>
+SALAD_PROJECT=<project>
+SALAD_QUEUE_NAME=audioventura-jobs
+SALAD_CONTAINER_GROUP_NAME=audioventura-ace-step-v2
+```
 
-Pending jobs can be cancelled. Running jobs return `too_late`, and the
-controller keeps polling the same durable UUID. Salad 404 responses are never
-terminal by assumption. Status uncertainty retains the exact job, transfers,
-source, progress, and provider reference; provider submission is never retried.
+Keep working Runpod credentials during the rollback window so persisted Runpod
+jobs remain reconcilable.
 
-## Current live blocker (2026-08-23)
+Pending Salad jobs can be cancelled. Running jobs report `too_late`. Salad
+404s are not terminal by assumption. The controller retains and polls the same
+durable queue UUID until terminal evidence or its deadline policy resolves the
+attempt.
 
-The corrected image and controller are deployed, but a clean acceptance queue
-job remained pending for 54 minutes 23 seconds without any instance record or
-dispatch event. The same UUID was observed at batch for 30 minutes, then low
-and medium for more than ten minutes each. After pending cancellation, Salad
-also left desired replicas at one until an explicit `replicas=0` patch. The
-queue is now empty and the group has no instances. Treat further paid
-acceptance as blocked on Salad capacity/control-plane recovery; do not infer an
-AudioVentura worker failure from this no-instance observation.
+While a job is pending, the provider may inspect the single container-group
+instance. Allocation, image download, and startup are shown as deployment-level
+inferred status. Image pull progress is displayed when Salad supplies a valid
+fraction.
+
+## Verification
+
+Run the focused local checks:
+
+```text
+uv run pytest -q tests/test_salad_worker.py tests/test_salad_infra.py \
+  tests/test_salad_provider.py
+uv run ruff check deploy/salad tests/test_salad_worker.py \
+  tests/test_salad_infra.py tests/test_salad_provider.py
+uv run ruff format --check deploy/salad tests/test_salad_worker.py \
+  tests/test_salad_infra.py tests/test_salad_provider.py
+uv run mypy --follow-imports=skip deploy/salad
+shellcheck deploy/salad/entrypoint.sh
+```
+
+When capacity is available, run one cold job and record queue delay, allocation,
+image download, startup, readiness, inference, upload, completion, and return to
+zero replicas. Confirm the output digest and immutable runtime identities.

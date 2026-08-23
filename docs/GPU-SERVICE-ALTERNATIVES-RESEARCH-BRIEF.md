@@ -1,5 +1,8 @@
 # Research brief: scale-to-zero GPU alternatives to Runpod
 
+This is the historical research assignment that led to the SaladCloud work.
+Current provider state is documented in `ARCHITECTURE.md` and `docs/SALAD.md`.
+
 ## Assignment
 
 Research current GPU-as-a-service platforms that could replace Runpod for

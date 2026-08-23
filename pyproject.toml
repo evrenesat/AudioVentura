@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ace-service"
 version = "0.1.0"
-description = "Private ACE-Step music-generation controller foundation"
+description = "Private ACE-Step music-generation controller"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

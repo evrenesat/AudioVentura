@@ -1,9 +1,10 @@
 # Runpod worker module
 
-This directory owns the isolated ACE-Step v0.1.8 Runpod Serverless worker.
-Keep it metadata-only at the Runpod API boundary: source and generated audio
-must move through short-lived HTTPS capability URLs, and the result body must
-contain only bounded metadata.
+This directory owns the isolated ACE-Step v0.1.8 runtime and its Runpod
+Serverless entry point. Salad reuses the handler through its local HTTP wrapper.
+Keep every provider API boundary metadata-only: source and generated audio move
+through short-lived HTTPS capability URLs, and result bodies contain only
+bounded metadata.
 
 Model objects are process-global and must be initialized before the Runpod SDK
 starts accepting jobs. Do not add YouTube, home-ingest, SFTP, SSH, Tailscale,

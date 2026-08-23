@@ -1,106 +1,120 @@
-# Security boundary
+# Security
 
-## Public surface
+This is the operator checklist for AudioVentura's trust boundaries.
 
-The transfer service binds to 127.0.0.1:8001. The public HTTPS proxy may
-forward only these paths:
+## Exposed services
 
-    /transfer/v1/source/*
-    /transfer/v1/output/*
+The controller UI binds to loopback port 8000. It requires HTTP Basic
+authentication and same-site CSRF tokens. Expose it only through the private
+tailnet.
 
-Every other path must return a proxy-level 404 or 403 without reaching the
-private controller or UI. The transfer FastAPI app disables its documentation
-and OpenAPI routes and mounts no controller routes.
+The transfer app binds to loopback port 8001. A public HTTPS proxy may forward
+only:
 
-The private controller UI is a separate loopback app on port 8000. It requires
-HTTP Basic credentials, uses constant-time credential comparison, and requires
-a same-site CSRF token on every unsafe form post. It is intended to be exposed
-through Tailscale Serve only; it is not a target for the public transfer proxy.
-Authenticated HTML, status, and media responses are marked `no-store` and
-include CSP, no-sniff, no-referrer, and frame-deny headers.
+```text
+/transfer/v1/source/*
+/transfer/v1/output/*
+```
 
-User media routes accept only database output IDs. They verify the stored
-relative path, reject traversal and symlink components, restrict MIME types to
-the supported audio formats, and check recorded size and SHA-256 before
-streaming a file.
+The proxy must reject every other path and disable access logging for these
+routes. The final path segment is a bearer credential.
 
-## Capabilities
+Home Ingest binds to loopback port 8100 by default. It requires a bearer token
+and should be reachable only over the private tailnet.
 
-Capabilities use random 256-bit URL-safe tokens. The plaintext token exists
-only in the newly returned capability URL; SQLite stores only its SHA-256
-hash. A capability is bound to one job, direction, deterministic relative
-path, expected extension, byte limit, and UTC expiry. Wrong-direction,
-expired, revoked, and malformed capabilities are rejected without revealing
-whether another capability exists.
+Do not publish any of these ports directly.
 
-Source downloads resolve below the configured incoming root and reject
-traversal, symlink components, non-regular files, unexpected extensions, and
-files over the recorded limit. Canonical source content is served as
-audio/mpeg; repeat GETs remain valid until expiry so Runpod retries do not
-need a new token.
+## Credentials
 
-Output uploads require the output capability and enforce Content-Length when
-provided. The body is streamed through a hard byte limit into a deterministic
-.part file. SHA-256 is computed while receiving; the file is flushed and
-fsynced before atomic rename, and failures remove the .part file. The output
-record and consumed capability are committed together. A byte-identical
-completed retry returns success only within the original capability TTL; after
-expiry, replays are rejected without replacing the accepted file or erasing
-the consumed capability history. A conflicting retry is rejected without
-replacing the accepted file.
+Keep long-lived credentials in deployment-managed environment files or a
+secret store, never in Git. This includes:
 
-## Runpod and persistence
+- controller username and password;
+- Home Ingest bearer token;
+- SFTP private key;
+- Runpod and Salad API keys;
+- private registry credentials;
+- any future provider credentials.
 
-Runpod receives metadata and short-lived capability URLs, never source audio,
-YouTube credentials, SSH/SFTP credentials, or the controller API key. The
-adapter uses explicit HTTP timeouts and does not include response bodies or
-credentials in raised API errors.
+The GPU worker does not need those credentials. It receives only bounded job
+metadata and short-lived transfer URLs.
 
-Before /run, the controller commits a fresh submission nonce and its pre-submit
-state. It persists the returned Runpod job ID immediately after a successful
-response. On recovery, a nonce without a cloud ID becomes a failed
-uncertain_cloud_submission attempt and is never automatically resubmitted; an
-existing cloud ID resumes polling. This prevents a crash window from creating
-a duplicate paid job.
+Before committing or sharing diagnostics, check `.env`, database files, logs,
+shell history, provider responses, and copied plan evidence. Do not print
+credentials in deployment commands when a protected environment variable or
+file descriptor is available.
 
-No live Runpod transfer acceptance test is claimed by this local checkpoint.
+## Transfer capabilities
 
-## Secrets, logs, and retention
+Capability tokens are random 256-bit URL-safe values. SQLite stores only their
+SHA-256 hashes. Each capability is restricted by:
 
-Controller and home deployment-only `.env` files contain the only long-lived
-service credentials; the restricted SFTP private key stays on the home host.
-The worker receives no controller, home, SFTP, SSH, Tailscale, or
-Runpod submission credentials. Capability URLs are short-lived per-job
-bearers; only their SHA-256 hashes are stored in SQLite. Terminal jobs revoke
-any still-issued capabilities, and cleanup expires and prunes old capability
-records. A non-retained cover source is removed after terminal completion or
-failure; generated outputs are retained until an explicit operator retention
-policy is introduced.
+- job;
+- source-download or output-upload direction;
+- deterministic relative path;
+- extension and MIME expectations;
+- maximum byte count;
+- UTC expiry.
 
-Controller and home logs use UTC rotating files with private permissions. The
-redaction filter removes configured credentials, bearer/authorization values,
-capability URLs, prompt/lyrics fields, and other token-shaped field values.
-Normal records contain only bounded operational metadata such as job ID,
-stage, component, stable error code, safe Runpod ID, elapsed time, byte count,
-and exception class. The Uvicorn access logger for the public transfer process
-is disabled, and the upstream public proxy must disable access logging for
-`/transfer/v1/*` or redact the final path segment before persistence. Neither
-layer may persist capability-bearing request paths or a shortened or hashed
-token prefix. Do not pass raw request payloads or exception strings containing
-credentials to the logger.
+Source downloads validate path containment, file type, extension, size, and
+symlink safety. Output uploads stream through a hard byte limit into a private
+partial file, compute SHA-256 while receiving, fsync, and atomically rename.
+Conflicting replays cannot replace an accepted output.
 
-Startup and periodic cleanup remove stale `.part` files and orphan home temp
-directories older than one day by default. Cleanup never follows a symlink
-outside the configured data root and never deletes completed outputs.
+Never place a capability URL in logs, tickets, chat, provider metadata, or a
+durable incident record.
 
-The trust boundaries are deliberate: browser traffic reaches the UI through
-the tailnet, the controller reaches only the authenticated private home API,
-the home host performs all YouTube/`yt-dlp`/`ffprobe`/`ffmpeg` work, and Runpod
-receives only bounded generation metadata plus per-job HTTPS capabilities.
-Runpod encodes generated MP3 output with in-process LAME and performs no
-source-media processing; Hetzner performs no media processing. The home SFTP
-identity is restricted to the incoming root and is not provided to Runpod.
-YouTube cookies/login, playlists, generic media URLs, and the deferred Mac
-inference path are first-release limitations. The configured data root is the
-containment boundary for incoming sources, generated outputs, temporary files,
-and logs; path and symlink checks fail closed at each media/transfer route.
+## Media and paths
+
+The configured data root is the containment boundary for the database,
+incoming sources, outputs, partial files, and logs. All media paths are stored
+as relative paths and resolved below their expected root. Traversal, symlink
+components, unsupported types, size mismatch, and SHA-256 mismatch fail
+closed.
+
+Authenticated playback accepts a database output ID, not an arbitrary path,
+and revalidates the file before streaming it.
+
+Home Ingest is the only component allowed to contact YouTube or run media
+tools. Its SFTP account must be key-only, have no shell, and be restricted to
+the incoming directory. GPU workers must not receive YouTube cookies or home
+credentials.
+
+## Provider submissions
+
+Before provider submission, the controller commits a unique nonce. A returned
+provider job ID is then stored immediately. If a crash leaves a nonce without
+a provider reference, the submission is uncertain and must not be retried
+automatically. This prevents duplicate paid jobs.
+
+Each persisted attempt remains owned by its original provider. A different
+provider is never used as an implicit fallback. Provider errors contain only a
+bounded safe classification; raw response bodies are not persisted or logged.
+
+The controller accepts completion only when provider metadata agrees with the
+uploaded output's job ID, nonce, variation, size, and SHA-256.
+
+## Logs and retention
+
+Controller and Home Ingest logs use UTC rotating files with private
+permissions. Redaction covers configured secrets, authorization values,
+capability URLs, prompts, lyrics, and token-shaped fields. Do not log raw
+requests or provider responses.
+
+Cleanup removes expired capabilities, stale partial files, old Home Ingest
+temporary directories, and non-retained terminal cover sources. It does not
+remove completed outputs. Backups therefore contain private user media and
+must receive the same access controls as the live data root.
+
+## Release check
+
+Before deployment or public source publication:
+
+1. scan the complete Git history, not only the current tree;
+2. confirm `.env`, databases, audio, fixtures, keys, and logs are untracked;
+3. verify proxy routing and access-log suppression;
+4. verify private-service binds and authentication;
+5. verify worker images contain no credentials;
+6. verify the configured image and model revisions are immutable;
+7. run the full tests and static checks;
+8. run one bounded live transfer/inference acceptance when deployment changed.

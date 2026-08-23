@@ -1,5 +1,7 @@
 # Runpod pinned-request recovery record — 2026-08-15 (Checkpoint 1)
 
+This is a closed historical incident record, not a current recovery procedure.
+
 Scope: Checkpoint 1 of the AudioVentura usability-recovery plan — inspect or
 recover only the already-paid pinned Runpod request. No new, replacement,
 retry, duplicate, synthetic, or cover request was authorized or submitted.

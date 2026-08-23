@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-23 (documentation consolidation)
+
+- Replaced the obsolete README handoff with a short operator and coding-agent
+  entry point based on the current provider-neutral implementation.
+- Made root `ARCHITECTURE.md` authoritative and reduced the older duplicate to
+  a stable link for historical references.
+- Rewrote the general operations, security, Runpod, and Salad runbooks in
+  direct language; historical evidence and active plans remain unchanged.
+- Corrected the example Salad container-group name to the deployed v2 name.
+
 ## 2026-08-23 (provider status visibility)
 
 - Extended the existing progress envelope with optional bounded provider

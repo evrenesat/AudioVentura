@@ -1,122 +1,110 @@
-# Runpod ACE-Step worker
+# Runpod
 
-Checkpoint #2 packages a queue-based Serverless Flex worker around the official
-ACE-Step v0.1.8 source baseline. The tag resolves to commit
-`dce621408bee8c31b4fcf4811682eb9359e1bc94` in `ace-step/ACE-Step-1.5`.
+Runpod is one implementation of AudioVentura's inference-provider contract.
+`runpod_worker/` contains the isolated ACE-Step runtime and Runpod Serverless
+entry point.
 
-## Image and model layout
+## Worker image
 
-Build from the repository root with an amd64 builder:
-
-```text
-docker build --platform linux/amd64 -f runpod_worker/Dockerfile -t <registry>/ace-step-worker:cp2 .
-docker push <registry>/ace-step-worker:cp2
-```
-
-The image contains the pinned ACE-Step code, CUDA runtime dependencies, the
-Runpod SDK, and the worker package at `/opt/runpod_worker`. The Docker command
-starts it with `python -m runpod_worker.handler`, so all worker imports use the
-package layout. The pinned checkout's vendored
-`acestep/third_parts/nano-vllm` package is installed alongside ACE-Step in the
-same pip dependency-resolution command; no unrelated or unpinned `nano-vllm`
-distribution is used. The image deliberately does not download model weights
-during a cold start. Configure `ACE_WORKER_CHECKPOINTS_DIR` to the
-endpoint cached-model path or a Runpod network volume containing these
-directories:
+Build the amd64 image from the repository root and push an immutable tag:
 
 ```text
-<checkpoints>/
-  acestep-v15-xl-turbo/
-  acestep-5Hz-lm-1.7B/
-  Qwen3-Embedding-0.6B/
-  vae/
+docker build --platform linux/amd64 \
+  -f runpod_worker/Dockerfile \
+  -t <registry>/audioventura-ace-step-worker:<immutable-tag> .
+
+docker push <registry>/audioventura-ace-step-worker:<immutable-tag>
 ```
 
-The worker checks for weight artifacts in every directory before importing the
-ACE-Step handlers. Missing or incomplete checkpoints fail initialization; the
-worker never falls back to CPU inference or repeated per-request downloads.
+Resolve the pushed digest and deploy by digest. Set `ACE_WORKER_IMAGE_DIGEST`
+inside the worker to that immutable digest. The controller's
+`RUNPOD_WORKER_RUNTIME_IDENTITY` must identify the same release.
+
+The image contains pinned ACE-Step v0.1.8 source and runtime dependencies. It
+does not contain model weights. The endpoint must mount the exact
+revision-pinned Hugging Face cache at:
+
+```text
+/runpod-volume/huggingface-cache/hub
+```
+
+Startup requires the configured model repository, 40-character revision,
+bundle tag, manifest SHA-256, and complete 25.25 GB file inventory. Missing or
+changed files fail initialization. Offline mode is enabled; the worker does
+not download models or fall back to another checkpoint path.
 
 ## Endpoint settings
 
-Use a queue endpoint with the first-release limits:
+The intended personal scale-to-zero shape is:
 
 ```text
 workersMin: 0
 workersMax: 1
 gpuCount: 1
-GPU: NVIDIA GeForce RTX 4090 24 GB
+GPU memory: at least 24 GB
 idleTimeout: 30 seconds
 executionTimeout: 1200 seconds
-FlashBoot: enabled
+FlashBoot: enabled when available
 ```
 
-Set `ACE_TRANSFER_ALLOWED_HOST` to the hostname of the public HTTPS transfer
-app. When it is set, both source and output capabilities must use that exact
-host. Set `ACE_WORKER_IMAGE_DIGEST` to the immutable deployed OCI digest (for
-example `ghcr.io/example/ace-worker@sha256:<64 lowercase hex digits>`); an
-empty value or mutable tag fails startup. The worker accepts no credentials
-for Runpod, SFTP, SSH, Tailscale, or YouTube.
+Set `ACE_TRANSFER_ALLOWED_HOST` to the exact public transfer hostname. The
+worker rejects signed source and output URLs for another host.
 
-## Request and result boundary
+Do not add controller, Home Ingest, YouTube, SFTP, SSH, Tailscale, or Runpod
+submission credentials to the worker environment.
 
-Runpod receives a small JSON object with a strict `schema_version` of `1` or
-`2`, UUID job/submission identifiers, one bounded generation description, an
-optional prepared-source capability, and one output-upload capability.
-Schema-v1 keeps the approved legacy `cover_strength` mapping and omitted
-original-duration behavior. New schema-v2 requests use independent
-`audio_cover_strength`/`cover_noise_strength`, an immutable resolved profile
-record, explicit prompt/duration modes, and no legacy alias. Unknown versions
-and fields are rejected. Capability URLs must be HTTPS and use
-`/transfer/v1/`.
+## Request contract
 
-For a cover job, the worker streams the prepared MP3 to a private temporary
-file, verifies its declared byte count and SHA-256, and passes that local file
-to ACE-Step. Original jobs do not fetch a source. Both paths construct ACE-Step
-parameters in the handler but use the process-global model objects initialized
-before `runpod.serverless.start()`.
+The provider API receives JSON metadata only. Current requests use worker
+schema 2; schema 1 remains accepted for old persisted jobs.
 
-Every request forces `GenerationConfig.batch_size=1`. The worker requires
-exactly one generated file, streams it to the signed output capability with
-`Content-Length`, `X-ACE-Output-Bytes`, and `X-ACE-Output-SHA256`, and removes
-all source/output temporary files in a temporary-directory scope. The Runpod
-result is explicitly versioned and bounded. It contains input/effective
-caption and lyrics, resolved parameters, the returned effective seed, bounded
-`extra_outputs.lm_metadata` from the pinned ACE-Step result, output
-duration/tolerance evidence, available quality scores, and non-secret
-ACE/model/image/GPU identity. Enhance and auto-compose use the returned LM
-caption and use returned bounded LM lyrics only when submitted lyrics are
-empty; supplied lyrics remain exact. Private paths, tensors, audio codes,
-status/debug output, and capability URLs are removed; it never contains audio
-bytes, base64 audio, or a permanent media URL.
+A request contains:
 
-For an explicit duration target, the worker probes the generated file before
-upload and accepts completion only within `max(2 seconds, 2% of target)`. The
-controller validates the same evidence before persisting it on the variation
-attempt and output JSON fields. Cover requests carry the probed source
-duration and a confirmed staging marker, so an unconfirmed cover cannot reach
-the worker.
+- UUID application job and submission identities;
+- variation index and bounded generation controls;
+- resolved prompt, model, duration, seed, and output settings;
+- an output-upload capability;
+- for covers, a source-download capability plus source bytes and SHA-256.
 
-Before a schema-v1 controller rollback, run the local read-only gate from the
-controller checkout:
+Unknown fields and schema versions are rejected. Each request forces
+`batch_size=1` and produces exactly one output.
 
-```text
-ACE_SERVICE_DATA_ROOT=/srv/ace-service/data uv run python -m ace_service.rollback_readiness
-```
+The result contains bounded metadata such as effective prompt/lyrics, resolved
+parameters, seed, duration evidence, model identity, image digest, GPU, and
+available Runpod timing. It never contains audio bytes, private paths,
+capability URLs, tensors, or debug payloads.
 
-It prints only bounded job IDs, status/schema classifications, and a
-safe/not-safe summary. Exit zero means no blocker was found; any nonzero or
-indeterminate result requires keeping the v2-capable controller and worker.
+## Audio handling
 
-The worker accepts `mp3`, `flac`, and `wav` output requests. WAV and FLAC use
-the corresponding ACE-Step save format. For MP3, ACE-Step saves a temporary
-48 kHz PCM WAV and the worker uses the pinned `lameenc==1.8.4` library to
-encode 192 kbps MP3 in-process before upload. The image contains no `ffmpeg`
-or `ffprobe` executable; source-media `yt-dlp`/`ffprobe`/`ffmpeg` work remains
-exclusive to home-ingest, and Hetzner performs no media processing.
+For a cover, the worker downloads the prepared MP3 to a private temporary
+directory and verifies its size and SHA-256 before inference. Original jobs do
+not download a source.
 
-## Local verification
+WAV and FLAC use ACE-Step's matching save format. MP3 is encoded at 192 kbps
+with pinned `lameenc` from a temporary PCM WAV. The worker image does not use
+`ffmpeg` or `ffprobe`.
 
-The mocked contract suite runs without CUDA or ACE-Step weights:
+The worker uploads with `Content-Length`, byte-count, and SHA-256 headers. All
+temporary source and output files are removed after success or failure.
+
+## Controller behavior
+
+`RunpodProvider` translates Runpod queue states into the shared lifecycle. It
+may use endpoint health to report that a worker is initializing. A worker
+progress phase can describe source download, generation, finalization, or
+output upload.
+
+Before `/run`, the controller commits a submission nonce. It stores the
+returned Runpod ID immediately. A nonce without an ID is uncertain and is not
+resubmitted. An existing ID always resumes polling.
+
+Pending cancellation is supported. Running cancellation is treated as too
+late. A not-found result becomes terminal only under the controller's bounded
+Runpod recovery rules; it is not permission to submit another job.
+
+## Verification
+
+The local worker contract suite does not require CUDA or model weights:
 
 ```text
 uv run pytest -q runpod_worker/tests
@@ -124,61 +112,14 @@ uv run ruff check runpod_worker
 uv run ruff format --check runpod_worker
 ```
 
-GPU acceptance remains a deployment check: cold start the worker, generate
-20-second and 180-second originals, generate one prepared-MP3 cover, record
-initialization/queue/execution/peak-VRAM metrics, and confirm the endpoint
-returns to zero workers after idle timeout. The campaign teardown gate parses
-the endpoint `/health` response under a strict bounded contract
-(`workers.idle`/`workers.running` and `jobs.inQueue`/`jobs.inProgress` as
-non-negative integers, matching the documented Runpod response) and treats
-idle plus running workers as the active population; a window closes only when
-the provider reports zero active workers and zero queued/in-progress jobs.
-Missing, boolean, negative, oversized, unknown structures, and the obsolete
-invented `jobs.queued`/`jobs.running` shape are rejected so zero-at-rest is
-never inferred from a malformed or empty provider body. Operator `--status`,
-`--backup`, `--reconcile`, and `--verified-teardown` recovery actions run from
-frozen campaign/sample/submission-intent state in the campaign database and
-do not require the external fixture manifest to be present or readable. The
-teardown reservation invariant is unchanged in spirit: terminal
-unknown-cost attempts are `conservatively_retained` (full original
-reservation still counted in budget totals, never an invented estimate) and
-verified teardown may close them only after this documented zero response is
-proven for the authorized endpoint; in-flight/uncertain attempts stay
-`unresolved` with their full reservation and keep teardown and rollback
-blocked even with provider-zero evidence. Terminal identity and evidence are
-immutable: failed, cancelled, unsubmitted, and completed attempts reject
-conflicting later status/output/GPU/execution/reason/estimate records; only
-uncertain-to-compatible-terminal and completed-unavailable-to-completed-
-with-authoritative-cost advances are allowed (the completed fill requires
-any supplied output path, GPU, execution, reason, or status to match the
-recorded evidence, rejecting conflicts before any cost/reservation
-mutation), and both stay idempotent. The campaign database schema (v3)
-accepts exactly `open`, `unresolved`, `conservatively_retained`, and
-`settled` reservation states, migrates v1/v2 stores to v3 as one atomic unit
-— a rejected migration leaves the source schema version, objects, rows,
-reservation state, timestamps, and storage child links unchanged — and
-fails closed on any unknown state before status, admission, teardown,
-recovery, or rollback can omit it.
+After an image, model snapshot, endpoint, or transfer change, run a cold live
+acceptance job and verify:
 
-## Deployment acceptance record
+1. the expected image and model identities are reported;
+2. model initialization completes without network download;
+3. one original and one prepared cover complete;
+4. uploaded bytes and SHA-256 agree with controller records;
+5. queue and execution timing are recorded when Runpod supplies them;
+6. the endpoint returns to zero workers after the idle timeout.
 
-Fill this table only after live testing. The local contract tests do not prove
-GPU capacity, network transfer, billing, or scale-to-zero behavior.
-
-| Value | Recorded result |
-|---|---|
-| Endpoint ID | pending live deployment |
-| Worker image digest | pending live deployment |
-| ACE-Step tag | `v0.1.8` / pinned commit above |
-| DiT / LM models | `acestep-v15-xl-turbo` / `acestep-5Hz-lm-1.7B` |
-| GPU selection | RTX 4090 24 GB target; record actual |
-| Cold start / initialization | pending live measurement |
-| 20-second original | pending live measurement |
-| 180-second original | pending live measurement |
-| Representative cover | pending live measurement |
-| 30-second idle cost | pending live measurement |
-| Peak VRAM | pending live measurement |
-
-For each live job also record UTC time, job type, song/source duration, cold or
-warm state, queue delay, execution time, generated byte size, and approximate
-cost. Keep API keys, capability URLs, and source URLs out of this record.
+Keep API keys, source URLs, and capability URLs out of the acceptance record.

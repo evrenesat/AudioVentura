@@ -1,257 +1,181 @@
-# ACE Service
+# AudioVentura
 
-The controller is a private FastAPI web app for original-song and YouTube-cover
-jobs. It binds to `127.0.0.1:8000`, uses HTTP Basic plus same-site CSRF for the
-browser UI, persists jobs in SQLite, and serves completed audio only through
-authenticated controller routes. The separate transfer app remains the only
-publicly proxied surface and binds to `127.0.0.1:8001`.
+AudioVentura is a private web application for generating music with ACE-Step.
+It supports original songs and covers made from a public YouTube source. The
+intended audience for this repository is the operator and coding agents.
 
-Run the controller locally with configured credentials using:
+The system is split into separate processes because they have different trust
+and hardware requirements:
+
+- the controller owns the private UI, SQLite state, and job orchestration;
+- the transfer service moves audio through short-lived signed URLs;
+- Home Ingest downloads and prepares YouTube audio on the home network;
+- Runpod or SaladCloud runs the GPU worker.
+
+The controller does not run media tools or inference. GPU providers never
+receive YouTube, SSH, SFTP, home-network, or controller credentials.
+
+## Current state
+
+- Runpod and SaladCloud implement the same provider interface.
+- Each job stores its provider before submission. Existing jobs always resume
+  through that provider; changing the default does not migrate active work.
+- SaladCloud infrastructure and the model-inclusive worker image are deployed.
+  Live acceptance is currently blocked by Salad capacity: a queued job did not
+  receive an instance. See [the Salad runbook](docs/SALAD.md).
+- Provider selection is an administrator setting. A browser provider selector
+  and fal.ai support are future work. The provider contract already models
+  prompt-to-audio, audio-to-audio, and explicit feature capabilities.
+- The quality-evaluation CLI is intentionally quarantined until ordinary
+  original and cover generation are stable.
+
+## Repository map
+
+```text
+src/ace_service/       controller, transfer service, persistence, providers
+runpod_worker/         shared ACE-Step runtime and Runpod entry point
+home_ingest/           private YouTube/media preparation service
+deploy/salad/          Salad worker wrapper, image, and infrastructure tool
+docs/                  operator and provider runbooks
+plans/                 completed and active implementation plans
+tests/                 controller and integration-style contract tests
+```
+
+Start with:
+
+- [Architecture](ARCHITECTURE.md) for boundaries and invariants.
+- [Operations](docs/OPERATIONS.md) for setup, migration, backup, and recovery.
+- [Security](docs/SECURITY.md) for exposed surfaces and secret handling.
+- [Runpod](docs/RUNPOD.md) or [SaladCloud](docs/SALAD.md) for provider details.
+- [Development log](DEVLOG.md) for chronological implementation decisions.
+
+The quality campaign contract, historical baseline, research brief, incident
+records, and plans are supporting evidence. They are not setup instructions.
+
+## Requirements
+
+- Python 3.12
+- [`uv`](https://docs.astral.sh/uv/)
+- SQLite on durable local storage
+- `yt-dlp`, `ffmpeg`, and `ffprobe` on the Home Ingest host only
+- a compatible NVIDIA GPU provider for ACE-Step inference
+
+Install the controller environment from the repository root:
+
+```text
+uv sync --frozen
+```
+
+Install Home Ingest separately:
+
+```text
+cd home_ingest
+uv sync --frozen
+```
+
+## Configuration
+
+Copy `.env.example` into deployment-managed configuration outside Git. The
+application uses environment variables; it does not load or manage secrets
+from the repository.
+
+Important groups are:
+
+- `ACE_SERVICE_*`: controller bind address, data root, authentication, and
+  public hostname;
+- `ACE_TRANSFER_*`: public signed-transfer origin, limits, and token lifetime;
+- `ACE_HOME_INGEST_*`: private Home Ingest endpoint and bearer token;
+- `INFERENCE_PROVIDER`: `runpod` or `salad` for newly created jobs;
+- `RUNPOD_*`: Runpod API, endpoint, polling, and timeout settings;
+- `SALAD_*`: Salad API, organization, project, queue, container group, and
+  timeout settings;
+- `ACESTEP_*` and `RUNPOD_WORKER_RUNTIME_IDENTITY`: pinned model and worker
+  identity recorded with jobs and outputs.
+
+Placeholder credentials are rejected. Never commit `.env`, API keys, database
+files, generated audio, private fixtures, or capability URLs.
+
+## Local processes
+
+Run the private controller:
 
 ```text
 uv run python -m ace_service
 ```
 
-The controller defaults to the public origin root. To publish it below a
-prefix-stripping reverse proxy, configure the exact public prefix explicitly:
+Run the public transfer app as a separate process using the same data root:
 
 ```text
-ACE_SERVICE_ROOT_PATH=/beta uv run python -m ace_service
+uv run python -m ace_service.transfer_main
 ```
 
-The proxy must remove `/beta` before forwarding while setting the ASGI request
-root path consistently. The service never derives this prefix from request
-headers. An empty `ACE_SERVICE_ROOT_PATH` preserves root deployment; `/`,
-trailing or repeated slashes, dot segments, URLs, query/fragment content,
-backslashes, and control characters are rejected at startup.
-
-The schema is versioned and never migrated at startup. Use the explicit
-commands with an explicit resolved database path (read-only status first,
-then offline upgrade under an exclusive sidecar lock after a verified backup):
+Run Home Ingest from its own directory:
 
 ```text
-uv run python -m ace_service migrate-status --database /path/to/service.db
-uv run python -m ace_service migrate-upgrade --database /path/to/service.db
+cd home_ingest
+uv run python -m ace_home_ingest
 ```
 
-Schema v6 adds lightweight projects and backfills every historical job into
-its own same-type project without rewriting generation, output, attempt,
-billing, or transfer evidence. The private UI exposes `/projects` and one
-server-rendered project page per project. A compatible schema-v2 job can
-prefill the existing original or cover form; submitting the reviewed form
-always creates a new job version in that project and never retries or mutates
-the source job. A cover continuation is available only from a completed
-schema-v2 MP3 output. It requires fresh rights confirmation, integrity-checks
-and stages that durable output locally, and never contacts YouTube again.
+Default binds are:
 
-Cost display is a read-only informational calculation at the fixed
-`USD 0.50/GPU-hour` rate: the original and cover forms show the latest three
-completed attempt durations of the matching kind (service-wide history),
-their average, and an approximate per-request estimate (average times
-variation count), or a clearly labeled 60-second seed (`USD 0.0083` per
-variation) when no matching completed history exists. Each label applies one
-half-up rounding at the final four-decimal USD display boundary from the raw
-value, and the visible request total follows the selected variation count
-(both forms default to one and allow 1–4). Estimates are computed
-on read, are never persisted, and never approve, delay, reject, or cancel
-generation. Historical `submission_quotes`, rate catalogs, calibrations, and
-billing observations remain readable data but are no longer captured or
-consulted by the active flow. `RUNPOD_WORKER_RUNTIME_IDENTITY` pins the
-deployed worker image as an exact `sha256:<64 hex>` release identity; it is
-server configuration and never browser input.
+- controller: `127.0.0.1:8000`;
+- transfer service: `127.0.0.1:8001`;
+- Home Ingest: `127.0.0.1:8100`.
 
-Operational deployment, Tailscale/proxy policy, cleanup, backups, and live
-acceptance are documented in [docs/OPERATIONS.md](docs/OPERATIONS.md). The
-prepared SaladCloud image and scale-to-zero infrastructure boundary are
-documented separately in [docs/SALAD.md](docs/SALAD.md); the controller is not
-wired through a durable provider registry. New jobs persist the configured
-`INFERENCE_PROVIDER` before enqueue; existing jobs always reconcile through
-their own persisted provider and external ID. Runpod remains supported and
-Salad Job Queues are the first alternate implementation.
+Do not expose these ports directly. The controller belongs behind the private
+tailnet. The public proxy may forward only the signed transfer paths described
+in [the operations runbook](docs/OPERATIONS.md).
 
-The detailed deployment and distributed-runtime handoff follows below.
+## Database migrations
 
-# aflow Handoff Plan: Hetzner + Home Ingest + Runpod Flex ACE-Step Service
-
-Build the first usable release of a private music-generation service with a deliberately split runtime:
-
-1. **Hetzner VM is the permanent control plane and web application.**
-2. **Home server is the YouTube/media-ingest node.** Every `yt-dlp`, `ffprobe`, and `ffmpeg` operation runs there so YouTube requests originate from the residential/home connection. Runpod encodes generated MP3 output in-process with LAME; Hetzner performs no media processing.
-3. **Runpod Serverless Flex is the only ACE-Step inference backend in v1.** The MacBook/MLX path is deferred.
-4. **Runpod never receives YouTube credentials, SSH keys, SFTP credentials, or direct access to the home network.**
-5. **Large audio never travels inside the Runpod `/run` JSON payload.** Hetzner exposes narrowly scoped, short-lived HTTPS capability URLs for source download and result upload.
-
-The first release supports two workflows:
-
-1. Generate an original song from creative instructions, optional lyrics, optional musical metadata, and one to four sequential variations.
-2. Generate a cover or stylistic reinterpretation from a single public YouTube video after the home server downloads and prepares the source audio.
-
-Jobs remain the unit of queueing, execution, status, outputs, attempts, and
-transfer capabilities. Projects only group same-type jobs for naming,
-continuation, and version comparison; they do not add execution state.
-
-New jobs use a strict version-2 worker payload. Original requests choose
-`direct`, `enhance`, or `auto-compose` prompting and either model-selected
-duration (`auto`, sent as `-1.0`) or an explicit 10-600 second custom value.
-The final caption and lyrics are bounded at 511 and 4095 characters. Cover
-requests expose ACE-Step's independent `audio_cover_strength` and
-`cover_noise_strength` controls and choose either the probed source duration
-or an explicit 10-600 second custom target. The measured source duration and
-generation target remain separate durable values. The
-initial rights checkbox is the only authorization: after the home server
-prepares the source, the controller atomically persists the finalized source,
-checksum, size, and duration with `cover_staging.status=confirmed` and
-continues through the serialized Runpod path in the same pass — no second
-confirmation click. Legacy rows that durably committed
-`cover_staging.status=awaiting_confirmation` keep the authenticated one-time
-confirm/cancel route. One to four cover variations run
-sequentially; a supplied seed advances deterministically. Duration prose is
-accepted only when bounded numeric seconds/minutes match an explicit custom
-duration; it never changes the structured value.
-
-The opt-in `tests/live_paid_ui_e2e.py` smoke submits exactly one new YouTube
-cover and one local-output continuation, one variation each. It is excluded
-from normal pytest discovery, requires protected credentials plus
-`--allow-paid`, and enforces an exact two-submission budget.
-
-Immediately before starting a schema-v1 controller rollback, run the local
-read-only gate against the configured database:
+Normal startup does not migrate an existing database. Inspect and upgrade it
+explicitly after taking a verified backup:
 
 ```text
-ACE_SERVICE_DATA_ROOT=/srv/ace-service/data uv run python -m ace_service.rollback_readiness
+uv run python -m ace_service migrate-status \
+  --database /srv/ace-service/data/service.db
+
+uv run python -m ace_service migrate-upgrade \
+  --database /srv/ace-service/data/service.db
 ```
 
-The command exits zero only when no nonterminal or malformed schema-v2 state
-or unconfirmed cover staging is present. A nonzero or indeterminate result
-means the v2-capable controller and worker must remain active.
+Do not retry an incomplete migration. Restore the verified backup and
+investigate first.
 
-Checkpoint 3 quality comparisons are local operator actions, separate from
-browser requests and the product database. The quality campaign is currently
-quarantined: its executable entrypoint (`python -m ace_service.quality_eval`)
-and the ordinary-submission maintenance gate are disabled with a `TODO`
-(re-enable after ordinary original and cover generation is stable), while the
-campaign store, evaluators, profiles, and unit-testable implementation remain
-in place. Do not attempt to run the campaign CLI in this recovery.
+## Verification
 
-The private quality campaign keeps two distinct identities for every executed
-sample: the opaque campaign sample ID (for example `s-…`) that keys blinded
-score sheets, aliases, and reservations, and the product job ID, which is a
-generated UUID stored in the product database and durably linked to the
-campaign sample by the campaign store. No campaign sample ID is ever used as a
-worker `job_id`; the strict worker schema validates every job ID as a UUID.
-The strict v1/v2 compatibility smokes are expanded into complete worker
-envelopes and validated end-to-end against the real worker parser
-(`runpod_worker.schemas.WorkerRequest`) before any execution window opens.
-
-The Runpod worker now loads checkpoints only from one revision-pinned Hugging
-Face cached-model snapshot. Production must provide `ACE_WORKER_MODEL_REPO`,
-the exact 40-hex `ACE_WORKER_MODEL_REVISION`, release tag, manifest SHA-256,
-and cache root; the worker validates the complete 25,253,688,079-byte manifest
-inventory before importing ACE-Step and has no network-volume checkpoint
-fallback. `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are image defaults.
-Nonterminal status polling exposes named evidence-backed phases and elapsed
-time, without presenting a completion percentage.
-Score-sheet export, import, and finalization all enforce exact current
-scoreable-sample-set and pair coverage: a sample or pair declared after export
-causes import and finalization to reject the stale sheet even after that
-sample completes. The operator CLI persists deterministic screening
-advancement (`--advance --confirm`) from the two finalized screening sheets —
-the fresh explicit confirmation is mandatory before any campaign mutation,
-and a score-equivalence group that crosses the two-finalist cutoff is excluded
-in its entirety — and materializes the confirmation cases that
-`--execute --stage confirmation` then submits. Every executed sample gets a
-preassigned UUID product job that is crash-recoverable through a durable
-campaign submission intent, and windows close only on provider-observed
-zero-worker/zero-work Runpod `/health` evidence; `--status`, `--reconcile`,
-and `--verified-teardown` expose bounded recovery actions. Recovery actions
-run from frozen campaign/sample/submission-intent state and never load the
-external fixture manifest, so status, backup, reconciliation, and verified
-teardown stay usable even when the manifest is missing or corrupted.
-Every recovery action validates `--campaign-id` against the campaign
-database first: an unknown campaign is blocked before any backup file,
-product engine, controller worker, Home Ingest client, or Runpod client is
-created, and verified teardown rejects an active maintenance gate that
-belongs to a different campaign. Terminal attempts whose attributable
-compute is unknown keep their full original reservation counted in budget
-totals as `conservatively_retained` (never invented as executed compute)
-and may be closed by verified teardown only after provider-observed zero
-work is proven; in-flight/uncertain attempts stay `unresolved` with their
-full reservation and keep teardown and rollback blocked, and a failed,
-cancelled, unsubmitted, or completed terminal identity can never be
-rewritten into conflicting later evidence — only an uncertain attempt may
-advance to a compatible terminal outcome and only a completed sample with
-missing cost inputs may fill them in place, requiring any supplied output
-path, GPU, execution, reason, or status to match the recorded evidence and
-rejecting conflicts before any cost/reservation mutation. The campaign
-database schema (v3) constrains reservations to exactly `open`,
-`unresolved`, `conservatively_retained`, and `settled`, and migrates v1/v2
-stores to v3 as one atomic unit — a rejected migration leaves the source
-schema version, objects, rows, reservation state, timestamps, and storage
-child links unchanged — while refusing any unknown reservation state before
-status, admission, teardown, recovery, or rollback could omit it; confirmed
-`--reconcile` additionally settles the exact
-crash state that committed a reservation but never persisted a submission
-intent as proven unsubmitted, creating no product job and calling no
-provider.
-
-### Runtime Architecture
+Run the full local matrix from the repository root:
 
 ```text
-Trusted browser / phone
-        |
-        | Tailscale HTTPS
-        v
-+----------------------------------------------------+
-| Hetzner VM                                         |
-|                                                    |
-| FastAPI controller/UI on 127.0.0.1:8000           |
-|   - auth + CSRF                                    |
-|   - SQLite                                         |
-|   - job state machine                              |
-|   - one controller worker                         |
-|   - Runpod API client                              |
-|   - persistent source/output storage               |
-|                                                    |
-| Public transfer app on 127.0.0.1:8001             |
-|   - ONLY signed /transfer/v1/* routes              |
-|   - source GET for Runpod                          |
-|   - generated-output PUT from Runpod               |
-|                                                    |
-| Caddy/Nginx on public HTTPS                        |
-|   - forwards ONLY /transfer/v1/* to :8001          |
-|   - binds public interface                         |
-+-------------------+----------------+---------------+
-                    |                ^
-      Tailscale API |                | short-lived HTTPS
-                    v                | capability URLs
-+--------------------------------+   |
-| Home server                    |   |
-|                                |   |
-| private ingest agent           |   |
-| - YouTube metadata             |   |
-| - yt-dlp audio download        |   |
-| - ffprobe validation           |   |
-| - ffmpeg normalization         |   |
-| - SFTP upload to Hetzner       |   |
-+--------------------------------+   |
-                                     |
-                                     v
-                           +-------------------------+
-                           | Runpod Serverless Flex  |
-                           |                         |
-                           | custom ACE-Step worker  |
-                           | RTX 4090 24 GB target   |
-                           | workersMin = 0          |
-                           | workersMax = 1          |
-                           | batch_size = 1          |
-                           | XL Turbo + 1.7B LM      |
-                           +-------------------------+
+uv run pytest -q tests runpod_worker/tests
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src runpod_worker
+
+cd home_ingest
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
 ```
 
-### Why This Split Exists
+Some quality-campaign tests use a private fixture outside Git. If its frozen
+retention deadline has passed, those tests fail closed by design. Record that
+separately from product regressions; do not weaken the validation to make an
+expired fixture pass.
 
-- Hetzner is lightweight enough for the control plane. It does no ML inference and no audio transcoding.
-- YouTube access stays on the home connection. Cloud/datacenter IP reputation cannot break the main controller or force media download from Hetzner.
-- Home is the only runtime that invokes `ffmpeg` or `ffprobe`; Runpod's generated-output MP3 path uses in-process LAME and the Hetzner control plane performs no media processing.
-- Runpod receives only clean generation parameters and, for covers, a temporary HTTPS URL to a prepared source file.
-- The MacBook and home server are absent from original-song generation. A home-server outage disables only new YouTube cover ingestion.
+Provider contract tests use mocks and do not prove GPU availability, billing,
+image startup, public transfer routing, or scale-to-zero behavior. Perform the
+live acceptance checks in the provider runbook after any deployment change.
+
+## Working rules
+
+- Use `uv` for Python commands.
+- Store timestamps in UTC.
+- Keep application data under the configured data root.
+- Keep controller, Home Ingest, transfer, and GPU-worker responsibilities
+  separate.
+- Never retry an uncertain provider submission with a new job. Resume the
+  persisted provider reference or fail closed at its deadline.
+- Update `ARCHITECTURE.md`, the relevant runbook, and `DEVLOG.md` when behavior
+  or deployment state changes.

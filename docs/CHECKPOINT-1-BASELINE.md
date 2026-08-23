@@ -1,5 +1,7 @@
 # Checkpoint 1 baseline and wiring audit
 
+This is a historical evidence record, not a current deployment runbook.
+
 Recorded on 2026-08-08 in UTC before any Checkpoint 2 implementation. This
 document records what was observable from the checked-in application,
 deployment checkout, and unauthenticated network probes. It does not claim
