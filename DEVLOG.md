@@ -1,5 +1,11 @@
 # Development Log
 
+## 2026-08-23 (Salad guarded-session pagination compatibility)
+
+- Corrected the guarded shutdown's recent-jobs query to Salad's live
+  `per_page` parameter after the API rejected the OpenAPI-style `page_size`
+  spelling. The guard still fails closed before capacity mutation.
+
 ## 2026-08-23 (continuation worker-contract projection)
 
 - Kept continuation provenance in the controller's normalized request while

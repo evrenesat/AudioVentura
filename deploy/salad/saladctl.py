@@ -493,7 +493,7 @@ def session_stop(
             _resource_path(
                 organization,
                 project,
-                f"queues/{queue_name}/jobs?page=1&page_size={MAX_QUEUE_JOBS}",
+                f"queues/{queue_name}/jobs?page=1&per_page={MAX_QUEUE_JOBS}",
             ),
         ),
         "queue jobs",

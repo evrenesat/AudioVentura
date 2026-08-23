@@ -288,7 +288,7 @@ class _SessionApi:
             return self.queue
         if method == "GET" and path.endswith("/containers/group-name"):
             return self.group
-        if method == "GET" and path.endswith("/queues/queue-name/jobs?page=1&page_size=100"):
+        if method == "GET" and path.endswith("/queues/queue-name/jobs?page=1&per_page=100"):
             return self.jobs
         if method == "PATCH" and path.endswith("/containers/group-name"):
             if self.fail_patch:
@@ -386,7 +386,7 @@ def test_session_stop_proves_idle_then_restores_zero_in_exact_order(tmp_path: Pa
         ("GET", "/organizations/org-name/projects/project-name/containers/group-name"),
         (
             "GET",
-            "/organizations/org-name/projects/project-name/queues/queue-name/jobs?page=1&page_size=100",
+            "/organizations/org-name/projects/project-name/queues/queue-name/jobs?page=1&per_page=100",
         ),
         ("PATCH", "/organizations/org-name/projects/project-name/containers/group-name"),
     ]
