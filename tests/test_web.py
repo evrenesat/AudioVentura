@@ -8,6 +8,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -39,6 +40,8 @@ from ace_service.repository import (
 from ace_service.schemas import CoverRequest, OriginalSongRequest
 from ace_service.transfers import create_transfer_app
 from ace_service.web import capture_submission_quote
+from ace_service.worker import ControllerWorker
+from runpod_worker.schemas import WorkerRequest
 
 RUNTIME_A = "sha256:" + "a" * 64
 RUNTIME_B = "sha256:" + "b" * 64
@@ -673,6 +676,31 @@ def test_continue_cover_reuses_completed_output_without_youtube_ingest(web_app) 
             assert source.status is JobStatus.COMPLETED
             assert "continuation_source" not in source.normalized_request_json
             assert get_submission_quote(session, new_id) is None
+            submission_nonce = str(uuid4())
+            provider_attempt = create_variation_attempt(
+                session, job_id=created.id, variation_index=1
+            )
+            provider_attempt.submission_nonce = submission_nonce
+            session.flush()
+            provider_payload = dict(ControllerWorker._default_payload(created, provider_attempt))
+            assert created.normalized_request_json["continuation_source"] == {
+                "job_id": source_id,
+                "output_id": source_output_id,
+            }
+        provider_payload["submission_nonce"] = submission_nonce
+        provider_payload["source"] = {
+            "url": "https://transfer.example/transfer/v1/continuation-source",
+            "sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "bytes": len(source_bytes),
+            "format": "mp3",
+        }
+        provider_payload["result_upload"] = {
+            "url": "https://transfer.example/transfer/v1/continuation-result",
+            "max_bytes": 1024,
+        }
+        assert "continuation_source" not in provider_payload
+        parsed_provider_payload = WorkerRequest.from_mapping(provider_payload)
+        assert parsed_provider_payload.task_type == "cover"
         assert (app.state.settings.paths.incoming / new_id / "source.mp3").read_bytes() == (
             source_bytes
         )

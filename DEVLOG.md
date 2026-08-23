@@ -1,5 +1,11 @@
 # Development Log
 
+## 2026-08-23 (continuation worker-contract projection)
+
+- Kept continuation provenance in the controller's normalized request while
+  projecting only strict schema-v2 worker fields into provider submissions.
+  Runpod and Salad now receive the same payload without `continuation_source`.
+
 ## 2026-08-23 (Salad retry lifecycle status)
 
 - Corrected `running` Salad queue jobs during worker replacement so allocation,

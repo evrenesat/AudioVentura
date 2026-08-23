@@ -93,6 +93,20 @@ _MODEL_REPO_RE = re.compile(
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _MODEL_TAG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$")
 _MODEL_MANIFEST_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_WORKER_V2_PERSISTED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "task_type",
+        "profile_id",
+        "resolved_parameters",
+        "source_duration_seconds",
+        "resolved_target_duration_seconds",
+        "ace_duration_seconds",
+        "cover_staging",
+        "generation",
+        "source",
+    }
+)
 
 
 class RunpodWorkerClient(Protocol):
@@ -1146,7 +1160,12 @@ class ControllerWorker:
 
     @staticmethod
     def _default_payload(job: Job, attempt: VariationAttempt) -> Mapping[str, Any]:
-        payload = dict(job.normalized_request_json or {})
+        normalized = dict(job.normalized_request_json or {})
+        payload = (
+            {key: value for key, value in normalized.items() if key in _WORKER_V2_PERSISTED_FIELDS}
+            if normalized.get("schema_version") == WORKER_SCHEMA_VERSION
+            else normalized
+        )
         generation = payload.get("generation")
         generation_payload = dict(generation) if isinstance(generation, Mapping) else None
         resolved = payload.get("resolved_parameters")
