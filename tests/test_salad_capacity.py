@@ -95,7 +95,7 @@ def test_salad_capacity_inspection_is_fingerprint_pinned() -> None:
         if request.url.path.endswith("/queues/jobs/jobs"):
             return httpx.Response(200, json={"items": []})
         if request.url.path.endswith("/containers/group/instances"):
-            return httpx.Response(200, json={"items": []})
+            return httpx.Response(200, json={"instances": []})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)

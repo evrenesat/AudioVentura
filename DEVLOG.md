@@ -4,7 +4,8 @@
 
 - Corrected managed-capacity inspection to fetch RunPod's complete template
   record and to normalize Salad's readable group-level priority while excluding
-  its consumed create-time autostart action.
+  its consumed create-time autostart action. Salad instance inspection now uses
+  the live `instances` response envelope.
 - Pinned Salad's reviewed production organization, image identity, and five GPU
   class IDs after independently matching them to the tracked GPU names.
 - Added contextual help for every visible generation control, exposed the

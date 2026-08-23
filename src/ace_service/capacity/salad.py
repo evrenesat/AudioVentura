@@ -153,7 +153,9 @@ class SaladCapacityManager:
         )
         jobs = jobs_body.get("items") if isinstance(jobs_body, Mapping) else jobs_body
         instances = (
-            instances_body.get("items") if isinstance(instances_body, Mapping) else instances_body
+            instances_body.get("instances")
+            if isinstance(instances_body, Mapping)
+            else instances_body
         )
         if not isinstance(jobs, list) or not isinstance(instances, list):
             raise CapacityError(
