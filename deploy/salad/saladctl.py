@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -167,6 +168,31 @@ def _find_named(items: list[dict[str, Any]], name: str) -> dict[str, Any] | None
     return next((item for item in items if item.get("name") == name), None)
 
 
+def _require_desired_subset(actual: Any, desired: Any, label: str) -> None:
+    """Fail closed when a remote resource differs from tracked desired state."""
+
+    if isinstance(desired, Mapping):
+        if not isinstance(actual, Mapping):
+            raise InfraError(f"existing Salad {label} has incompatible drift")
+        for key, value in desired.items():
+            if key not in actual:
+                raise InfraError(f"existing Salad {label} has incompatible drift")
+            _require_desired_subset(actual[key], value, label)
+        return
+    if actual != desired:
+        raise InfraError(f"existing Salad {label} has incompatible drift")
+
+
+def _verifiable_group_state(desired: Mapping[str, Any]) -> dict[str, Any]:
+    """Exclude the write-only registry password from remote drift checks."""
+
+    value = copy.deepcopy(dict(desired))
+    container = value.get("container")
+    if isinstance(container, dict):
+        container.pop("registry_authentication", None)
+    return value
+
+
 def inspect_state(
     api: SaladApi, organization: str, project: str, config: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -208,27 +234,44 @@ def apply(
     ghcr_username: str,
     ghcr_token: str,
 ) -> dict[str, Any]:
-    state = inspect_state(api, organization, project, config)
-    if state["container_group"] is not None:
-        raise InfraError("Salad container group already exists; refusing automatic replacement")
     gpu_ids = resolve_gpu_ids(api, organization, list(config["gpu_names"]))
-    if state["queue"] is None:
+    queue_items = _items(
+        api.request("GET", _resource_path(organization, project, "queues")), "queues"
+    )
+    group_items = _items(
+        api.request("GET", _resource_path(organization, project, "containers")),
+        "container groups",
+    )
+    wanted_queue = desired_queue(config)
+    wanted_group = desired_container_group(
+        config,
+        image_ref=image_ref,
+        gpu_ids=gpu_ids,
+        ghcr_username=ghcr_username,
+        ghcr_token=ghcr_token,
+    )
+    existing_queue = _find_named(queue_items, wanted_queue["name"])
+    existing_group = _find_named(group_items, wanted_group["name"])
+    if existing_queue is not None:
+        _require_desired_subset(existing_queue, wanted_queue, "queue")
+    if existing_group is not None:
+        _require_desired_subset(
+            existing_group,
+            _verifiable_group_state(wanted_group),
+            "container group",
+        )
+    if existing_queue is None:
         api.request(
             "POST",
             _resource_path(organization, project, "queues"),
-            json_body=desired_queue(config),
+            json_body=wanted_queue,
         )
-    api.request(
-        "POST",
-        _resource_path(organization, project, "containers"),
-        json_body=desired_container_group(
-            config,
-            image_ref=image_ref,
-            gpu_ids=gpu_ids,
-            ghcr_username=ghcr_username,
-            ghcr_token=ghcr_token,
-        ),
-    )
+    if existing_group is None:
+        api.request(
+            "POST",
+            _resource_path(organization, project, "containers"),
+            json_body=wanted_group,
+        )
     return inspect_state(api, organization, project, config)
 
 

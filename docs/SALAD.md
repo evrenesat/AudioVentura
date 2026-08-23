@@ -80,6 +80,11 @@ uv run python deploy/salad/saladctl.py apply \
   --image-ref ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:e20eceb01df99d129bd379a545aaf80f02b54c5294a48ba0e4ca424c111e279a
 ```
 
+`apply` is idempotent when the existing queue and container group match the
+tracked desired state. It stops on drift and never replaces or deletes a
+resource automatically; the write-only GHCR registry password is the sole
+field that cannot be read back for comparison.
+
 After creation, require the exact image digest/config, `replicas=0`, an empty
 queue, no instances, and no pending change before controller deployment. A
 cold live job is the first authorized action that should scale the group to

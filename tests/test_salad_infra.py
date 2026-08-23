@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from deploy.salad.saladctl import InfraError, desired_container_group, desired_queue, load_config
+from deploy.salad.saladctl import (
+    InfraError,
+    apply,
+    desired_container_group,
+    desired_queue,
+    load_config,
+)
 
 
 def _config(tmp_path: Path) -> dict[str, object]:
@@ -79,6 +85,112 @@ def test_desired_state_rejects_mutable_or_unrelated_image(tmp_path: Path) -> Non
             ghcr_username="user",
             ghcr_token="token",
         )
+
+
+class _FakeSaladApi:
+    def __init__(self) -> None:
+        self.queues: list[dict[str, object]] = []
+        self.groups: list[dict[str, object]] = []
+        self.posts: list[str] = []
+
+    def request(self, method: str, path: str, *, json_body: object | None = None) -> object:
+        if path == "/organizations/org-name/gpu-classes":
+            return {"items": [{"id": "gpu-id", "name": "RTX 4090"}]}
+        if method == "GET" and path.endswith("/queues"):
+            return {"items": self.queues}
+        if method == "GET" and path.endswith("/containers"):
+            return {"items": self.groups}
+        if method == "POST" and path.endswith("/queues"):
+            assert isinstance(json_body, dict)
+            self.posts.append(path)
+            queue = dict(json_body)
+            self.queues.append(queue)
+            return queue
+        if method == "POST" and path.endswith("/containers"):
+            assert isinstance(json_body, dict)
+            self.posts.append(path)
+            group = json.loads(json.dumps(json_body))
+            group["container"].pop("registry_authentication")
+            self.groups.append(group)
+            return group
+        raise AssertionError(f"unexpected fake request: {method} {path}")
+
+
+def test_apply_is_idempotent_and_ignores_only_write_only_registry_auth(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    api = _FakeSaladApi()
+    image = "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:" + "a" * 64
+
+    first = apply(
+        api,
+        "org-name",
+        "project-name",
+        config,
+        image_ref=image,
+        ghcr_username="user",
+        ghcr_token="token",
+    )
+    second = apply(
+        api,
+        "org-name",
+        "project-name",
+        config,
+        image_ref=image,
+        ghcr_username="user",
+        ghcr_token="token",
+    )
+
+    assert first == second
+    assert len(api.posts) == 2
+
+
+def test_apply_stops_on_existing_queue_drift(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    api = _FakeSaladApi()
+    api.queues.append({**desired_queue(config), "description": "unexpected"})
+    image = "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:" + "a" * 64
+
+    with pytest.raises(InfraError, match="queue has incompatible drift"):
+        apply(
+            api,
+            "org-name",
+            "project-name",
+            config,
+            image_ref=image,
+            ghcr_username="user",
+            ghcr_token="token",
+        )
+    assert api.posts == []
+
+
+def test_apply_detects_group_drift_before_creating_missing_queue(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    api = _FakeSaladApi()
+    image = "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:" + "a" * 64
+    group = desired_container_group(
+        config,
+        image_ref=image,
+        gpu_ids=["gpu-id"],
+        ghcr_username="user",
+        ghcr_token="token",
+    )
+    group["container"].pop("registry_authentication")
+    group["container"]["image"] = (
+        "ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:" + "b" * 64
+    )
+    api.groups.append(group)
+
+    with pytest.raises(InfraError, match="container group has incompatible drift"):
+        apply(
+            api,
+            "org-name",
+            "project-name",
+            config,
+            image_ref=image,
+            ghcr_username="user",
+            ghcr_token="token",
+        )
+    assert api.posts == []
 
 
 def test_worker_image_uses_official_queue_worker_log_variable() -> None:
