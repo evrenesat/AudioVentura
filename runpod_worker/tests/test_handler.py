@@ -107,14 +107,23 @@ class FakeConfig:
 
 
 class FakeTransferClient:
-    def __init__(self, *, fail_upload: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_upload: bool = False,
+        source_writer: Callable[[Path], None] | None = None,
+    ) -> None:
         self.fail_upload = fail_upload
+        self.source_writer = source_writer
         self.downloaded_path: Path | None = None
         self.uploaded_path: Path | None = None
 
     def download_source(self, _source: SourceInput, destination: Path) -> SimpleNamespace:
         self.downloaded_path = destination
-        destination.write_bytes(SOURCE_BODY)
+        if self.source_writer is None:
+            destination.write_bytes(SOURCE_BODY)
+        else:
+            self.source_writer(destination)
         return SimpleNamespace(path=destination, bytes=len(SOURCE_BODY), sha256="ignored")
 
     def upload_output(self, _upload: Any, source_path: Path) -> UploadedOutput:
@@ -235,6 +244,32 @@ def _v2_cover_payload() -> dict[str, Any]:
     }
 
 
+def _v2_custom_cover_payload() -> dict[str, Any]:
+    payload = _v2_cover_payload()
+    request = payload["input"]
+    resolved = request["resolved_parameters"]
+    generation = request["generation"]
+    resolved.update(
+        {
+            "duration_mode": "custom",
+            "duration": 10.0,
+            "source_duration_seconds": 0.1,
+            "target_duration_seconds": 10.0,
+        }
+    )
+    generation.update(
+        {
+            "duration_mode": "custom",
+            "duration_seconds": 10.0,
+            "duration": 10.0,
+        }
+    )
+    request["source_duration_seconds"] = 0.1
+    request["resolved_target_duration_seconds"] = 10.0
+    request["ace_duration_seconds"] = 10.0
+    return payload
+
+
 def _v2_enhance_payload(*, lyrics: str = "[verse] preserve exactly") -> dict[str, Any]:
     resolved = {
         "profile_id": "fast-beta-v1",
@@ -302,6 +337,7 @@ def _runtime(
     *,
     lm_metadata: dict[str, Any] | None = None,
     result_style: str = "attribute",
+    generated_duration_seconds: float = 0.1,
 ) -> WorkerRuntime:
     def generate_music(
         _dit: object,
@@ -320,7 +356,7 @@ def _runtime(
                     wav_file.setnchannels(1)
                     wav_file.setsampwidth(2)
                     wav_file.setframerate(48_000)
-                    wav_file.writeframes(b"\x00\x00" * 4_800)
+                    wav_file.writeframes(b"\x00\x00" * round(48_000 * generated_duration_seconds))
             else:
                 output.write_bytes(f"generated {output_format}".encode())
         else:
@@ -424,6 +460,38 @@ def test_v2_cover_probes_source_duration_and_preserves_independent_controls() ->
     assert result["output"]["duration_within_tolerance"] is True
 
 
+def test_v2_custom_cover_repeats_source_to_target_before_generation() -> None:
+    def write_source(path: Path) -> None:
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(48_000)
+            wav_file.writeframes(b"\x01\x00" * 4_800)
+
+    transfer_client = FakeTransferClient(source_writer=write_source)
+    generated_paths: list[Path] = []
+    calls: list[tuple[FakeParams, FakeConfig]] = []
+    handler_module.configure_runtime(
+        _runtime(
+            transfer_client,
+            generated_paths,
+            calls,
+            generated_duration_seconds=10.0,
+        )
+    )
+
+    result = handler_module.handler(_v2_custom_cover_payload())
+    params, _config = calls[0]
+
+    prepared_path = Path(params.values["src_audio"])
+    assert prepared_path.name == "prepared-cover-source.wav"
+    assert not prepared_path.exists()
+    assert params.values["duration"] == 10.0
+    assert result["output"]["duration_seconds"] == pytest.approx(10.0)
+    assert result["output"]["target_duration_seconds"] == pytest.approx(10.0)
+    assert result["output"]["duration_within_tolerance"] is True
+
+
 @pytest.mark.parametrize("result_style", ["mapping", "attribute"])
 def test_v2_enhance_persists_pinned_lm_metadata_without_rewriting_lyrics(
     result_style: str,
@@ -487,6 +555,7 @@ def test_cover_reports_exact_progress_boundaries_with_original_event(
     monkeypatch.setitem(sys.modules, "runpod", SimpleNamespace(serverless=FakeServerless()))
     handler_module.configure_runtime(_runtime(transfer_client, generated_paths, calls))
     event = _payload(cover=True)
+    event["id"] = "runpod-provider-job"
 
     handler_module.handler(event)
 
@@ -497,6 +566,21 @@ def test_cover_reports_exact_progress_boundaries_with_original_event(
         {"kind": "audioventura_progress_v1", "phase": "finalizing", "sequence": 30},
         {"kind": "audioventura_progress_v1", "phase": "output_upload", "sequence": 40},
     ]
+
+
+def test_non_runpod_event_skips_progress_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    reports: list[object] = []
+
+    class FakeServerless:
+        @staticmethod
+        def progress_update(event: object, payload: dict[str, object]) -> None:
+            reports.append((event, payload))
+
+    monkeypatch.setitem(sys.modules, "runpod", SimpleNamespace(serverless=FakeServerless()))
+
+    handler_module._report_progress(_payload(), "generation", 20)
+
+    assert reports == []
 
 
 def test_progress_delivery_failure_does_not_fail_generation(

@@ -470,8 +470,12 @@ def _validate_manifest_components(value: Any) -> None:
         revision = component.get("source_revision")
         destination = component.get("destination_directory")
         source_path = component.get("source_path")
-        if not all(
-            isinstance(item, str) for item in (name, repo_id, revision, destination, source_path)
+        if (
+            not isinstance(name, str)
+            or not isinstance(repo_id, str)
+            or not isinstance(revision, str)
+            or not isinstance(destination, str)
+            or not isinstance(source_path, str)
         ):
             raise WorkerInitializationError("cached model component entry is malformed")
         if MODEL_SOURCES.get(repo_id) != revision:

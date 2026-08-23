@@ -36,7 +36,12 @@ source duration, the controller enters `staging` and immediately consumes the
 already-persisted initial rights confirmation in the same transaction, so the
 durable row is `cover_staging.status=confirmed` before any Runpod capability
 is issued. Source mode uses the measured source duration as the ACE-Step
-target; custom mode preserves a separate explicit 10-600 second target.
+target; custom mode preserves a separate explicit 10-600 second target. The
+pinned ACE-Step cover implementation always derives output length from its
+decoded source, so the shared GPU worker streams a custom cover source into an
+exact-target temporary PCM WAV before generation: shorter sources repeat and
+longer sources truncate. Source-matched covers retain the original prepared
+MP3 path.
 Covers retain independent `audio_cover_strength` and `cover_noise_strength` values,
 run one to four variations sequentially (both forms default to one), and
 persist the returned effective seed and bounded worker result metadata,
@@ -373,11 +378,12 @@ controller's subsequent Hetzner-side finalization. Raw and canonical home
 files are removed on success and failure by default; explicit debug retention
 is bounded by a configured expiry and pruned on later requests.
 
-Runpod does not process source media and contains no `ffmpeg` or `ffprobe`
-runtime dependency. For a requested MP3, ACE-Step writes a temporary 48 kHz
-PCM WAV and the worker encodes that file to the requested MP3 in-process with
-the pinned LAME encoder. Requested WAV and FLAC outputs retain their native
-ACE-Step save formats. Hetzner performs no media processing.
+The GPU worker contains no `ffmpeg` or `ffprobe` runtime dependency. It uses
+ACE-Step's existing in-process libsndfile dependency only to stream an exact
+custom-cover source WAV when requested. For a requested MP3, ACE-Step writes a
+temporary 48 kHz PCM WAV and the worker encodes that file to the requested MP3
+in-process with the pinned LAME encoder. Requested WAV and FLAC outputs retain
+their native ACE-Step save formats. Hetzner performs no media processing.
 
 ## Revision-pinned cached-model boundary
 
@@ -394,9 +400,10 @@ root. The resulting checkpoints path is exported to ACE-Step only after this
 gate passes, and completion metadata carries the aggregate repo, destination
 commit, release tag, and manifest digest alongside image and GPU identity.
 
-Worker progress is advisory metadata, never generation control. The worker
-uses the pinned Runpod SDK to report source transfer, generation, finalization,
-and output upload boundaries with fixed sequence values. The controller
+Worker progress is advisory metadata, never generation control. For Runpod
+events, the worker uses the pinned SDK to report source transfer, generation,
+finalization, and output upload boundaries with fixed sequence values; other
+provider events skip that Runpod-only call. The controller
 accepts only that exact bounded payload. While a job is queued, it separately
 uses provider health evidence to distinguish capacity/cache waiting from an
 initializing worker; health or progress errors retain the last valid phase and

@@ -65,7 +65,7 @@ def probe_audio_duration(path: Path, metadata: Mapping[str, object] | None = Non
             if float(value) > 0:
                 return float(value)
     try:
-        import soundfile  # type: ignore[import-not-found]
+        import soundfile
 
         info = soundfile.info(str(path))
         if info.frames > 0 and info.samplerate > 0:

@@ -1,5 +1,20 @@
 # Development Log
 
+## 2026-08-23 (custom cover source-duration adaptation)
+
+- The first live Salad acceptance submission reached a ready RTX 3090 and
+  completed ACE-Step inference, but the worker rejected its roughly 29-second
+  output against the explicit 60-second custom target. Salad retried the same
+  idempotent queue job four times; no continuation was submitted.
+- Confirmed in the pinned ACE-Step v0.1.8 source that cover duration is always
+  locked to decoded source length and the caller's duration is intentionally
+  ignored. The shared worker now prepares an exact-duration temporary WAV for
+  custom covers by streaming, repeating, or truncating the verified source;
+  source-matched covers remain unchanged.
+- Runpod progress reporting now runs only for events carrying a Runpod job ID,
+  so Salad execution does not emit advisory `KeyError` warnings. Duration
+  rejection logs now include only bounded numeric actual/target evidence.
+
 ## 2026-08-23 (Salad live pull-progress normalization)
 
 - Live Container Engine instances returned `pulling_progress` as a 0..1

@@ -26,6 +26,7 @@ from .schemas import (
     SCHEMA_VERSION,
     WorkerRequest,
 )
+from .source_audio import prepare_cover_source_to_duration
 
 LOGGER = logging.getLogger(__name__)
 _RUNTIME: WorkerRuntime | None = None
@@ -116,9 +117,27 @@ def _handle_request(
             source_path = temporary_path / "source.mp3"
             transfer_client.download_source(request.source, source_path)
 
+        generation_source_path = source_path
+        if _requires_custom_cover_source(request):
+            if source_path is None:
+                raise GenerationError("custom cover is missing its source audio")
+            target_duration = _target_duration(request)
+            if target_duration is None:
+                raise GenerationError("custom cover is missing its target duration")
+            generation_source_path = prepare_cover_source_to_duration(
+                source_path,
+                temporary_path / "prepared-cover-source.wav",
+                target_duration_seconds=target_duration,
+            )
+            LOGGER.info(
+                "job=%s stage=source_preparation mode=custom target_duration_seconds=%.3f",
+                request.job_id,
+                target_duration,
+            )
+
         output_directory = temporary_path / "output"
         output_directory.mkdir(mode=0o700)
-        params = _build_generation_params(runtime, request, source_path)
+        params = _build_generation_params(runtime, request, generation_source_path)
         config = _build_generation_config(runtime, request)
         _report_progress(event, "generation", 20)
         result = runtime.generate_music(
@@ -138,6 +157,14 @@ def _handle_request(
         target_duration = _target_duration(request)
         duration_evidence = _duration_evidence(actual_duration, target_duration)
         if target_duration is not None and not duration_evidence["duration_within_tolerance"]:
+            LOGGER.warning(
+                "job=%s stage=duration_validation actual_duration_seconds=%.3f "
+                "target_duration_seconds=%.3f tolerance_seconds=%.3f",
+                request.job_id,
+                actual_duration,
+                target_duration,
+                duration_evidence["duration_tolerance_seconds"],
+            )
             raise GenerationError("ACE-Step output duration is outside the accepted tolerance")
         output_path = finalize_generated_output(
             output_path,
@@ -171,9 +198,11 @@ def _handle_request(
 def _report_progress(event: Mapping[str, Any], phase: str, sequence: int) -> None:
     """Publish advisory progress without changing the generation outcome."""
 
+    if not isinstance(event.get("id"), str) or not event["id"]:
+        return
     payload = {"kind": _PROGRESS_KIND, "phase": phase, "sequence": sequence}
     try:
-        import runpod  # type: ignore[import-not-found]
+        import runpod
 
         runpod.serverless.progress_update(event, payload)
     except Exception as exc:
@@ -182,6 +211,14 @@ def _report_progress(event: Mapping[str, Any], phase: str, sequence: int) -> Non
             phase,
             type(exc).__name__,
         )
+
+
+def _requires_custom_cover_source(request: WorkerRequest) -> bool:
+    return (
+        request.schema_version == SCHEMA_VERSION
+        and request.task_type == "cover"
+        and request.generation.duration_mode == "custom"
+    )
 
 
 def _build_generation_params(
@@ -541,7 +578,7 @@ def _configured_transfer_host() -> str | None:
 def main() -> None:
     """Initialize process-global models, then start the Runpod SDK loop."""
 
-    import runpod  # type: ignore[import-not-found]
+    import runpod
 
     configure_runtime(initialize_runtime())
     runpod.serverless.start({"handler": handler})
