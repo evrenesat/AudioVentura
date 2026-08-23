@@ -123,12 +123,15 @@ def test_pending_status_uses_unambiguous_deployment_progress() -> None:
     ]
 
 
-def test_pending_status_accepts_live_fractional_pull_progress() -> None:
+@pytest.mark.parametrize("pulling_progress", (0.0, 0.19, 1.0))
+def test_pending_status_accepts_live_fractional_pull_progress(pulling_progress: float) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/instances"):
             return httpx.Response(
                 200,
-                json={"instances": [{"state": "downloading", "pulling_progress": 0.63}]},
+                json={
+                    "instances": [{"state": "downloading", "pulling_progress": pulling_progress}]
+                },
             )
         return httpx.Response(200, json={"id": JOB_ID, "status": "pending"})
 
@@ -137,7 +140,7 @@ def test_pending_status_accepts_live_fractional_pull_progress() -> None:
         status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
         assert (status.phase, status.progress, status.detail_scope) == (
             ProviderPhase.PROVISIONING,
-            0.63,
+            pulling_progress,
             DetailScope.DEPLOYMENT,
         )
         await provider._client.aclose()

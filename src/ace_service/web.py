@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import math
 import os
 import tempfile
 from collections.abc import Mapping
@@ -52,6 +53,7 @@ from ace_service.models import (
     VariationAttempt,
 )
 from ace_service.repository import (
+    PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH,
     cancel_cover_staging,
     confirm_cover_job,
     create_cover_job,
@@ -1084,6 +1086,9 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
     cover_noise_strength = generation.get("cover_noise_strength")
     phase: str | None = None
     phase_observed_at: str | None = None
+    provider_message: str | None = None
+    provider_progress: float | None = None
+    detail_scope: str | None = None
     if job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
         active_attempt = next(
             (item for item in attempts if item.variation_index == (job.current_variation or 1)),
@@ -1101,6 +1106,30 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
                 phase = candidate_phase
                 if isinstance(candidate_observed_at, str) and len(candidate_observed_at) <= 64:
                     phase_observed_at = candidate_observed_at
+                candidate_message = progress.get("provider_message")
+                if (
+                    isinstance(candidate_message, str)
+                    and 0 < len(candidate_message) <= PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH
+                    and all(character.isprintable() for character in candidate_message)
+                ):
+                    provider_message = candidate_message
+                candidate_progress = progress.get("provider_progress")
+                if (
+                    isinstance(candidate_progress, (int, float))
+                    and not isinstance(candidate_progress, bool)
+                    and math.isfinite(float(candidate_progress))
+                    and 0 <= float(candidate_progress) <= 1
+                ):
+                    provider_progress = float(candidate_progress)
+                candidate_scope = progress.get("detail_scope")
+                if isinstance(candidate_scope, str) and candidate_scope in {"job", "deployment"}:
+                    detail_scope = candidate_scope
+    phase_label = _PHASE_LABELS.get(phase) if phase is not None else None
+    phase_detail_label = provider_message or phase_label
+    if phase_detail_label is not None and provider_progress is not None:
+        phase_detail_label += f" — {round(provider_progress * 100)}%"
+    if phase_detail_label is not None and detail_scope == "deployment":
+        phase_detail_label += " · Deployment status (inferred)"
     view = {
         "job_id": job.id,
         "inference_provider": job.inference_provider or "runpod",
@@ -1134,8 +1163,12 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         "completed_at": _iso(job.completed_at),
         "elapsed_seconds": _elapsed(job),
         "phase": phase,
-        "phase_label": _PHASE_LABELS.get(phase) if phase is not None else None,
+        "phase_label": phase_label,
+        "phase_detail_label": phase_detail_label,
         "phase_observed_at": phase_observed_at,
+        "provider_message": provider_message,
+        "provider_progress": provider_progress,
+        "detail_scope": detail_scope,
         "detail_url": _route_path(request, "job_detail", job_id=job.id),
         "status_url": _route_path(request, "job_status", job_id=job.id),
         "confirm_url": _route_path(request, "confirm_cover", job_id=job.id),

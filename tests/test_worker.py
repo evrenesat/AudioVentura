@@ -11,6 +11,7 @@ from ace_service.db import create_database_engine, create_session_factory, initi
 from ace_service.models import JobStatus, JobType, utc_now
 from ace_service.providers.base import (
     CancelOutcome,
+    DetailScope,
     InferenceMode,
     ProviderCapabilities,
     ProviderError,
@@ -65,9 +66,16 @@ class _GenericSalad:
         False,
     )
 
-    def __init__(self, *, error: bool = False, cancel: CancelOutcome = CancelOutcome.TOO_LATE):
+    def __init__(
+        self,
+        *,
+        error: bool = False,
+        cancel: CancelOutcome = CancelOutcome.TOO_LATE,
+        status: ProviderStatus | None = None,
+    ):
         self.error = error
         self.cancel_outcome = cancel
+        self.provider_status = status or ProviderStatus(ProviderPhase.QUEUED)
         self.cancelled: list[str] = []
 
     async def submit(self, request):
@@ -76,7 +84,7 @@ class _GenericSalad:
     async def status(self, ref):
         if self.error:
             raise ProviderError(ProviderErrorKind.TRANSIENT, "status", "temporary")
-        return ProviderStatus(ProviderPhase.QUEUED)
+        return self.provider_status
 
     async def result(self, ref):
         raise AssertionError("queued jobs have no result")
@@ -224,8 +232,66 @@ def test_variation_progress_is_bounded_monotonic_and_terminal_result_replaces_it
     persisted = get_variation_attempt(session, job.id, 1)
     assert persisted is not None
     assert persisted.runpod_result_json["phase"] == "generation"
+    assert "provider_message" not in persisted.runpod_result_json
+    assert "provider_progress" not in persisted.runpod_result_json
+    assert "detail_scope" not in persisted.runpod_result_json
     set_variation_runpod_result(session, persisted.id, {"schema_version": 2, "output": {}})
     assert persisted.runpod_result_json == {"schema_version": 2, "output": {}}
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"provider_message": ""},
+        {"provider_message": "x" * 257},
+        {"provider_message": "Downloading\nworker"},
+        {"provider_progress": -0.01},
+        {"provider_progress": 1.01},
+        {"provider_progress": float("nan")},
+        {"provider_progress": True},
+        {"detail_scope": "machine"},
+    ],
+)
+def test_variation_progress_rejects_malformed_provider_detail(session, details) -> None:
+    job = create_original_job(
+        session,
+        OriginalSongRequest(description="bounded provider progress"),
+        job_id="job-bounded-provider-progress",
+    )
+    _, attempt, _ = prepare_variation_submission(session, job.id, 1)
+
+    with pytest.raises(ValueError):
+        set_variation_progress(session, attempt.id, "worker_initializing", **details)
+
+    assert attempt.provider_result_json is None
+
+
+def test_variation_progress_accepts_provider_progress_boundaries(session) -> None:
+    job = create_original_job(
+        session,
+        OriginalSongRequest(description="provider progress boundaries"),
+        job_id="job-provider-progress-boundaries",
+    )
+    _, attempt, _ = prepare_variation_submission(session, job.id, 1)
+    set_variation_progress(
+        session,
+        attempt.id,
+        "worker_initializing",
+        provider_message="Downloading worker image",
+        provider_progress=0,
+        detail_scope=DetailScope.DEPLOYMENT,
+    )
+    assert attempt.provider_result_json["provider_progress"] == 0.0
+    set_variation_progress(
+        session,
+        attempt.id,
+        "worker_initializing",
+        provider_message="Downloading worker image",
+        provider_progress=1,
+        detail_scope="deployment",
+    )
+    assert attempt.provider_result_json["provider_progress"] == 1.0
+    assert attempt.provider_result_json["detail_scope"] == "deployment"
 
 
 class _PhaseRunpod:
@@ -973,6 +1039,64 @@ def test_salad_deadline_requires_confirmed_pending_cancel(
             job = get_job(session, "salad-deadline")
             assert job is not None and job.status is expected_status
         assert provider.cancelled == ["11111111-1111-4111-8111-111111111111"]
+    finally:
+        engine.dispose()
+
+
+def test_salad_deployment_progress_persists_only_generic_status_detail(settings) -> None:
+    engine, factory = _database(settings)
+    try:
+        with factory() as session:
+            job = create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id="salad-deployment-progress",
+                inference_provider=ProviderName.SALAD,
+            )
+            _, attempt, nonce = prepare_variation_submission(
+                session, job.id, 1, inference_provider=ProviderName.SALAD
+            )
+            persist_variation_provider_job_ref(
+                session,
+                attempt.id,
+                ProviderJobRef(ProviderName.SALAD, "22222222-2222-4222-8222-222222222222"),
+                submission_nonce=nonce,
+            )
+            session.commit()
+        provider = _GenericSalad(
+            status=ProviderStatus(
+                ProviderPhase.PROVISIONING,
+                message="Downloading worker image",
+                progress=0.19,
+                provider_state="pending-private-state",
+                provider_reason="provider-private-reason",
+                detail_scope=DetailScope.DEPLOYMENT,
+            )
+        )
+        worker = ControllerWorker(
+            settings,
+            factory,
+            ProviderRegistry([provider], default=ProviderName.SALAD),
+            poll_interval_seconds=0,
+        )
+
+        _run(worker._poll_variation("salad-deployment-progress", 1))
+
+        with factory() as session:
+            attempt = get_variation_attempt(session, "salad-deployment-progress", 1)
+            assert attempt is not None
+            assert attempt.provider_result_json == {
+                "kind": "audioventura_progress_v1",
+                "phase": "worker_initializing",
+                "sequence": 1,
+                "observed_at": attempt.provider_result_json["observed_at"],
+                "provider_message": "Downloading worker image",
+                "provider_progress": 0.19,
+                "detail_scope": "deployment",
+            }
+            assert attempt.runpod_result_json is None
+            assert "pending-private-state" not in str(attempt.provider_result_json)
+            assert "provider-private-reason" not in str(attempt.provider_result_json)
     finally:
         engine.dispose()
 

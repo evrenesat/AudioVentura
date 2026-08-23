@@ -18,6 +18,12 @@ reports structured source-transfer, generation, finalization, and upload
 phases. Unknown provider internals are represented as waiting rather than an
 invented percentage or sub-step.
 
+The existing progress envelope may also carry a bounded provider-neutral
+message, normalized 0..1 progress, and job/deployment scope. The UI labels
+deployment-scoped details as inferred because Container Engine instance state
+is not an authoritative per-job assignment. Raw provider state, reasons, and
+payloads are not persisted in this status surface.
+
 Provider ownership is durable per job and variation attempt. The controller
 owns deadlines, status uncertainty, cancellation, and cleanup; adapters only
 translate provider APIs into one finite lifecycle. Transient status/result

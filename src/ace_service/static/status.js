@@ -25,7 +25,7 @@
       progressNode.textContent = `${job.completed_variations}/${job.variation_count} variations`;
       if (job.phase && job.phase_label) {
         phaseNode.hidden = false;
-        phaseNode.textContent = `${job.phase_label} · ${job.elapsed_seconds} seconds elapsed`;
+        phaseNode.textContent = `${job.phase_detail_label || job.phase_label} · ${job.elapsed_seconds} seconds elapsed`;
       } else {
         phaseNode.hidden = true;
         phaseNode.textContent = "";

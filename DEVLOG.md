@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-23 (provider status visibility)
+
+- Extended the existing progress envelope with optional bounded provider
+  message, normalized progress, and job/deployment scope; no schema migration
+  was needed and legacy envelopes remain valid.
+- The controller persists only generic status fields. Job detail and polling
+  now show image-pull percentage when available and explicitly label
+  deployment-level lifecycle evidence as inferred, without exposing raw
+  provider state or reasons.
+
 ## 2026-08-23 (custom cover source-duration adaptation)
 
 - The first live Salad acceptance submission reached a ready RTX 3090 and

@@ -48,7 +48,7 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
-from ace_service.providers.base import ProviderJobRef, ProviderName
+from ace_service.providers.base import DetailScope, ProviderJobRef, ProviderName
 from ace_service.schemas import (
     CoverRequest,
     OriginalSongRequest,
@@ -68,6 +68,7 @@ _COVER_STAGING_STATUSES = frozenset({"awaiting_confirmation", "confirmed"})
 _COVER_STAGING_KEYS = frozenset({"status", "staged_at", "confirmed_at"})
 _MISSING = object()
 _PROGRESS_KIND = "audioventura_progress_v1"
+PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH = 256
 _PROGRESS_SEQUENCES = {
     "cloud_wait": 0,
     "worker_initializing": 1,
@@ -983,6 +984,9 @@ def set_variation_progress(
     phase: str,
     *,
     sequence: int | None = None,
+    provider_message: str | None = None,
+    provider_progress: float | None = None,
+    detail_scope: DetailScope | str | None = None,
     now: datetime | None = None,
 ) -> VariationAttempt:
     """Persist one bounded monotonic nonterminal progress envelope."""
@@ -998,6 +1002,24 @@ def set_variation_progress(
     resolved_sequence = expected_sequence if sequence is None else sequence
     if resolved_sequence != expected_sequence:
         raise ValueError("variation progress sequence does not match its phase")
+    if provider_message is not None and (
+        not isinstance(provider_message, str)
+        or not provider_message
+        or len(provider_message) > PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH
+        or any(not character.isprintable() for character in provider_message)
+    ):
+        raise ValueError("provider progress message is invalid")
+    if provider_progress is not None and (
+        isinstance(provider_progress, bool)
+        or not isinstance(provider_progress, (int, float))
+        or not math.isfinite(float(provider_progress))
+        or not 0 <= float(provider_progress) <= 1
+    ):
+        raise ValueError("provider progress is out of bounds")
+    try:
+        resolved_scope = DetailScope(detail_scope).value if detail_scope is not None else None
+    except (TypeError, ValueError) as exc:
+        raise ValueError("provider progress detail scope is invalid") from exc
     current = attempt_provider_result(attempt)
     if isinstance(current, dict) and current.get("kind") == _PROGRESS_KIND:
         current_sequence = current.get("sequence")
@@ -1011,6 +1033,12 @@ def set_variation_progress(
         "sequence": resolved_sequence,
         "observed_at": timestamp.isoformat(),
     }
+    if provider_message is not None:
+        progress["provider_message"] = provider_message
+    if provider_progress is not None:
+        progress["provider_progress"] = float(provider_progress)
+    if resolved_scope is not None:
+        progress["detail_scope"] = resolved_scope
     attempt.provider_result_json = progress
     if attempt.inference_provider in {None, ProviderName.RUNPOD.value}:
         attempt.runpod_result_json = progress

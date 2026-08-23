@@ -455,7 +455,14 @@ class ControllerWorker:
                     if status.phase in {ProviderPhase.PROVISIONING, ProviderPhase.STARTING}
                     else "cloud_wait"
                 )
-                set_variation_progress(session, attempt.id, phase)
+                set_variation_progress(
+                    session,
+                    attempt.id,
+                    phase,
+                    provider_message=status.message,
+                    provider_progress=status.progress,
+                    detail_scope=status.detail_scope,
+                )
                 session.commit()
                 return
             if status.phase is ProviderPhase.RUNNING:
@@ -470,7 +477,14 @@ class ControllerWorker:
                     }
                     else "worker_running"
                 )
-                set_variation_progress(session, attempt.id, phase)
+                set_variation_progress(
+                    session,
+                    attempt.id,
+                    phase,
+                    provider_message=status.message,
+                    provider_progress=status.progress,
+                    detail_scope=status.detail_scope,
+                )
                 transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
                 if job.status is JobStatus.CLOUD_QUEUED:
                     transition_job(session, job.id, JobStatus.GENERATING)

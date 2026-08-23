@@ -1744,15 +1744,84 @@ def test_status_polling_exposes_named_phase_and_elapsed_time(
         body = client.get(f"/jobs/{job_id}/status", auth=_auth(client)).json()
         assert body["phase"] == phase
         assert body["phase_label"] == phase_label
+        assert body["phase_detail_label"] == phase_label
         assert body["phase_observed_at"].endswith("+00:00")
+        assert body["provider_message"] is None
+        assert body["provider_progress"] is None
+        assert body["detail_scope"] is None
         assert body["elapsed_seconds"] >= 0
 
         detail = client.get(f"/jobs/{job_id}", auth=_auth(client))
         assert 'id="job-phase"' in detail.text
         assert phase_label in detail.text
         static_status = client.get("/static/status.js", auth=_auth(client))
-        assert "job.phase_label" in static_status.text
+        assert "job.phase_detail_label || job.phase_label" in static_status.text
         assert "seconds elapsed" in static_status.text
+
+
+def test_status_polling_exposes_inferred_provider_progress(web_app) -> None:
+    app, factory, _ = web_app
+    with factory() as session:
+        job = create_job(
+            session,
+            job_type=JobType.ORIGINAL,
+            inference_provider="salad",
+        )
+        attempt = create_variation_attempt(session, job_id=job.id, variation_index=1)
+        transition_job(session, job.id, JobStatus.CLOUD_QUEUED)
+        transition_variation_attempt(session, attempt.id, JobStatus.CLOUD_QUEUED)
+        set_variation_progress(
+            session,
+            attempt.id,
+            "worker_initializing",
+            provider_message="Downloading worker image",
+            provider_progress=0.19,
+            detail_scope="deployment",
+        )
+        session.commit()
+        job_id = job.id
+
+    with TestClient(app) as client:
+        body = client.get(f"/jobs/{job_id}/status", auth=_auth(client)).json()
+        assert body["phase_label"] == "Cloud worker initializing"
+        assert body["provider_message"] == "Downloading worker image"
+        assert body["provider_progress"] == 0.19
+        assert body["detail_scope"] == "deployment"
+        assert body["phase_detail_label"] == (
+            "Downloading worker image — 19% · Deployment status (inferred)"
+        )
+
+        detail = client.get(f"/jobs/{job_id}", auth=_auth(client))
+        assert "Downloading worker image — 19% · Deployment status (inferred)" in detail.text
+
+
+def test_status_polling_ignores_malformed_persisted_provider_detail(web_app) -> None:
+    app, factory, _ = web_app
+    with factory() as session:
+        job = create_job(session, job_type=JobType.ORIGINAL)
+        attempt = create_variation_attempt(session, job_id=job.id, variation_index=1)
+        transition_job(session, job.id, JobStatus.CLOUD_QUEUED)
+        transition_variation_attempt(session, attempt.id, JobStatus.CLOUD_QUEUED)
+        malformed = {
+            "kind": "audioventura_progress_v1",
+            "phase": "worker_initializing",
+            "sequence": 1,
+            "observed_at": "2026-08-23T00:00:00+00:00",
+            "provider_message": "unsafe\nmessage",
+            "provider_progress": float("nan"),
+            "detail_scope": ["deployment"],
+        }
+        attempt.provider_result_json = malformed
+        attempt.runpod_result_json = malformed
+        session.commit()
+        job_id = job.id
+
+    with TestClient(app) as client:
+        body = client.get(f"/jobs/{job_id}/status", auth=_auth(client)).json()
+        assert body["phase_detail_label"] == "Cloud worker initializing"
+        assert body["provider_message"] is None
+        assert body["provider_progress"] is None
+        assert body["detail_scope"] is None
 
 
 def test_readiness_reports_components_and_preserves_original_availability(settings) -> None:
