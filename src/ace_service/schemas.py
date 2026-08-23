@@ -332,7 +332,9 @@ class CoverRequest(BaseModel):
     seed: StrictInt | None = Field(default=None, ge=0, le=MAX_SEED)
     profile_id: str = FAST_PROFILE_ID
     output_format: OutputFormat = OutputFormat.MP3
-    rights_confirmation: StrictBool
+    # Retained as an internal compatibility invariant for persisted schema-v2
+    # jobs. Browser submissions no longer ask for a redundant confirmation.
+    rights_confirmation: StrictBool = True
 
     @field_validator("youtube_url")
     @classmethod

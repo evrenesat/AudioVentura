@@ -226,6 +226,28 @@ def test_auth_matrix_csrf_and_security_headers(web_app) -> None:
         assert accepted.headers["location"].startswith("/jobs/")
 
 
+def test_generation_forms_explain_controls_and_use_audioventura_brand(web_app) -> None:
+    app, _, _ = web_app
+    with TestClient(app) as client:
+        dashboard = client.get("/", auth=_auth(client))
+        assert ">AudioVentura</a>" in dashboard.text
+        assert "Make something worth replaying." not in dashboard.text
+
+        original = client.get("/create", auth=_auth(client))
+        assert "Choose the provider and model that will generate this song" in original.text
+        assert "Target tempo in beats per minute" in original.text
+        assert "Each variation is a separate paid inference" in original.text
+        assert "FLAC and WAV preserve lossless audio" in original.text
+
+        cover = client.get("/cover", auth=_auth(client))
+        assert "Create a cover" in cover.text
+        assert "Bring a source, change the weather." not in cover.text
+        assert "The home server privately prepares" not in cover.text
+        assert 'name="rights_confirmation"' not in cover.text
+        assert "Start time of the source region to replace" in cover.text
+        assert "numeric duration wording above must agree" in cover.text
+
+
 def test_fal_cassette_rejects_unsupported_original_fields(settings) -> None:
     engine = create_database_engine(settings)
     initialize_database(engine)
@@ -683,7 +705,6 @@ def test_continue_cover_reuses_completed_output_without_youtube_ingest(web_app) 
         form = client.get(f"/jobs/{source_id}/continue", auth=_auth(client))
         assert form.status_code == 200
         assert 'name="youtube_url"' not in form.text
-        assert "YouTube is not contacted again" in form.text
         assert _textarea_value(form.text, "target_style") == "dreamy synthwave"
         assert _textarea_value(form.text, "remix_guidance") == "wider drums"
         assert _textarea_value(form.text, "lyrics") == "replacement words"
@@ -693,7 +714,7 @@ def test_continue_cover_reuses_completed_output_without_youtube_ingest(web_app) 
         assert 'value="60.0"' in _input_tag(form.text, "duration_seconds")
         assert _selected_value(form.text, "variation_count") == "1"
         assert _selected_value(form.text, "output_format") == "mp3"
-        assert "checked" not in _input_tag(form.text, "rights_confirmation")
+        assert 'name="rights_confirmation"' not in form.text
         assert worker.enqueued == []
         token = client.cookies.get("ace_csrf")
         assert token
@@ -711,12 +732,6 @@ def test_continue_cover_reuses_completed_output_without_youtube_ingest(web_app) 
             "seed": "88",
             "output_format": "mp3",
         }
-        missing_rights = client.post("/cover", auth=_auth(client), data=edited)
-        assert missing_rights.status_code == 422
-        assert f'value="{source_id}"' in _input_tag(missing_rights.text, "continue_from_job_id")
-        assert "checked" not in _input_tag(missing_rights.text, "rights_confirmation")
-        assert worker.enqueued == []
-        edited["rights_confirmation"] = "true"
         created_response = client.post(
             "/cover", auth=_auth(client), data=edited, follow_redirects=False
         )
@@ -1128,9 +1143,8 @@ def test_422_rerender_retains_selection_and_shows_matching_estimate(web_app) -> 
             data={
                 "csrf_token": cover_token,
                 "youtube_url": "https://www.youtube.com/watch?v=abc123",
-                "target_style": "dreamy synthwave",
+                "target_style": "ab",
                 "variation_count": "2",
-                # rights_confirmation omitted -> validation error
             },
         )
         assert rejected_cover.status_code == 422
@@ -1139,8 +1153,8 @@ def test_422_rerender_retains_selection_and_shows_matching_estimate(web_app) -> 
         assert worker.enqueued == []
         # A crafted out-of-range count is itself invalid; the 422 re-render
         # must omit the estimate instead of erroring on a missing per-count
-        # label. Count 1 is now the valid default, so a cover rejected only
-        # for the missing rights checkbox keeps its estimate.
+        # label. Count 1 is now the valid default, so a cover rejected for an
+        # unrelated field still keeps its estimate.
         invalid_count = client.post(
             "/cover",
             auth=_auth(client),
@@ -1160,9 +1174,8 @@ def test_422_rerender_retains_selection_and_shows_matching_estimate(web_app) -> 
             data={
                 "csrf_token": cover_token,
                 "youtube_url": "https://www.youtube.com/watch?v=abc123",
-                "target_style": "dreamy synthwave",
+                "target_style": "ab",
                 "variation_count": "1",
-                # rights_confirmation omitted -> validation error
             },
         )
         assert single_default.status_code == 422

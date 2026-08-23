@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +25,7 @@ from .fingerprints import build_runpod_fingerprint_payload
 
 _MAX_BODY = 1_048_576
 _BACKEND_ID = BackendId("runpod/ace-step-v15-xl-turbo")
+_RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class RunpodCapacityManager:
@@ -183,6 +185,28 @@ class RunpodCapacityManager:
                 "RunPod endpoint identity is not unique",
             )
         endpoint = dict(matches[0])
+        embedded_template = endpoint.get("template")
+        if not isinstance(embedded_template, Mapping):
+            raise CapacityError(
+                CapacityErrorKind.INVALID_RESPONSE, "inspect", "RunPod template is invalid"
+            )
+        template_id = embedded_template.get("id")
+        if not isinstance(template_id, str) or not _RESOURCE_ID.fullmatch(template_id):
+            raise CapacityError(
+                CapacityErrorKind.INVALID_RESPONSE, "inspect", "RunPod template ID is invalid"
+            )
+        template = self._mapping(
+            await self._request_json("GET", f"templates/{template_id}", "template inspect"),
+            "template inspect",
+        )
+        if template.get("id") != template_id or endpoint.get("templateId") not in {
+            None,
+            template_id,
+        }:
+            raise CapacityError(
+                CapacityErrorKind.DRIFT, "inspect", "RunPod template identity drifted"
+            )
+        endpoint["template"] = template
         if endpoint.get("workersMax") != 1 or endpoint.get("gpuCount") != 1:
             raise CapacityError(
                 CapacityErrorKind.DRIFT, "inspect", "RunPod capacity maximum is not one"

@@ -795,10 +795,10 @@ class ControllerWorker:
                 and normalized.get("schema_version") == WORKER_SCHEMA_VERSION
             )
             if is_v2:
-                # The initial rights checkbox is the only user authorization
-                # for a new cover. Fail closed when it was not durably
+                # The submitted cover request records this compatibility
+                # invariant automatically. Fail closed when it was not durably
                 # persisted, then consume it in the same transaction that
-                # freezes the prepared source, so no Runpod submission can
+                # freezes the prepared source, so no provider submission can
                 # precede a durable confirmed-staging state.
                 if job.rights_confirmation_at is None:
                     raise HomeIngestError(

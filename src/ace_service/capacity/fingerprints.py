@@ -253,12 +253,11 @@ def build_salad_fingerprint_payload(
         "group": {
             "name": _string(group, "name", operation),
             "display_name": _string(group, "display_name", operation),
-            "autostart_policy": _boolean(group, "autostart_policy", operation),
             "restart_policy": _string(group, "restart_policy", operation),
+            "priority": _string(group, "priority", operation),
             "container": {
                 "image": _string(container, "image", operation),
                 "image_caching": _boolean(container, "image_caching", operation),
-                "priority": _string(container, "priority", operation),
                 "resources": resources_payload,
                 "environment_variables": environment,
             },

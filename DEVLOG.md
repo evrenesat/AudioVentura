@@ -1,5 +1,16 @@
 # Development Log
 
+## 2026-08-23 (production backend and generation-form corrections)
+
+- Corrected managed-capacity inspection to fetch RunPod's complete template
+  record and to normalize Salad's readable group-level priority while excluding
+  its consumed create-time autostart action.
+- Pinned Salad's reviewed production organization, image identity, and five GPU
+  class IDs after independently matching them to the tracked GPU names.
+- Added contextual help for every visible generation control, exposed the
+  AudioVentura brand, removed redundant cover authorization UI, and deleted the
+  requested promotional copy.
+
 ## 2026-08-23 (Fal recovery and endpoint-contract review fixes)
 
 - Retained nonterminal Fal backends across enabled-list changes while keeping

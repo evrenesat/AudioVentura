@@ -27,14 +27,13 @@ def test_runpod_capacity_patches_only_workers_min() -> None:
         "flashboot": True,
         "template": {
             "id": "template",
+            # Endpoint listings contain only this partial shape in production.
             "name": "AudioVentura worker",
             "category": "NVIDIA",
-            "imageName": "ghcr.io/example",
             "containerDiskInGb": 40,
             "ports": ["8888/http"],
             "isServerless": True,
             "readme": "",
-            "volumeMountPath": "/workspace",
             "env": {
                 "ACE_STEP_COMMIT": "dce621408bee8c31b4fcf4811682eb9359e1bc94",
                 "ACE_STEP_TAG": "v0.1.8",
@@ -53,6 +52,11 @@ def test_runpod_capacity_patches_only_workers_min() -> None:
             },
         },
     }
+    full_template = {
+        **endpoint["template"],
+        "imageName": "ghcr.io/example",
+        "volumeMountPath": "/workspace",
+    }
     patches: list[dict[str, object]] = []
     inspect_queries: list[dict[str, str]] = []
 
@@ -60,6 +64,8 @@ def test_runpod_capacity_patches_only_workers_min() -> None:
         if request.url.path.endswith("/endpoints"):
             inspect_queries.append(dict(request.url.params))
             return httpx.Response(200, json=[endpoint])
+        if request.url.path.endswith("/templates/template"):
+            return httpx.Response(200, json=full_template)
         if request.url.path.endswith("/health"):
             return httpx.Response(
                 200,
@@ -81,7 +87,8 @@ def test_runpod_capacity_patches_only_workers_min() -> None:
         base_url="https://rest.runpod.test/v1/", transport=httpx.MockTransport(handler)
     )
     manager = RunpodCapacityManager("secret", "endpoint", "0" * 64, http_client=client)
-    manager.expected_fingerprint = manager._fingerprint(endpoint)
+    fingerprint_endpoint = {**endpoint, "template": full_template}
+    manager.expected_fingerprint = manager._fingerprint(fingerprint_endpoint)
     before = asyncio.run(manager.inspect())
     after = asyncio.run(manager.retain_one(before))
     assert after.configured_floor == 1

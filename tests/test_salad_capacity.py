@@ -19,11 +19,11 @@ def test_salad_capacity_inspection_is_fingerprint_pinned() -> None:
         "display_name": "AudioVentura ACE-Step",
         "autostart_policy": True,
         "restart_policy": "always",
+        "priority": "medium",
         "replicas": 0,
         "container": {
             "image": "ghcr.io/example@sha256:" + "a" * 64,
             "image_caching": True,
-            "priority": "medium",
             "resources": {
                 "cpu": 8,
                 "memory": 32768,

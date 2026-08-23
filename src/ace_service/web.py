@@ -1520,7 +1520,7 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
         "variation_count": _required_int(fields.get("variation_count", "1")),
         "seed": _optional_int(fields.get("seed")),
         "output_format": fields.get("output_format", OutputFormat.MP3.value),
-        "rights_confirmation": fields.get("rights_confirmation") in {"1", "true", "on", "yes"},
+        "rights_confirmation": True,
     }
 
 
@@ -1678,7 +1678,6 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         ),
         "seed": generation["seed"],
         "output_format": generation["output_format"],
-        "rights_confirmation": "",
     }
 
 
