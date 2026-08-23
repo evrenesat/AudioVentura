@@ -1,5 +1,17 @@
 # Development Log
 
+## 2026-08-23 (Salad live acceptance complete)
+
+- Completed a 60-second cover and a local-output continuation on the immutable
+  Salad RTX 3090 worker. The clean warm continuation finished application-side
+  in 13.5 seconds and provider-side in 10.0 seconds; output duration, digest,
+  identity, authenticated playback, and download checks passed.
+- Measured approximately 80-minute and 47.5-minute pulls of the 29 GB image on
+  two cold nodes. Interactive use therefore opens a guarded one-replica
+  session before submission and retains it across related edits.
+- After queue work became terminal, guarded shutdown checked five recent jobs,
+  restored minimum/desired replicas to zero, and observed no instances.
+
 ## 2026-08-23 (Salad guarded-session pagination compatibility)
 
 - Corrected the guarded shutdown's recent-jobs query to Salad's live

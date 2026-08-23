@@ -12,10 +12,21 @@ instances endpoint stayed empty, but system logs later proved allocation,
 image download, and `Instance Starting` at 09:58. Operator cancellation at
 10:01 was premature.
 
-Live acceptance is still in progress and is not yet complete. The current
-manual workflow keeps one worker available across an interactive cover and its
-continuation, then explicitly restores zero-at-rest after all queue work is
-terminal.
+Live acceptance is complete. The first 29 GB image pull took about 80 minutes;
+a replacement node took about 47.5 minutes to pull the same image. Those cold
+paths are not interactive. Once ready, the first 60-second cover completed its
+Salad job in about 12 seconds. After enabling an interactive session and fixing
+a controller-only continuation payload leak, a fresh continuation completed
+application-side in 13.5 seconds and provider-side in 10.0 seconds on an RTX
+3090. Its authenticated playback/download checks passed, and the output was a
+60-second MP3 within tolerance.
+
+The guarded session stop then checked five recent terminal jobs, restored
+`min_replicas=0` and desired replicas zero, and observed an empty instance list
+at 15:42:58 UTC. Salad is therefore usable for interactive AudioVentura work
+when capacity is prewarmed and retained for the editing session. Raw
+scale-to-zero submission is supported but does not meet a five-minute latency
+target with this image.
 
 ## Runtime shape
 

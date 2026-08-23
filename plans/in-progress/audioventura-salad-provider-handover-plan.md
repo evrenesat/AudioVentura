@@ -9,33 +9,34 @@ and controller deployment are complete. The deployed worker image is
 `audioventura-ace-step-v2` and queue `audioventura-jobs` are configured with
 the planned 0→1 autoscaler and five compatible GPU classes.
 
-Live acceptance is blocked by SaladCloud's capacity/control plane:
+Live acceptance is complete:
 
-- The first application submission reached an RTX 3090 and exposed a real
-  product mismatch: pinned ACE-Step locks cover duration to source duration.
-  The shared worker now streams/repeats/truncates custom cover sources to the
-  exact requested duration; focused and non-expired repository suites pass and
-  the corrected image is deployed.
-- The replacement acceptance job `69252486-2c26-4a79-80d3-284811ea0766`
-  persisted provider job `5640ff12-c5e1-454f-8bd4-80d0bed0bc13` at
-  `2026-08-23T09:06:46Z`. It remained pending for 54 minutes 23 seconds.
-  Batch priority received 30 minutes, low more than ten minutes, and medium
-  more than ten minutes. Desired replicas stayed one, but the instance API
-  never returned a machine and the job never received a dispatch event.
-- The exact pending provider job was cancelled at `2026-08-23T10:01:10Z` so it
-  could not incur later cost. Queue depth reached zero, but Salad did not
-  downscale desired replicas; `replicas=0` was restored explicitly. There are
-  no instances and no pending deployment change.
-- The continuation was not submitted. Two total application submissions were
-  used across live validation (the pre-fix generation and this allocation
-  probe), leaving eight under the owner's ten-test authorization.
+- Salad system logs disproved the earlier no-allocation conclusion. Manual
+  capacity start allocated immediately; the first complete 29 GB image pull
+  took about 80 minutes and a second node took about 47.5 minutes. Cold
+  scale-to-zero therefore remains outside the five-minute interactive target.
+- The first corrected 60-second cover completed provider execution in about
+  12 seconds on an RTX 3090 and produced a valid duration-bounded MP3.
+- The autoscaler removed that worker between the cover and continuation under
+  `min_replicas=0`. A guarded interactive session now holds one replica across
+  related work and restores zero only after bounded idle proof.
+- The interrupted continuation exposed controller-only `continuation_source`
+  provenance in the strict worker payload. Product commit `41643ca` retains
+  that provenance durably but projects only schema-v2 worker fields to both
+  providers; no worker-image rebuild was required.
+- On the retained ready worker, application job
+  `239c00b9-cbc8-46aa-a24a-894d697cc80b` and Salad job
+  `37f050f0-e1d3-4758-959f-06edc303bb10` completed in 13.5 and 10.0 seconds,
+  respectively. The 60-second MP3 was 1,440,576 bytes with SHA-256
+  `19f9537a0c38de1aa22d97f61c30ad5083e0978184f19ba88f059a15185e4000`;
+  authenticated byte-range playback/download checks passed.
+- Guarded shutdown checked five recent terminal jobs, restored
+  `min_replicas=0` and `replicas=0`, and observed queue length zero plus an
+  empty instance list at `2026-08-23T15:42:58Z`.
 
-Do not submit another paid fixture until Salad can demonstrate that this exact
-group can allocate an instance. Resume by checking the existing queue/group,
-opening or following a Salad support incident with the sanitized IDs and UTC
-timeline above, and requiring `replicas=0`, empty queue, and zero instances
-before a fresh exact two-submission acceptance run. The final acceptance
-criteria in Section 10 remain unmet.
+The decision is to retain Salad as the first alternate provider using explicit
+interactive prewarm/retention. Continuous scale-to-zero remains suitable for
+background work, not an immediate cover-song interaction with this image.
 
 ## 1. Objective and fixed starting point
 
