@@ -315,7 +315,9 @@ class CoverRequest(BaseModel):
 
     youtube_url: str = Field(min_length=1, max_length=2048)
     target_style: str = Field(min_length=3, max_length=4000)
+    source_style: str | None = Field(default=None, min_length=1, max_length=4000)
     remix_guidance: str | None = Field(default=None, max_length=4000)
+    source_lyrics: str | None = Field(default=None, max_length=20_000)
     lyrics: str | None = Field(default=None, max_length=20_000)
     audio_cover_strength: float | None = None
     cover_noise_strength: float | None = None
@@ -512,6 +514,10 @@ class CoverRequest(BaseModel):
                 if value is not None
             }
         )
+        if self.source_style is not None:
+            generation["source_style"] = self.source_style
+        if self.source_lyrics is not None:
+            generation["source_lyrics"] = self.source_lyrics
         return {
             "schema_version": WORKER_SCHEMA_VERSION,
             "task_type": "cover",

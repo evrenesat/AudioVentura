@@ -29,12 +29,21 @@ hybrid music/SFX entries remain omitted until an operator intentionally allows
 refuses missing credentials, invalid catalog paths, short retention, and
 transfer lifetimes that cannot cover the inference deadline plus recovery time.
 
+Disabling an ID removes it from new-job selectors only. The controller unions
+the enabled list with backend IDs owned by nonterminal jobs, keeps those
+adapters available for exact-request recovery, and requires `FAL_KEY` while
+any retained Fal request is nonterminal.
+
 ## Request and result boundary
 
 The Original selector exposes enabled reviewed text-to-music entries. Cover /
 Remix exposes compatible audio transform, inpaint, and outpaint entries. A job
 stores the exact backend and catalog snapshot before it enters the queue. One
 backend owns every variation in that job; there is no automatic fallback.
+
+ACE-Step audio transforms ask for the source style/description and optionally
+the source lyrics; inpaint regions and outpaint extensions are checked again
+against the measured source before a paid submission.
 
 The controller submits to `https://queue.fal.run/<reviewed-endpoint-id>` with
 `sync_mode=false`, `X-Fal-Store-IO: 0`, no-fallback, private lifecycle, and

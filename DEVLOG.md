@@ -1,5 +1,12 @@
 # Development Log
 
+## 2026-08-23 (Fal recovery and endpoint-contract review fixes)
+
+- Retained nonterminal Fal backends across enabled-list changes while keeping
+  them out of new-job selectors, and failed closed if `FAL_KEY` was removed.
+- Made post-deadline Fal 404s terminal, canonicalized OpenAPI audit hashes, and
+  added server/source-duration edit validation plus ACE-Step source fields.
+
 ## 2026-08-23 (Salad live acceptance complete)
 
 - Completed a 60-second cover and a local-output continuation on the immutable

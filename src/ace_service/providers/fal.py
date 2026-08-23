@@ -412,7 +412,7 @@ class FalProvider:
             frozenset(),
             True,
             True,
-            False,
+            True,
             descriptor.backend_id,
             descriptor.operation,
             descriptor.media_kind,

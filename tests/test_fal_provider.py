@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from ace_service.providers.base import (
+    BackendOperation,
     GenerationRequest,
     InferenceMode,
     InferenceRequest,
@@ -15,6 +17,9 @@ from ace_service.providers.base import (
 )
 from ace_service.providers.fal import FalProvider, FalQueueTransport, build_fal_payload
 from ace_service.providers.fal_catalog import load_catalog
+from ace_service.providers.registry import BackendRegistry
+from ace_service.schemas import CoverRequest
+from ace_service.web import _select_backend
 
 
 def _request(
@@ -107,3 +112,60 @@ def test_fal_payload_maps_ace_audio_fields_and_never_accepts_bytes() -> None:
                 source={"audio_url": "https://controller.test/source.mp3"},
             ),
         )
+
+
+def test_cover_contract_persists_ace_source_style_and_source_lyrics() -> None:
+    request = CoverRequest(
+        youtube_url="https://youtu.be/source123",
+        target_style="bright synthwave",
+        source_style="original acoustic ballad",
+        source_lyrics="old words",
+        rights_confirmation=True,
+    )
+    generation = request.to_normalized_request_json()["generation"]
+    assert generation["source_style"] == "original acoustic ballad"
+    assert generation["source_lyrics"] == "old words"
+
+
+def test_edit_backend_invariants_are_server_side() -> None:
+    catalog = load_catalog()
+    app = SimpleNamespace(state=SimpleNamespace())
+    client = httpx.AsyncClient()
+    try:
+        inpaint = FalProvider(
+            catalog.by_backend_id("fal/fal-ai/ace-step/audio-inpaint"),
+            FalQueueTransport("test-key", http_client=client),
+        )
+        app.state.provider_registry = BackendRegistry([inpaint])
+        with pytest.raises(ValueError, match="inpaint region"):
+            _select_backend(
+                app,
+                {
+                    "backend": "fal/fal-ai/ace-step/audio-inpaint",
+                    "target_style": "repair the chorus",
+                    "start_seconds": "50",
+                    "end_seconds": "10",
+                    "output_format": "wav",
+                },
+                BackendOperation.AUDIO_INPAINT,
+            )
+
+        outpaint = FalProvider(
+            catalog.by_backend_id("fal/fal-ai/ace-step/audio-outpaint"),
+            FalQueueTransport("test-key", http_client=client),
+        )
+        app.state.provider_registry = BackendRegistry([outpaint])
+        with pytest.raises(ValueError, match="outpaint"):
+            _select_backend(
+                app,
+                {
+                    "backend": "fal/fal-ai/ace-step/audio-outpaint",
+                    "target_style": "extend the ending",
+                    "before_seconds": "0",
+                    "after_seconds": "0",
+                    "output_format": "wav",
+                },
+                BackendOperation.AUDIO_OUTPAINT,
+            )
+    finally:
+        asyncio.run(client.aclose())

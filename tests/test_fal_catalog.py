@@ -59,5 +59,73 @@ def test_audit_uses_normalized_schema_fixture_without_mutating_catalog() -> None
         result = audit_catalog(catalog, client=client)
 
     assert result["schema_changed"] == []
+
+
+def _openapi_fixture(descriptor) -> dict[str, object]:
+    properties: dict[str, object] = {}
+    required: list[str] = []
+    for policy in descriptor.fields.values():
+        field_type = "string" if policy.type == "url" else policy.type
+        value: dict[str, object] = {"type": field_type}
+        if policy.type == "url":
+            value["format"] = "uri"
+        if policy.minimum is not None:
+            value["minimum"] = policy.minimum
+        if policy.maximum is not None:
+            value["maximum"] = policy.maximum
+        if policy.choices:
+            value["enum"] = list(policy.choices)
+        properties[policy.fal_name] = value
+        if policy.required:
+            required.append(policy.fal_name)
+
+    response: dict[str, object] = {"type": "object", "properties": {}}
+    current = response["properties"]
+    assert isinstance(current, dict)
+    parts = descriptor.output.result_path.split(".")
+    for part in parts[:-1]:
+        nested: dict[str, object] = {"type": "object", "properties": {}}
+        current[part] = nested
+        nested_properties = nested["properties"]
+        assert isinstance(nested_properties, dict)
+        current = nested_properties
+    current[parts[-1]] = {"type": "string", "format": "uri"}
+    request_schema: dict[str, object] = {"type": "object", "properties": properties}
+    if required:
+        request_schema["required"] = required
+    return {
+        "openapi": "3.0.0",
+        "paths": {
+            "/": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": request_schema}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": response}}}},
+                }
+            }
+        },
+    }
+
+
+def test_audit_normalizes_live_openapi_shape_before_fingerprinting() -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "endpoint_id": descriptor.endpoint_id,
+                        "openapi": _openapi_fixture(descriptor),
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client)
+    assert result["schema_changed"] == []
     assert result["unclassified"] == []
     assert result["removed"]

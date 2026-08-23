@@ -10,6 +10,7 @@ import pytest
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.models import JobStatus, JobType, utc_now
 from ace_service.providers.base import (
+    BackendOperation,
     CancelOutcome,
     DetailScope,
     InferenceMode,
@@ -95,6 +96,35 @@ class _GenericSalad:
 
     async def health(self):
         return ProviderHealth(True, "ready")
+
+
+class _ExpiredFal:
+    capabilities = ProviderCapabilities(
+        ProviderName.FAL,
+        frozenset({InferenceMode.PROMPT_TO_AUDIO}),
+        frozenset(),
+        frozenset(),
+        True,
+        True,
+        True,
+        backend_id="fal/cassetteai/music-generator",
+        operation=BackendOperation.TEXT_TO_MUSIC,
+    )
+
+    def __init__(self) -> None:
+        self.cancel_calls = 0
+
+    async def status(self, ref):
+        raise ProviderError(
+            ProviderErrorKind.NOT_FOUND,
+            "status",
+            "Fal request not found",
+            status_code=404,
+        )
+
+    async def cancel(self, ref):
+        self.cancel_calls += 1
+        return CancelOutcome.TOO_LATE
 
 
 class _FakeRunpod:
@@ -1039,6 +1069,58 @@ def test_salad_deadline_requires_confirmed_pending_cancel(
             job = get_job(session, "salad-deadline")
             assert job is not None and job.status is expected_status
         assert provider.cancelled == ["11111111-1111-4111-8111-111111111111"]
+    finally:
+        engine.dispose()
+
+
+def test_fal_not_found_after_deadline_is_terminal_without_cancel(settings) -> None:
+    settings.inference_job_timeout_seconds = 1
+    engine, factory = _database(settings)
+    try:
+        backend_id = "fal/cassetteai/music-generator"
+        with factory() as session:
+            job = create_job(
+                session,
+                job_type=JobType.ORIGINAL,
+                job_id="fal-deadline",
+                inference_provider=ProviderName.FAL,
+                inference_backend=backend_id,
+                normalized_request_json={"prompt": "expired"},
+                backend_snapshot_json={
+                    "backend_id": backend_id,
+                    "provider": ProviderName.FAL.value,
+                },
+            )
+            _, attempt, nonce = prepare_variation_submission(
+                session,
+                job.id,
+                1,
+                inference_provider=ProviderName.FAL,
+                inference_backend=backend_id,
+            )
+            persist_variation_provider_job_ref(
+                session,
+                attempt.id,
+                ProviderJobRef(ProviderName.FAL, "fal-expired", backend_id),
+                submission_nonce=nonce,
+            )
+            attempt.started_at = utc_now() - timedelta(seconds=2)
+            session.commit()
+        provider = _ExpiredFal()
+        worker = ControllerWorker(
+            settings,
+            factory,
+            ProviderRegistry([provider]),
+            poll_interval_seconds=0,
+        )
+        _run(worker._poll_variation("fal-deadline", 1))
+        with factory() as session:
+            job = get_job(session, "fal-deadline")
+            attempt = get_variation_attempt(session, "fal-deadline", 1)
+            assert job is not None and job.status is JobStatus.FAILED
+            assert job.error_code == "provider_job_expired"
+            assert attempt is not None and attempt.status is JobStatus.FAILED
+        assert provider.cancel_calls == 0
     finally:
         engine.dispose()
 

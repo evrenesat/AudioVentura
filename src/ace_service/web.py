@@ -448,19 +448,48 @@ def _select_backend(
         "prompt": ("description", "target_style"),
         "duration": ("duration_seconds",),
         "lyrics": ("lyrics",),
+        "source_lyrics": ("source_lyrics",),
         "start_seconds": ("start_seconds",),
         "end_seconds": ("end_seconds",),
         "before_seconds": ("before_seconds",),
         "after_seconds": ("after_seconds",),
     }
     for field_name, policy in choice["fields"].items():
-        if not policy.get("required") or field_name in {"source_audio", "source_style"}:
+        if not policy.get("required") or field_name == "source_audio":
             continue
         aliases = form_aliases.get(field_name, (field_name,))
         if not any(fields.get(alias) not in (None, "") for alias in aliases):
             raise ValueError(
                 f"{policy.get('ui_name', field_name)} is required for the selected backend"
             )
+    if choice["operation"] == BackendOperation.AUDIO_INPAINT.value:
+        start = _backend_form_number(fields, "start_seconds")
+        end = _backend_form_number(fields, "end_seconds")
+        if start is None or end is None or not 0 <= start < end:
+            raise ValueError("inpaint region must satisfy 0 <= start_seconds < end_seconds")
+    elif choice["operation"] == BackendOperation.AUDIO_OUTPAINT.value:
+        before = _backend_form_number(fields, "before_seconds") or 0.0
+        after = _backend_form_number(fields, "after_seconds") or 0.0
+        if before <= 0 and after <= 0:
+            raise ValueError("outpaint must extend before or after the source")
+    for field_name, policy in choice["fields"].items():
+        aliases = form_aliases.get(field_name, (field_name,))
+        if policy.get("type") not in {"number", "integer"}:
+            continue
+        raw_name = next((alias for alias in aliases if fields.get(alias) not in (None, "")), None)
+        if raw_name is None:
+            continue
+        value = _backend_form_number(fields, raw_name)
+        if value is None:
+            continue
+        if policy.get("type") == "integer" and not value.is_integer():
+            raise ValueError(f"{policy.get('ui_name', field_name)} must be an integer")
+        minimum = policy.get("minimum")
+        maximum = policy.get("maximum")
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{policy.get('ui_name', field_name)} is below its minimum")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{policy.get('ui_name', field_name)} is above its maximum")
     for field_name in (
         "negative_prompt",
         "guidance_scale",
@@ -471,6 +500,8 @@ def _select_backend(
         "end_seconds",
         "before_seconds",
         "after_seconds",
+        "source_style",
+        "source_lyrics",
     ):
         if fields.get(field_name) not in (None, "") and field_name not in allowed_advanced:
             raise ValueError(f"{field_name} is not supported by the selected backend")
@@ -1157,7 +1188,9 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
     return {
         "youtube_url": fields.get("youtube_url", ""),
         "target_style": fields.get("target_style", ""),
+        "source_style": fields.get("source_style") or None,
         "remix_guidance": fields.get("remix_guidance") or None,
+        "source_lyrics": fields.get("source_lyrics") or None,
         "lyrics": fields.get("lyrics") or None,
         "profile_id": fields.get("profile_id", "fast-beta-v1"),
         "audio_cover_strength": _optional_number(fields.get("audio_cover_strength"), default=0.65),
@@ -1297,7 +1330,9 @@ def _continuation_form(job: Job) -> dict[str, Any]:
     request_values = {
         "youtube_url": job.source_url,
         "target_style": generation["target_style"],
+        "source_style": generation.get("source_style"),
         "remix_guidance": generation["remix_guidance"],
+        "source_lyrics": generation.get("source_lyrics"),
         "lyrics": generation["lyrics"],
         "audio_cover_strength": generation["audio_cover_strength"],
         "cover_noise_strength": generation["cover_noise_strength"],
@@ -1316,7 +1351,9 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         **common,
         "youtube_url": job.source_url,
         "target_style": generation["target_style"],
+        "source_style": generation.get("source_style"),
         "remix_guidance": generation["remix_guidance"],
+        "source_lyrics": generation.get("source_lyrics"),
         "lyrics": generation["lyrics"],
         "audio_cover_strength": generation["audio_cover_strength"],
         "cover_noise_strength": generation["cover_noise_strength"],
@@ -1337,6 +1374,19 @@ def _optional_number(value: str | None, *, default: float | None = None) -> floa
         return float(value)
     except ValueError:
         return value  # type: ignore[return-value]
+
+
+def _backend_form_number(fields: Mapping[str, str], name: str) -> float | None:
+    raw = fields.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    return value
 
 
 def _optional_int(value: str | None) -> int | str | None:

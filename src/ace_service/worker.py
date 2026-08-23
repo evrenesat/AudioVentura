@@ -34,6 +34,7 @@ from ace_service.models import (
 )
 from ace_service.providers.base import (
     BackendId,
+    BackendOperation,
     CancelOutcome,
     GenerationRequest,
     InferenceMode,
@@ -319,6 +320,15 @@ class ControllerWorker:
                 raise ValueError("job is missing")
             provider_name = job_provider(job)
             backend_id = job_backend(job)
+            provider = self.provider_registry.get_persisted(backend_id)
+            if isinstance(provider, FalProvider):
+                if job.job_type is JobType.COVER and (
+                    not job.source_sha256 or not job.source_byte_size
+                ):
+                    raise CoverSourceError(
+                        "prepared_source_invalid", "cover source metadata is incomplete"
+                    )
+                self._validate_fal_edit_request(provider, job)
             job, attempt, nonce = prepare_variation_submission(
                 session,
                 job_id,
@@ -327,7 +337,6 @@ class ControllerWorker:
                 inference_backend=backend_id,
             )
             payload = dict(self.payload_builder(job, attempt))
-            provider = self.provider_registry.get_persisted(backend_id)
             fal_source: dict[str, Any] | None = None
             if not isinstance(provider, FalProvider):
                 output_path = self._output_relative_path(job, attempt.variation_index)
@@ -1196,6 +1205,57 @@ class ControllerWorker:
                 features.add(feature)
         return frozenset(features)
 
+    @staticmethod
+    def _validate_fal_edit_request(provider: FalProvider, job: Job) -> None:
+        """Recheck cross-field edits after source preparation and before submit."""
+
+        normalized = job.normalized_request_json
+        if not isinstance(normalized, Mapping):
+            return
+        contract = normalized.get("generation_request")
+        generation = contract if isinstance(contract, Mapping) else normalized.get("generation")
+        if not isinstance(generation, Mapping):
+            return
+        fields_value = generation.get("fields")
+        fields = dict(generation)
+        if isinstance(fields_value, Mapping):
+            fields.update(fields_value)
+        operation = provider.descriptor.operation
+
+        def number(name: str) -> float | None:
+            value = fields.get(name)
+            if value is None and name == "duration":
+                value = fields.get("duration_seconds")
+            if value is None:
+                return None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be numeric")
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError(f"{name} must be finite")
+            return result
+
+        if operation is BackendOperation.AUDIO_INPAINT:
+            start = number("start_seconds")
+            end = number("end_seconds")
+            if start is None or end is None or not 0 <= start < end:
+                raise ValueError("inpaint region must satisfy 0 <= start_seconds < end_seconds")
+            if job.source_duration is None or end > job.source_duration:
+                raise ValueError("inpaint region exceeds the measured source duration")
+        elif operation is BackendOperation.AUDIO_OUTPAINT:
+            before = number("before_seconds") or 0.0
+            after = number("after_seconds") or 0.0
+            if before <= 0 and after <= 0:
+                raise ValueError("outpaint must extend before or after the source")
+        for name, policy in provider.descriptor.fields.items():
+            value = number(name)
+            if value is None:
+                continue
+            if policy.minimum is not None and value < policy.minimum:
+                raise ValueError(f"{policy.ui_name} is below its minimum")
+            if policy.maximum is not None and value > policy.maximum:
+                raise ValueError(f"{policy.ui_name} is above its maximum")
+
     def _incoming_source_is_valid(self, job_id: str) -> bool:
         with self.session_factory() as session:
             job = get_job(session, job_id)
@@ -1305,8 +1365,6 @@ class ControllerWorker:
         if not isinstance(output_format, str) or output_format not in {"mp3", "flac", "wav"}:
             output_format = job.output_format.value
         source_style = generation.get("source_style")
-        if job.job_type is JobType.COVER and not isinstance(source_style, str):
-            source_style = "original audio"
         return GenerationRequest(
             mode=mode,
             prompt=(
@@ -1336,6 +1394,7 @@ class ControllerWorker:
                     "before_seconds",
                     "after_seconds",
                     "strength",
+                    "source_lyrics",
                 )
                 if generation.get(key) is not None
             }

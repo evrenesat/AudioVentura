@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from fastapi import FastAPI
+from sqlalchemy import select
 
 from ace_service.cleanup import cleanup_controller, cleanup_loop_interval
 from ace_service.config import ServiceSettings
@@ -22,6 +23,7 @@ from ace_service.db import (
     initialize_database,
 )
 from ace_service.home_ingest import HomeIngestClient
+from ace_service.models import Job, JobStatus
 from ace_service.providers.base import BackendOperation, ProviderName
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
@@ -33,6 +35,19 @@ from ace_service.web import register_web_routes
 from ace_service.worker import ControllerWorker, RunpodWorkerClient
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _nonterminal_backend_ids(session_factory: SessionFactory) -> set[str]:
+    """Return persisted backend identities that must remain recoverable."""
+
+    with session_factory() as session:
+        values = session.scalars(
+            select(Job.inference_backend).where(
+                Job.inference_backend.is_not(None),
+                Job.status.not_in((JobStatus.COMPLETED, JobStatus.FAILED)),
+            )
+        )
+        return {str(value) for value in values if value}
 
 
 async def _periodic_cleanup(app: FastAPI) -> None:
@@ -130,9 +145,12 @@ def create_app(
     if provider_registry is None:
         providers: list[Any] = []
         enabled = set(resolved_settings.enabled_backend_ids)
-        if runpod_client is not None:
+        persisted = _nonterminal_backend_ids(cast(SessionFactory, session_factory))
+        configured = enabled | persisted
+        selectable = set(enabled)
+        if runpod_client is not None and "runpod/ace-step-v15-xl-turbo" in configured:
             providers.append(RunpodProvider(cast(Any, runpod_client)))
-        elif "runpod/ace-step-v15-xl-turbo" in enabled or all(
+        elif "runpod/ace-step-v15-xl-turbo" in configured or all(
             value.strip().lower() not in {"", "change-me", "changeme", "replace-me", "replace_me"}
             for value in (
                 resolved_settings.runpod_api_key,
@@ -141,7 +159,7 @@ def create_app(
         ):
             resolved_runpod = RunpodClient.from_settings(resolved_settings)
             providers.append(RunpodProvider(cast(Any, resolved_runpod)))
-        if "salad/ace-step-v15-xl-turbo" in enabled:
+        if "salad/ace-step-v15-xl-turbo" in configured:
             assert resolved_settings.salad_api_key is not None
             assert resolved_settings.salad_organization is not None
             assert resolved_settings.salad_project is not None
@@ -158,7 +176,9 @@ def create_app(
                     pool_timeout=resolved_settings.salad_pool_timeout_seconds,
                 )
             )
-        if any(item.startswith("fal/") for item in enabled):
+        if any(item.startswith("fal/") for item in configured):
+            if not resolved_settings.fal_key:
+                raise ValueError("FAL_KEY is required while a persisted Fal job is nonterminal")
             catalog = load_catalog(resolved_settings.fal_catalog_path)
             transport = FalQueueTransport(
                 resolved_settings.fal_key or "",
@@ -168,12 +188,18 @@ def create_app(
                 write_timeout=resolved_settings.fal_write_timeout_seconds,
                 pool_timeout=resolved_settings.fal_pool_timeout_seconds,
             )
-            for backend_id in enabled:
+            for backend_id in configured:
                 if not backend_id.startswith("fal/"):
                     continue
                 descriptor = catalog.by_backend_id(backend_id)
-                if descriptor.media_kind.value in resolved_settings.fal_allowed_media_kind_values:
+                if (
+                    backend_id in persisted
+                    or descriptor.media_kind.value
+                    in resolved_settings.fal_allowed_media_kind_values
+                ):
                     providers.append(FalProvider(descriptor, transport))
+                elif backend_id in selectable:
+                    selectable.remove(backend_id)
         configured_provider_names = {provider.capabilities.name for provider in providers}
         legacy_default: ProviderName | None = ProviderName(resolved_settings.inference_provider)
         if legacy_default not in configured_provider_names:
@@ -185,6 +211,7 @@ def create_app(
                 BackendOperation.TEXT_TO_MUSIC.value: resolved_settings.default_original_backend,
                 BackendOperation.AUDIO_TRANSFORM.value: resolved_settings.default_cover_backend,
             },
+            selectable_backends=selectable,
         )
     resolved_home = home_ingest_client or HomeIngestClient(resolved_settings)
     resolved_pricing = None

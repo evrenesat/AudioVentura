@@ -26,11 +26,13 @@
   {% endif %}
   <label for="target_style">Target style <span class="required">required</span></label>
   <textarea id="target_style" name="target_style" required maxlength="4000" rows="4">{{ form.get('target_style', '') }}</textarea>
+  <div data-backend-field="source_style"><label for="source_style">Source style / description</label><textarea id="source_style" name="source_style" maxlength="4000" rows="3">{{ form.get('source_style', '') }}</textarea><p class="hint">Describe the source audio’s existing style for endpoints that require it.</p></div>
   <label for="remix_guidance">Remix guidance <span class="hint">optional</span></label>
   <textarea id="remix_guidance" name="remix_guidance" maxlength="4000" rows="3">{{ form.get('remix_guidance', '') }}</textarea>
   <p class="hint">Style and guidance are joined deterministically; the final caption must fit 511 characters. Numeric duration language must match the selected custom duration.</p>
   <label for="lyrics">Replacement lyrics <span class="hint">optional</span></label>
   <textarea id="lyrics" name="lyrics" maxlength="4095" rows="6">{{ form.get('lyrics', '') }}</textarea>
+  <div data-backend-field="source_lyrics"><label for="source_lyrics">Source lyrics <span class="hint">optional</span></label><textarea id="source_lyrics" name="source_lyrics" maxlength="20000" rows="4">{{ form.get('source_lyrics', '') }}</textarea></div>
   <div class="grid two">
     <div><label for="audio_cover_strength">Reference-audio influence</label><input id="audio_cover_strength" name="audio_cover_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('audio_cover_strength', '0.65') }}"><p class="hint">ACE name: <code>audio_cover_strength</code>. Lower values favor stronger style transfer.</p></div>
     <div><label for="cover_noise_strength">Source/noise retention</label><input id="cover_noise_strength" name="cover_noise_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('cover_noise_strength', '0.0') }}"><p class="hint">ACE name: <code>cover_noise_strength</code>. Higher values stay closer to source melody and structure.</p></div>

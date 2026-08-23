@@ -127,6 +127,7 @@ def _fal_generation_contract(
             "before_seconds",
             "after_seconds",
             "source_style",
+            "source_lyrics",
         )
         if key in generation and generation[key] is not None
     }

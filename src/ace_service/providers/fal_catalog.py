@@ -377,7 +377,7 @@ def audit_catalog(
             body = response.json()
             for item in body.get("models", []) if isinstance(body, dict) else []:
                 if isinstance(item, dict) and isinstance(item.get("endpoint_id"), str):
-                    discovered[item["endpoint_id"]] = item
+                    discovered[item["endpoint_id"]] = {**item, "_category": category}
     except Exception:
         if owns_client:
             http.close()
@@ -390,7 +390,7 @@ def audit_catalog(
         entry = reviewed.get(endpoint_id)
         if entry is None:
             continue
-        fingerprint = _discovered_schema_fingerprint(item)
+        fingerprint = _discovered_schema_fingerprint(item, descriptor=entry)
         if fingerprint is not None:
             if fingerprint != entry.schema_sha256:
                 schema_changed.append(endpoint_id)
@@ -439,12 +439,14 @@ def audit_catalog(
     }
 
 
-def _discovered_schema_fingerprint(item: Mapping[str, Any]) -> str | None:
+def _discovered_schema_fingerprint(
+    item: Mapping[str, Any], *, descriptor: CatalogDescriptor | None = None
+) -> str | None:
     """Return a comparable schema hash from a model-search response.
 
     Tests and future review tooling may provide the already-normalized shape;
-    the live Platform API normally returns an OpenAPI document, for which the
-    raw document hash is still useful as a conservative drift signal.
+    the live Platform API normally returns an OpenAPI document, which is
+    reduced to the same reviewed input/output representation before hashing.
     """
 
     declared = item.get("schema_sha256")
@@ -462,11 +464,214 @@ def _discovered_schema_fingerprint(item: Mapping[str, Any]) -> str | None:
             "fields": openapi["fields"],
             "output": openapi["output"],
         }
+    elif descriptor is not None:
+        normalized = normalize_openapi_schema(openapi, descriptor=descriptor)
     else:
-        normalized = openapi
+        normalized = normalize_openapi_schema(openapi, endpoint_id=str(item.get("endpoint_id", "")))
     return hashlib.sha256(
         json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _resolve_openapi_ref(schema: Any, components: Mapping[str, Any]) -> Any:
+    if not isinstance(schema, Mapping):
+        return schema
+    reference = schema.get("$ref")
+    if not isinstance(reference, str) or not reference.startswith("#/components/"):
+        return schema
+    current: Any = components
+    for part in reference.removeprefix("#/components/").split("/"):
+        if not isinstance(current, Mapping):
+            return {}
+        current = current.get(part)
+    return current if current is not None else {}
+
+
+def _openapi_schema_properties(schema: Any, components: Mapping[str, Any]) -> dict[str, Any]:
+    resolved = _resolve_openapi_ref(schema, components)
+    if not isinstance(resolved, Mapping):
+        return {}
+    properties = resolved.get("properties")
+    return dict(properties) if isinstance(properties, Mapping) else {}
+
+
+def _openapi_request_schema(openapi: Mapping[str, Any], components: Mapping[str, Any]) -> Any:
+    paths = openapi.get("paths")
+    if isinstance(paths, Mapping):
+        for path_item in paths.values():
+            if not isinstance(path_item, Mapping):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, Mapping):
+                    continue
+                body = operation.get("requestBody")
+                if not isinstance(body, Mapping):
+                    continue
+                content = body.get("content")
+                if isinstance(content, Mapping):
+                    json_content = content.get("application/json")
+                    if isinstance(json_content, Mapping) and "schema" in json_content:
+                        return _resolve_openapi_ref(json_content["schema"], components)
+    for name in ("Input", "InputSchema", "Request", "RequestSchema"):
+        candidate = (
+            components.get("schemas", {}).get(name)
+            if isinstance(components.get("schemas"), Mapping)
+            else None
+        )
+        if candidate is not None:
+            return _resolve_openapi_ref(candidate, components)
+    return {}
+
+
+def _openapi_response_schema(openapi: Mapping[str, Any], components: Mapping[str, Any]) -> Any:
+    paths = openapi.get("paths")
+    if isinstance(paths, Mapping):
+        for path_item in paths.values():
+            if not isinstance(path_item, Mapping):
+                continue
+            for operation in path_item.values():
+                if not isinstance(operation, Mapping):
+                    continue
+                responses = operation.get("responses")
+                if not isinstance(responses, Mapping):
+                    continue
+                response = responses.get("200", responses.get("201", responses.get("default")))
+                if not isinstance(response, Mapping):
+                    continue
+                content = response.get("content")
+                if isinstance(content, Mapping):
+                    json_content = content.get("application/json")
+                    if isinstance(json_content, Mapping) and "schema" in json_content:
+                        return _resolve_openapi_ref(json_content["schema"], components)
+    for name in ("Output", "OutputSchema", "Response", "ResponseSchema"):
+        candidate = (
+            components.get("schemas", {}).get(name)
+            if isinstance(components.get("schemas"), Mapping)
+            else None
+        )
+        if candidate is not None:
+            return _resolve_openapi_ref(candidate, components)
+    return {}
+
+
+def _openapi_path_schema(schema: Any, path: str, components: Mapping[str, Any]) -> Any | None:
+    current = _resolve_openapi_ref(schema, components)
+    for part in path.split("."):
+        match = re.fullmatch(r"([A-Za-z0-9_-]+)(?:\[(\d+)\])?", part)
+        if match is None:
+            return None
+        properties = _openapi_schema_properties(current, components)
+        current = properties.get(match.group(1))
+        if current is None:
+            return None
+        current = _resolve_openapi_ref(current, components)
+        if match.group(2) is not None:
+            items = current.get("items") if isinstance(current, Mapping) else None
+            current = _resolve_openapi_ref(items, components)
+    return current
+
+
+def _openapi_field_type(schema: Any) -> str:
+    if not isinstance(schema, Mapping):
+        return "string"
+    if schema.get("format") in {"uri", "url"}:
+        return "url"
+    value = schema.get("type")
+    return value if value in {"string", "integer", "number", "boolean"} else "string"
+
+
+def normalize_openapi_schema(
+    openapi: Mapping[str, Any],
+    *,
+    descriptor: CatalogDescriptor | None = None,
+    endpoint_id: str | None = None,
+    operation: BackendOperation | str | None = None,
+    media_kind: MediaKind | str | None = None,
+) -> dict[str, Any]:
+    """Normalize an OpenAPI 3 document into the reviewed catalog shape."""
+
+    if {"endpoint_id", "operation", "media_kind", "fields", "output"} <= set(openapi):
+        return {
+            "endpoint_id": openapi["endpoint_id"],
+            "operation": openapi["operation"],
+            "media_kind": openapi["media_kind"],
+            "fields": openapi["fields"],
+            "output": openapi["output"],
+        }
+    resolved_endpoint = endpoint_id or (str(descriptor.endpoint_id) if descriptor else "")
+    resolved_operation = (
+        descriptor.operation.value
+        if descriptor is not None
+        else BackendOperation(operation).value
+        if operation is not None
+        else "text_to_music"
+    )
+    resolved_media = (
+        descriptor.media_kind.value
+        if descriptor is not None
+        else MediaKind(media_kind).value
+        if media_kind is not None
+        else "music"
+    )
+    components = openapi.get("components")
+    components = components if isinstance(components, Mapping) else {}
+    request_schema = _openapi_request_schema(openapi, components)
+    request_properties = _openapi_schema_properties(request_schema, components)
+    request_required = _resolve_openapi_ref(request_schema, components).get("required", [])
+    request_required = set(request_required) if isinstance(request_required, list) else set()
+    fields: dict[str, Any] = {}
+    if descriptor is not None:
+        for name, policy in sorted(descriptor.fields.items()):
+            actual = request_properties.get(policy.fal_name)
+            if actual is None:
+                fields[name] = {"missing": True}
+                continue
+            actual = _resolve_openapi_ref(actual, components)
+            fields[name] = {
+                "fal_name": policy.fal_name,
+                "type": _openapi_field_type(actual),
+                "required": policy.fal_name in request_required,
+                "minimum": actual.get("minimum") if isinstance(actual, Mapping) else None,
+                "maximum": actual.get("maximum") if isinstance(actual, Mapping) else None,
+                "choices": list(actual.get("enum", []))
+                if isinstance(actual, Mapping) and isinstance(actual.get("enum"), list)
+                else [],
+            }
+    else:
+        for name, actual_value in sorted(request_properties.items()):
+            actual = _resolve_openapi_ref(actual_value, components)
+            fields[name] = {
+                "fal_name": name,
+                "type": _openapi_field_type(actual),
+                "required": name in request_required,
+                "minimum": actual.get("minimum") if isinstance(actual, Mapping) else None,
+                "maximum": actual.get("maximum") if isinstance(actual, Mapping) else None,
+                "choices": list(actual.get("enum", []))
+                if isinstance(actual, Mapping) and isinstance(actual.get("enum"), list)
+                else [],
+            }
+    output = descriptor.output if descriptor is not None else None
+    response_schema = _openapi_response_schema(openapi, components)
+    if (
+        output is not None
+        and _openapi_path_schema(response_schema, output.result_path, components) is None
+    ):
+        result_path = "__missing__"
+    else:
+        result_path = output.result_path if output is not None else "audio.url"
+    return {
+        "endpoint_id": resolved_endpoint,
+        "operation": resolved_operation,
+        "media_kind": resolved_media,
+        "fields": fields,
+        "output": {
+            "result_path": result_path,
+            "native_formats": list(output.native_formats) if output is not None else [],
+            "format_field": output.format_field if output is not None else None,
+            "seed_path": output.seed_path if output is not None else None,
+            "duration_path": output.duration_path if output is not None else None,
+        },
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

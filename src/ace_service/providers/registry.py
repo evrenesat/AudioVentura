@@ -21,6 +21,7 @@ class BackendRegistry:
         *,
         default: ProviderName | BackendId | str | None = None,
         defaults: Mapping[str, BackendId | str] | None = None,
+        selectable_backends: Iterable[BackendId | str] | None = None,
     ) -> None:
         self._providers: dict[BackendId, InferenceProvider] = {}
         self._by_provider: dict[ProviderName, list[InferenceProvider]] = {}
@@ -32,6 +33,13 @@ class BackendRegistry:
             self._by_provider.setdefault(provider.capabilities.name, []).append(provider)
         if not self._providers:
             raise ValueError("at least one inference backend is required")
+        self._selectable_backend_ids = (
+            set(self._providers)
+            if selectable_backends is None
+            else {BackendId(str(item)) for item in selectable_backends}
+        )
+        if not self._selectable_backend_ids <= set(self._providers):
+            raise ValueError("selectable backends must be configured")
         self._defaults: dict[BackendOperation, BackendId] = {}
         if defaults:
             for operation, raw_backend_id in defaults.items():
@@ -120,7 +128,8 @@ class BackendRegistry:
         requested = BackendOperation(operation)
         return tuple(
             provider
-            for provider in self._providers.values()
+            for backend_id, provider in self._providers.items()
+            if backend_id in self._selectable_backend_ids
             if provider.capabilities.operation in {None, requested}
         )
 
