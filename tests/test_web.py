@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -20,6 +21,9 @@ from ace_service.config import ServiceSettings
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, SubmissionQuote
+from ace_service.providers.fal import FalProvider, FalQueueTransport
+from ace_service.providers.fal_catalog import load_catalog
+from ace_service.providers.registry import ProviderRegistry
 from ace_service.repository import (
     EvidenceConflictError,
     confirm_cover_job,
@@ -214,6 +218,60 @@ def test_auth_matrix_csrf_and_security_headers(web_app) -> None:
         )
         assert accepted.status_code == 303
         assert accepted.headers["location"].startswith("/jobs/")
+
+
+def test_fal_cassette_rejects_unsupported_original_fields(settings) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": descriptor.endpoint_id}]},
+        )
+
+    fal_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = FalProvider(
+        descriptor,
+        FalQueueTransport("test-fal-key", http_client=fal_client),
+    )
+    worker = FakeWorker()
+    app = create_app(
+        settings,
+        session_factory=factory,
+        provider_registry=ProviderRegistry([provider]),
+        home_ingest_client=FakeHome(),
+        worker=worker,
+    )
+    try:
+        with TestClient(app) as client:
+            token = _csrf(client)
+            response = client.post(
+                "/create",
+                auth=_auth(client),
+                data={
+                    "csrf_token": token,
+                    "backend": str(descriptor.backend_id),
+                    "description": "minimal cassette request",
+                    "duration_mode": "custom",
+                    "duration_seconds": "30",
+                    "lyrics": "explicit user lyrics",
+                    "instrumental": "true",
+                    "bpm": "120",
+                },
+            )
+            assert response.status_code == 422
+            assert "lyrics is not supported by the selected backend" in response.text
+            assert worker.enqueued == []
+        with factory() as session:
+            assert session.query(Job).count() == 0
+    finally:
+        asyncio.run(fal_client.aclose())
+        engine.dispose()
 
 
 def test_continue_original_prefills_every_field_without_enqueue(web_app) -> None:

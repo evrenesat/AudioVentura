@@ -12,6 +12,7 @@ from ace_service.providers.base import (
     GenerationRequest,
     InferenceMode,
     InferenceRequest,
+    ProviderError,
     ProviderHealth,
     ProviderName,
     ProviderPhase,
@@ -81,6 +82,43 @@ def test_fal_queue_submit_status_and_result_are_endpoint_scoped() -> None:
         assert result.artifact is not None
         assert result.artifact.url == "https://fal.media/audio.mp3"
         assert len(calls) == 4
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("seed", "wrong"), ("duration", {"value": 30})],
+)
+def test_fal_result_rejects_invalid_reviewed_metadata_types(field: str, value: object) -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/fal-ai/elevenlabs/music")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"request_id": "fal-metadata"})
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "COMPLETED"})
+        return httpx.Response(
+            200,
+            json={
+                "audio": {"url": "https://fal.media/audio.mp3"},
+                "seed": value if field == "seed" else 12,
+                "duration": value if field == "duration" else 30,
+            },
+        )
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = FalProvider(
+            descriptor,
+            FalQueueTransport("test-fal-key", http_client=client),
+        )
+        generation = GenerationRequest(mode=InferenceMode.PROMPT_TO_AUDIO, prompt="metadata")
+        ref = await provider.submit(_request(generation=generation))
+        with pytest.raises(ProviderError, match="metadata is invalid"):
+            await provider.result(ref)
         await client.aclose()
 
     asyncio.run(scenario())

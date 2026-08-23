@@ -20,21 +20,21 @@
   <label for="description">Description <span class="required">required</span></label>
   <textarea id="description" name="description" required maxlength="511" rows="5">{{ form.get('description', '') }}</textarea>
   <p class="hint">The final caption is limited to 511 characters. Duration-like prose is not interpreted as a setting.</p>
-  <label for="lyrics">Lyrics <span class="hint">optional</span></label>
+  <div data-backend-field="lyrics"><label for="lyrics">Lyrics <span class="hint">optional</span></label>
   <textarea id="lyrics" name="lyrics" maxlength="4095" rows="7">{{ form.get('lyrics', '') }}</textarea>
-  <p class="hint">Lyrics are preserved unchanged in Enhance and Auto-compose modes, up to 4095 characters.</p>
-  <label class="check"><input type="checkbox" name="instrumental" value="true"{% if form.get('instrumental') in ['true', 'on', '1'] %} checked{% endif %}> Instrumental</label>
+  <p class="hint">Lyrics are preserved unchanged in Enhance and Auto-compose modes, up to 4095 characters.</p></div>
+  <label class="check" data-backend-field="instrumental"><input type="checkbox" name="instrumental" value="true"{% if form.get('instrumental') in ['true', 'on', '1'] %} checked{% endif %}> Instrumental</label>
   <div class="grid two">
-    <div><label for="prompt_mode">Prompt mode</label><select id="prompt_mode" name="prompt_mode"><option value="direct"{% if form.get('prompt_mode', 'direct') == 'direct' %} selected{% endif %}>Direct</option><option value="enhance"{% if form.get('prompt_mode') == 'enhance' %} selected{% endif %}>Enhance</option><option value="auto-compose"{% if form.get('prompt_mode') == 'auto-compose' %} selected{% endif %}>Auto-compose</option></select><p class="hint">Direct bypasses planner rewriting; Enhance enables metadata/caption/language help; Auto-compose also enables planner thinking.</p></div>
-    <div><label for="vocal_language">Vocal language</label><input id="vocal_language" name="vocal_language" value="{{ form.get('vocal_language', 'en') }}" maxlength="32"></div>
+    <div data-backend-field="prompt_mode"><label for="prompt_mode">Prompt mode</label><select id="prompt_mode" name="prompt_mode"><option value="direct"{% if form.get('prompt_mode', 'direct') == 'direct' %} selected{% endif %}>Direct</option><option value="enhance"{% if form.get('prompt_mode') == 'enhance' %} selected{% endif %}>Enhance</option><option value="auto-compose"{% if form.get('prompt_mode') == 'auto-compose' %} selected{% endif %}>Auto-compose</option></select><p class="hint">Direct bypasses planner rewriting; Enhance enables metadata/caption/language help; Auto-compose also enables planner thinking.</p></div>
+    <div data-backend-field="vocal_language"><label for="vocal_language">Vocal language</label><input id="vocal_language" name="vocal_language" value="{{ form.get('vocal_language', '') }}" maxlength="32"></div>
   </div>
   <div class="grid two">
-    <div><label for="duration_mode">Duration mode</label><select id="duration_mode" name="duration_mode"><option value="auto"{% if form.get('duration_mode', 'auto') == 'auto' %} selected{% endif %}>Auto (model-selected)</option><option value="custom"{% if form.get('duration_mode') == 'custom' %} selected{% endif %}>Custom duration</option></select></div>
-    <div><label for="duration_seconds">Custom duration, seconds</label><input id="duration_seconds" name="duration_seconds" inputmode="decimal" value="{{ form.get('duration_seconds', '') }}" placeholder="10–600"></div>
-    <div><label for="bpm">BPM</label><input id="bpm" name="bpm" inputmode="numeric" value="{{ form.get('bpm', '') }}"></div>
-    <div><label for="key_scale">Key / scale</label><input id="key_scale" name="key_scale" value="{{ form.get('key_scale', '') }}" placeholder="C major"></div>
-    <div><label for="time_signature">Time signature</label><input id="time_signature" name="time_signature" inputmode="numeric" value="{{ form.get('time_signature', '') }}" placeholder="4"></div>
-    <div><label for="seed">Seed</label><input id="seed" name="seed" inputmode="numeric" value="{{ form.get('seed', '') }}"></div>
+    <div data-backend-field="duration"><label for="duration_mode">Duration mode</label><select id="duration_mode" name="duration_mode"><option value="auto"{% if form.get('duration_mode', 'auto') == 'auto' %} selected{% endif %}>Auto (model-selected)</option><option value="custom"{% if form.get('duration_mode') == 'custom' %} selected{% endif %}>Custom duration</option></select></div>
+    <div data-backend-field="duration"><label for="duration_seconds">Custom duration, seconds</label><input id="duration_seconds" name="duration_seconds" inputmode="decimal" value="{{ form.get('duration_seconds', '') }}" placeholder="10–600"></div>
+    <div data-backend-field="bpm"><label for="bpm">BPM</label><input id="bpm" name="bpm" inputmode="numeric" value="{{ form.get('bpm', '') }}"></div>
+    <div data-backend-field="key_scale"><label for="key_scale">Key / scale</label><input id="key_scale" name="key_scale" value="{{ form.get('key_scale', '') }}" placeholder="C major"></div>
+    <div data-backend-field="time_signature"><label for="time_signature">Time signature</label><input id="time_signature" name="time_signature" inputmode="numeric" value="{{ form.get('time_signature', '') }}" placeholder="4"></div>
+    <div data-backend-field="seed"><label for="seed">Seed</label><input id="seed" name="seed" inputmode="numeric" value="{{ form.get('seed', '') }}"></div>
   </div>
   <div class="grid two">
     <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}{% if estimate %} data-request-text="{{ value }} variation{{ 's' if value != 1 else '' }}: ~{{ estimate.variation_request_labels[value] }}"{% endif %}>{{ value }}</option>{% endfor %}</select></div>

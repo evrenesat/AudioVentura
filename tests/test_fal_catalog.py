@@ -84,14 +84,27 @@ def _openapi_fixture(descriptor) -> dict[str, object]:
     response: dict[str, object] = {"type": "object", "properties": {}}
     current = response["properties"]
     assert isinstance(current, dict)
-    parts = descriptor.output.result_path.split(".")
-    for part in parts[:-1]:
-        nested: dict[str, object] = {"type": "object", "properties": {}}
-        current[part] = nested
-        nested_properties = nested["properties"]
-        assert isinstance(nested_properties, dict)
-        current = nested_properties
-    current[parts[-1]] = {"type": "string", "format": "uri"}
+
+    def set_response_path(path: str, schema: dict[str, object]) -> None:
+        nonlocal current
+        current = response["properties"]
+        assert isinstance(current, dict)
+        parts = path.split(".")
+        for part in parts[:-1]:
+            nested = current.get(part)
+            if not isinstance(nested, dict):
+                nested = {"type": "object", "properties": {}}
+                current[part] = nested
+            nested_properties = nested["properties"]
+            assert isinstance(nested_properties, dict)
+            current = nested_properties
+        current[parts[-1]] = schema
+
+    set_response_path(descriptor.output.result_path, {"type": "string", "format": "uri"})
+    if descriptor.output.seed_path:
+        set_response_path(descriptor.output.seed_path, {"type": "integer"})
+    if descriptor.output.duration_path:
+        set_response_path(descriptor.output.duration_path, {"type": "number"})
     request_schema: dict[str, object] = {"type": "object", "properties": properties}
     if required:
         request_schema["required"] = required
@@ -156,6 +169,33 @@ def test_audit_detects_new_required_live_contract_fields(drift: str) -> None:
         assert isinstance(properties, dict)
         properties["new_required"] = {"type": "string"}
         response_schema["required"] = ["new_required"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": descriptor.endpoint_id, "openapi": deepcopy(live)}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client)
+    assert result["schema_changed"] == [descriptor.endpoint_id]
+
+
+def test_audit_detects_seed_and_duration_output_type_drift() -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/fal-ai/elevenlabs/music")
+    live = _openapi_fixture(descriptor)
+    paths = live["paths"]
+    assert isinstance(paths, dict)
+    operation = paths["/"]["post"]
+    assert isinstance(operation, dict)
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert isinstance(response_schema, dict)
+    properties = response_schema["properties"]
+    assert isinstance(properties, dict)
+    properties["seed"] = {"type": "string"}
+    properties["duration"] = {"type": "object", "properties": {"value": {"type": "number"}}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

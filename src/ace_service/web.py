@@ -85,6 +85,32 @@ _STATIC = Path(__file__).with_name("static")
 _MIME_TYPES = {"audio/mpeg", "audio/flac", "audio/wav"}
 _READINESS_PROBE_TIMEOUT_SECONDS = 5.0
 _FAL_HEALTH_CACHE_TTL_SECONDS = 30.0
+_BACKEND_FIELD_ALIASES = {
+    "prompt": ("description", "target_style"),
+    "duration": ("duration_seconds",),
+    "lyrics": ("lyrics",),
+    "source_lyrics": ("source_lyrics",),
+    "source_style": ("source_style",),
+    "seed": ("seed",),
+    "strength": ("strength", "audio_cover_strength"),
+    "start_seconds": ("start_seconds",),
+    "end_seconds": ("end_seconds",),
+    "before_seconds": ("before_seconds",),
+    "after_seconds": ("after_seconds",),
+}
+_FAL_UNIVERSAL_FIELDS = frozenset(
+    {
+        "backend",
+        "csrf_token",
+        "continue_from_job_id",
+        "duration_mode",
+        "output_format",
+        "profile_id",
+        "rights_confirmation",
+        "variation_count",
+        "youtube_url",
+    }
+)
 _FORMAT_MIME = {
     OutputFormat.MP3: "audio/mpeg",
     OutputFormat.FLAC: "audio/flac",
@@ -348,6 +374,7 @@ def _backend_choices(
             fields = {
                 name: {
                     "ui_name": policy.ui_name,
+                    "type": policy.type,
                     "required": policy.required,
                     "minimum": policy.minimum,
                     "maximum": policy.maximum,
@@ -497,16 +524,29 @@ def _select_backend(
             raise ValueError("audio_cover_strength is not supported by the selected backend")
         if fields.get("cover_noise_strength") not in (None, "", "0", "0.0"):
             raise ValueError("cover_noise_strength is not supported by the selected backend")
-    form_aliases = {
-        "prompt": ("description", "target_style"),
-        "duration": ("duration_seconds",),
-        "lyrics": ("lyrics",),
-        "source_lyrics": ("source_lyrics",),
-        "start_seconds": ("start_seconds",),
-        "end_seconds": ("end_seconds",),
-        "before_seconds": ("before_seconds",),
-        "after_seconds": ("after_seconds",),
+    form_aliases = _BACKEND_FIELD_ALIASES
+    allowed_fields = {
+        alias
+        for field_name in choice["fields"]
+        for alias in form_aliases.get(field_name, (field_name,))
     }
+    universal_fields = _FAL_UNIVERSAL_FIELDS | (
+        {"description", "target_style", "remix_guidance"} if "prompt" in choice["fields"] else set()
+    )
+    if provider.capabilities.name is ProviderName.FAL:
+        for field_name, raw_value in fields.items():
+            if field_name in universal_fields or field_name in allowed_fields:
+                continue
+            if field_name == "instrumental" and raw_value in {"", "0", "false", "off"}:
+                continue
+            if field_name == "prompt_mode" and raw_value in {"", "direct"}:
+                continue
+            if field_name == "audio_cover_strength" and raw_value in {"", "0.65"}:
+                continue
+            if field_name == "cover_noise_strength" and raw_value in {"", "0", "0.0"}:
+                continue
+            if raw_value not in (None, ""):
+                raise ValueError(f"{field_name} is not supported by the selected backend")
     for field_name, policy in choice["fields"].items():
         if not policy.get("required") or field_name == "source_audio":
             continue
@@ -532,32 +572,17 @@ def _select_backend(
         raw_name = next((alias for alias in aliases if fields.get(alias) not in (None, "")), None)
         if raw_name is None:
             continue
-        value = _backend_form_number(fields, raw_name)
-        if value is None:
+        numeric_value = _backend_form_number(fields, raw_name)
+        if numeric_value is None:
             continue
-        if policy.get("type") == "integer" and not value.is_integer():
+        if policy.get("type") == "integer" and not numeric_value.is_integer():
             raise ValueError(f"{policy.get('ui_name', field_name)} must be an integer")
         minimum = policy.get("minimum")
         maximum = policy.get("maximum")
-        if minimum is not None and value < minimum:
+        if minimum is not None and numeric_value < minimum:
             raise ValueError(f"{policy.get('ui_name', field_name)} is below its minimum")
-        if maximum is not None and value > maximum:
+        if maximum is not None and numeric_value > maximum:
             raise ValueError(f"{policy.get('ui_name', field_name)} is above its maximum")
-    for field_name in (
-        "negative_prompt",
-        "guidance_scale",
-        "inference_steps",
-        "prompt_expansion",
-        "strength",
-        "start_seconds",
-        "end_seconds",
-        "before_seconds",
-        "after_seconds",
-        "source_style",
-        "source_lyrics",
-    ):
-        if fields.get(field_name) not in (None, "") and field_name not in allowed_advanced:
-            raise ValueError(f"{field_name} is not supported by the selected backend")
     return provider, choice["snapshot"]
 
 

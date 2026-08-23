@@ -50,6 +50,9 @@ The Original selector exposes enabled reviewed text-to-music entries. Cover /
 Remix exposes compatible audio transform, inpaint, and outpaint entries. A job
 stores the exact backend and catalog snapshot before it enters the queue. One
 backend owns every variation in that job; there is no automatic fallback.
+The forms hide descriptor-unsupported controls, and the controller rejects
+nonempty unsupported fields on Fal submissions so user intent cannot be
+silently discarded.
 
 ACE-Step audio transforms ask for the source style/description and optionally
 the source lyrics; inpaint regions and outpaint extensions are checked again

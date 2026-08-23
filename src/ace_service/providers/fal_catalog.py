@@ -577,7 +577,11 @@ def _openapi_field_type(schema: Any) -> str:
     if schema.get("format") in {"uri", "url"}:
         return "url"
     value = schema.get("type")
-    return value if value in {"string", "integer", "number", "boolean"} else "string"
+    return (
+        value
+        if value in {"string", "integer", "number", "boolean", "object", "array"}
+        else "string"
+    )
 
 
 def _openapi_field_contract(
@@ -703,7 +707,7 @@ def normalize_openapi_schema(
         if output is not None
         else "audio.url"
     )
-    normalized_output = {
+    normalized_output: dict[str, Any] = {
         "result_path": result_path,
         "native_formats": list(output.native_formats) if output is not None else [],
         "format_field": output.format_field if output is not None else None,
@@ -718,6 +722,24 @@ def normalize_openapi_schema(
         expected_paths = {
             path for path in (output.result_path, output.seed_path, output.duration_path) if path
         }
+        expected_types = {
+            path: {"integer"} if path == output.seed_path else {"integer", "number"}
+            for path in (output.seed_path, output.duration_path)
+            if path
+        }
+        incompatible_types: dict[str, dict[str, Any]] = {}
+        for path, accepted_types in expected_types.items():
+            actual = _openapi_path_schema(response_schema, path, components)
+            if actual is None:
+                continue
+            actual_type = _openapi_field_type(actual)
+            if actual_type not in accepted_types:
+                incompatible_types[path] = {
+                    "expected": sorted(accepted_types),
+                    "actual": actual_type,
+                }
+        if incompatible_types:
+            normalized_output["__incompatible_types__"] = incompatible_types
         missing_paths = sorted(
             path
             for path in (output.seed_path, output.duration_path)

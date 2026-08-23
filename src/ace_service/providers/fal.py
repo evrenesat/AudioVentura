@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -483,21 +484,38 @@ class FalProvider:
                 "result",
                 "Fal result format is not allowed by the catalog",
             )
+        raw_seed = (
+            _path_value(body, self.descriptor.output.seed_path)
+            if self.descriptor.output.seed_path
+            else None
+        )
+        if raw_seed is not None and (isinstance(raw_seed, bool) or not isinstance(raw_seed, int)):
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "result",
+                "Fal result seed metadata is invalid",
+            )
+        raw_duration = (
+            _path_value(body, self.descriptor.output.duration_path)
+            if self.descriptor.output.duration_path
+            else None
+        )
+        if raw_duration is not None and (
+            isinstance(raw_duration, bool)
+            or not isinstance(raw_duration, (int, float))
+            or not math.isfinite(float(raw_duration))
+        ):
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "result",
+                "Fal result duration metadata is invalid",
+            )
         artifact = ProviderArtifact(
             url=url,
             native_format=native_format,
             content_type=_SAFE_RESULT_FORMATS[native_format],
-            seed=_path_value(body, self.descriptor.output.seed_path)
-            if self.descriptor.output.seed_path
-            else None,
-            duration_seconds=(
-                float(_path_value(body, self.descriptor.output.duration_path))
-                if self.descriptor.output.duration_path
-                and isinstance(
-                    _path_value(body, self.descriptor.output.duration_path), (int, float)
-                )
-                else None
-            ),
+            seed=raw_seed,
+            duration_seconds=float(raw_duration) if raw_duration is not None else None,
         )
         metadata: dict[str, Any] = {
             "fal_request_id": ref.external_id,

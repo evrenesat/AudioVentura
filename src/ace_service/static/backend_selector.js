@@ -22,7 +22,13 @@
     duration: ["duration_seconds"],
     seed: ["seed"],
     lyrics: ["lyrics"],
+    source_style: ["source_style"],
+    source_lyrics: ["source_lyrics"],
     strength: ["strength", "audio_cover_strength"],
+    start_seconds: ["start_seconds"],
+    end_seconds: ["end_seconds"],
+    before_seconds: ["before_seconds"],
+    after_seconds: ["after_seconds"],
   };
 
   const selectedChoice = () => choices.find((item) => item.backend_id === select.value);
@@ -47,14 +53,15 @@
     }
 
     const fields = choice.fields || {};
+    const isFal = choice.provider === "fal.ai";
     for (const wrapper of document.querySelectorAll("[data-backend-field]")) {
       const name = wrapper.getAttribute("data-backend-field");
       const policy = name ? fields[name] : null;
-      wrapper.hidden = !policy;
+      wrapper.hidden = isFal && !policy;
       const input = wrapper.querySelector("input, select, textarea");
       if (input) {
-        input.disabled = !policy;
-        input.required = Boolean(policy && policy.required);
+        input.disabled = isFal && !policy;
+        if (isFal) input.required = Boolean(policy && policy.required);
         if (policy && policy.minimum != null) input.min = policy.minimum;
         if (policy && policy.maximum != null) input.max = policy.maximum;
       }
