@@ -8,7 +8,10 @@
   from the durable job, variation, and submission nonce so provider retries
   produce the same output; explicit seed progression is unchanged.
 - Restored cover-source cleanup after validated local-output recovery commits.
-  All verification remained offline; no provider mutation or paid request ran.
+- Made infrastructure apply idempotent and drift-safe, then published the
+  corrected model-inclusive worker as immutable amd64 digest
+  `sha256:86612d071ffca1d27cd532c6b0d0ff459b6867e25eed1761730f151cd2b45bf5`
+  (28,979,322,061 compressed bytes). No Salad resource or paid job was created.
 
 ## 2026-08-23 (durable inference providers)
 

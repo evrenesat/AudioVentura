@@ -16,10 +16,10 @@ controller.
 - Checkpoint inventory: 29 files, 25,253,680,505 bytes
 - Salad HTTP Job Queue Worker: `v0.7.0`, archive SHA-256
   `074a329cf6462e77fc7b72100f59d8a690831456d9420186a834a8f30634c9e4`
-- Private GHCR tag: `ghcr.io/evrenesat/audioventura-ace-step-salad-worker:infra-edf20ff-20260823`
-- Deployable amd64 digest: `sha256:e20eceb01df99d129bd379a545aaf80f02b54c5294a48ba0e4ca424c111e279a`
-- Compressed amd64 layers: 20 layers, 28,979,321,976 bytes
-- Salad 35 GB margin: 6,020,678,024 bytes
+- Private GHCR tag: `ghcr.io/evrenesat/audioventura-ace-step-salad-worker:infra-eb959bd-20260823`
+- Deployable amd64 digest: `sha256:86612d071ffca1d27cd532c6b0d0ff459b6867e25eed1761730f151cd2b45bf5`
+- Compressed amd64 layers: 20 layers, 28,979,322,061 bytes
+- Salad 35 GB margin: 6,020,677,939 bytes
 
 The image keeps model transfer in an immutable layer so Salad performs it
 before billed container execution. `deploy/salad/worker_api.py` converts the
@@ -77,7 +77,7 @@ SALAD_API_KEY="$(< /root/salad_api_key)" \
 GHCR_USERNAME=<username> GHCR_TOKEN=<read-package-token> \
 uv run python deploy/salad/saladctl.py apply \
   --organization <organization> --project <project> \
-  --image-ref ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:e20eceb01df99d129bd379a545aaf80f02b54c5294a48ba0e4ca424c111e279a
+  --image-ref ghcr.io/evrenesat/audioventura-ace-step-salad-worker@sha256:86612d071ffca1d27cd532c6b0d0ff459b6867e25eed1761730f151cd2b45bf5
 ```
 
 `apply` is idempotent when the existing queue and container group match the
