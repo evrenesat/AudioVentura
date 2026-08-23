@@ -40,15 +40,15 @@
         ],
         "readme": "",
         "volume_mount_path": "/workspace",
-        "image_name": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:bb0603760568535e3c93a7003766c0f3fc247f55a1e6a311022b55927aa5f2ca",
+        "image_name": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846",
         "environment": {
           "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",
           "ACE_WORKER_CHECKPOINTS_DIR": "/runpod-volume/huggingface-cache/hub",
-          "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:bb0603760568535e3c93a7003766c0f3fc247f55a1e6a311022b55927aa5f2ca"
+          "ACE_WORKER_IMAGE_DIGEST": "ghcr.io/evrenesat/audioventura-ace-step-worker@sha256:0310fef73053113f0060bc4861e7b682156f375159386473356a4dc4c9850846"
         }
       }
     },
-    "sha256": "8282bdbc3b33be9270fb4fbd5f5b4f4e5b9d3082f24db4e5c0522bebf1038f1d"
+    "sha256": "442260e64a51e5d7b25962027cd42caddfad7f6aa10d6108fb46145b56897cd8"
   },
   "salad": {
     "schema": "salad-capacity-v1",

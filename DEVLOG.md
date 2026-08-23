@@ -826,3 +826,6 @@ production-default change, or commit. Checkpoint 3 remains unchecked.
 - Live preflight follow-up aligned Salad capacity calls with its tracked
   `containers` resource path and RunPod FlashBoot normalization with the REST
   API's lowercase `flashboot` response field.
+- Reconciled the RunPod capacity fixture with the reviewed `0310…` worker base
+  already pinned by the current product build, avoiding a stale worker-image
+  rollback during capacity enablement.
