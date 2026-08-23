@@ -90,11 +90,11 @@ def test_salad_capacity_inspection_is_fingerprint_pinned() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/queues/jobs"):
             return httpx.Response(200, json=queue)
-        if request.url.path.endswith("/container-groups/group"):
+        if request.url.path.endswith("/containers/group"):
             return httpx.Response(200, json=group)
         if request.url.path.endswith("/queues/jobs/jobs"):
             return httpx.Response(200, json={"items": []})
-        if request.url.path.endswith("/container-groups/group/instances"):
+        if request.url.path.endswith("/containers/group/instances"):
             return httpx.Response(200, json={"items": []})
         return httpx.Response(404)
 

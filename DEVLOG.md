@@ -823,3 +823,6 @@ production-default change, or commit. Checkpoint 3 remains unchecked.
   exhausted delivery health, VAPID browser-key conversion, and `/beta`
   notification-click navigation. Provider preflight now loads the protected
   environment explicitly and requests RunPod's embedded template identity.
+- Live preflight follow-up aligned Salad capacity calls with its tracked
+  `containers` resource path and RunPod FlashBoot normalization with the REST
+  API's lowercase `flashboot` response field.

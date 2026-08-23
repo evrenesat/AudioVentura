@@ -142,16 +142,14 @@ class SaladCapacityManager:
             "queue inspect",
         )
         group = self._mapping(
-            await self._request_json(
-                "GET", f"container-groups/{self.container_group}", "group inspect"
-            ),
+            await self._request_json("GET", f"containers/{self.container_group}", "group inspect"),
             "group inspect",
         )
         jobs_body = await self._request_json(
             "GET", f"queues/{self.queue}/jobs?page=1&per_page=100", "queue jobs inspect"
         )
         instances_body = await self._request_json(
-            "GET", f"container-groups/{self.container_group}/instances", "instances inspect"
+            "GET", f"containers/{self.container_group}/instances", "instances inspect"
         )
         jobs = jobs_body.get("items") if isinstance(jobs_body, Mapping) else jobs_body
         instances = (
@@ -266,7 +264,7 @@ class SaladCapacityManager:
         autoscaler["min_replicas"] = floor
         body = await self._request_json(
             "PATCH",
-            f"container-groups/{self.container_group}",
+            f"containers/{self.container_group}",
             operation,
             body={"queue_autoscaler": autoscaler, "replicas": replicas},
         )

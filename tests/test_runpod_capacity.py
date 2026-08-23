@@ -24,7 +24,7 @@ def test_runpod_capacity_patches_only_workers_min() -> None:
         "gpuTypeIds": ["NVIDIA GeForce RTX 3090"],
         "scalerType": "QUEUE_DELAY",
         "scalerValue": 2,
-        "flashBoot": True,
+        "flashboot": True,
         "template": {
             "id": "template",
             "name": "AudioVentura worker",
@@ -98,7 +98,7 @@ def test_runpod_fingerprint_fixture_matches_provider_normalization() -> None:
         "minCudaVersion": canonical["endpoint"]["min_cuda_version"],
         "executionTimeoutMs": canonical["endpoint"]["execution_timeout_ms"],
         "idleTimeout": canonical["endpoint"]["idle_timeout_seconds"],
-        "flashBoot": canonical["endpoint"]["flash_boot"],
+        "flashboot": canonical["endpoint"]["flash_boot"],
         "networkVolumeId": canonical["endpoint"]["network_volume_id"],
         "networkVolumeIds": canonical["endpoint"]["network_volume_ids"],
         "gpuTypeIds": canonical["endpoint"]["gpu_type_ids"],

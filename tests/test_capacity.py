@@ -175,7 +175,7 @@ def test_fingerprints_require_the_complete_secret_free_identity() -> None:
                 "minCudaVersion": "12.8",
                 "executionTimeoutMs": 1,
                 "idleTimeout": 30,
-                "flashBoot": True,
+                "flashboot": True,
                 "networkVolumeId": "volume",
                 "networkVolumeIds": ["volume"],
                 "gpuTypeIds": ["gpu"],

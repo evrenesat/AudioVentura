@@ -129,7 +129,7 @@ def build_runpod_fingerprint_payload(endpoint: Mapping[str, Any]) -> dict[str, A
         "min_cuda_version": _string(endpoint, "minCudaVersion", operation),
         "execution_timeout_ms": _integer(endpoint, "executionTimeoutMs", operation),
         "idle_timeout_seconds": _integer(endpoint, "idleTimeout", operation),
-        "flash_boot": _boolean(endpoint, "flashBoot", operation),
+        "flash_boot": _boolean(endpoint, "flashboot", operation),
         "network_volume_id": network_volume_id,
         "network_volume_ids": network_volume_ids,
         "gpu_type_ids": _string_list(endpoint, "gpuTypeIds", operation),
