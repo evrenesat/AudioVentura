@@ -19,6 +19,11 @@ IMAGE_RE = re.compile(
     r"^ghcr\.io/evrenesat/audioventura-ace-step-salad-worker@sha256:[0-9a-f]{64}$"
 )
 GPU_VRAM_SUFFIX_RE = re.compile(r"\s+\([0-9]+\s*GB\)\s*$", re.IGNORECASE)
+RESOURCE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
+QUEUE_JOB_STATUSES = frozenset({"pending", "running", "succeeded", "cancelled", "failed"})
+ACTIVE_QUEUE_JOB_STATUSES = frozenset({"pending", "running"})
+MAX_QUEUE_JOBS = 100
+MAX_API_RESPONSE_BYTES = 1_048_576
 
 
 class InfraError(RuntimeError):
@@ -45,13 +50,23 @@ class SaladApi:
     def close(self) -> None:
         self._client.close()
 
-    def request(self, method: str, path: str, *, json_body: object | None = None) -> Any:
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: object | None = None,
+        merge_patch: bool = False,
+    ) -> Any:
         try:
-            response = self._client.request(method, path, json=json_body)
+            headers = {"Content-Type": "application/merge-patch+json"} if merge_patch else None
+            response = self._client.request(method, path, json=json_body, headers=headers)
         except httpx.HTTPError as exc:
             raise InfraError(f"Salad API {method} failed with {type(exc).__name__}") from exc
         if response.status_code < 200 or response.status_code >= 300:
             raise InfraError(f"Salad API {method} failed with HTTP {response.status_code}")
+        if len(response.content) > MAX_API_RESPONSE_BYTES:
+            raise InfraError(f"Salad API {method} returned an oversized response")
         try:
             return response.json()
         except ValueError as exc:
@@ -68,8 +83,7 @@ def _items(value: Any, label: str) -> list[dict[str, Any]]:
 
 
 def _resource_path(organization: str, project: str, suffix: str) -> str:
-    name_re = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
-    if not name_re.fullmatch(organization) or not name_re.fullmatch(project):
+    if not RESOURCE_NAME_RE.fullmatch(organization) or not RESOURCE_NAME_RE.fullmatch(project):
         raise InfraError("Salad organization and project names are malformed")
     return f"/organizations/{organization}/projects/{project}/{suffix}"
 
@@ -96,6 +110,19 @@ def desired_queue(config: Mapping[str, Any]) -> dict[str, Any]:
         "name": queue["name"],
         "display_name": queue["display_name"],
         "description": queue["description"],
+    }
+
+
+def desired_queue_autoscaler(*, min_replicas: int = 0) -> dict[str, int]:
+    if min_replicas not in {0, 1}:
+        raise InfraError("interactive minimum replicas must be zero or one")
+    return {
+        "desired_queue_length": 1,
+        "max_downscale_per_minute": 1,
+        "max_replicas": 1,
+        "max_upscale_per_minute": 1,
+        "min_replicas": min_replicas,
+        "polling_period": 15,
     }
 
 
@@ -159,14 +186,7 @@ def desired_container_group(
             },
         },
         "queue_connection": {"path": "/process", "port": 8080, "queue_name": queue["name"]},
-        "queue_autoscaler": {
-            "desired_queue_length": 1,
-            "max_downscale_per_minute": 1,
-            "max_replicas": 1,
-            "max_upscale_per_minute": 1,
-            "min_replicas": 0,
-            "polling_period": 15,
-        },
+        "queue_autoscaler": desired_queue_autoscaler(),
         "startup_probe": _http_probe(
             "/ready",
             probes["startup_failure_threshold"],
@@ -300,9 +320,216 @@ def apply(
     return inspect_state(api, organization, project, config)
 
 
+def _tracked_resource_names(config: Mapping[str, Any]) -> tuple[str, str]:
+    try:
+        queue_name = config["queue"]["name"]
+        group_name = config["container_group"]["name"]
+    except (KeyError, TypeError) as exc:
+        raise InfraError("tracked Salad resource names are malformed") from exc
+    if (
+        not isinstance(queue_name, str)
+        or not RESOURCE_NAME_RE.fullmatch(queue_name)
+        or not isinstance(group_name, str)
+        or not RESOURCE_NAME_RE.fullmatch(group_name)
+    ):
+        raise InfraError("tracked Salad resource names are malformed")
+    return queue_name, group_name
+
+
+def _bounded_int(value: Any, *, minimum: int, maximum: int, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise InfraError(f"Salad {label} is malformed")
+    return cast(int, value)
+
+
+def _session_resources(
+    api: SaladApi, organization: str, project: str, config: Mapping[str, Any]
+) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+    queue_name, group_name = _tracked_resource_names(config)
+    queue_path = _resource_path(organization, project, f"queues/{queue_name}")
+    group_path = _resource_path(organization, project, f"containers/{group_name}")
+    queue = api.request("GET", queue_path)
+    group = api.request("GET", group_path)
+    if not isinstance(queue, dict) or queue.get("name") != queue_name:
+        raise InfraError("tracked Salad queue is missing or malformed")
+    if not isinstance(group, dict) or group.get("name") != group_name:
+        raise InfraError("tracked Salad container group is missing or malformed")
+    try:
+        tracked_queue = desired_queue(config)
+    except (KeyError, TypeError) as exc:
+        raise InfraError("tracked Salad deployment shape is malformed") from exc
+    _require_desired_subset(queue, tracked_queue, "queue")
+    _bounded_int(
+        queue.get("current_queue_length"),
+        minimum=0,
+        maximum=2_147_483_647,
+        label="queue length",
+    )
+    try:
+        tracked_group = config["container_group"]
+        tracked_resources = config["resources"]
+        expected_group = {
+            "display_name": tracked_group["display_name"],
+            "priority": "medium",
+            "queue_connection": {
+                "path": "/process",
+                "port": 8080,
+                "queue_name": queue_name,
+            },
+            "container": {
+                "resources": {
+                    "cpu": tracked_resources["cpu"],
+                    "memory": tracked_resources["memory_mb"],
+                    "shm_size": tracked_resources["shm_mb"],
+                    "storage_amount": tracked_resources["storage_bytes"],
+                }
+            },
+        }
+    except (KeyError, TypeError) as exc:
+        raise InfraError("tracked Salad deployment shape is malformed") from exc
+    _require_desired_subset(group, expected_group, "container group")
+    container = group.get("container")
+    image = container.get("image") if isinstance(container, Mapping) else None
+    if not isinstance(image, str) or not IMAGE_RE.fullmatch(image):
+        raise InfraError("existing Salad container group has incompatible drift")
+    resources = container.get("resources") if isinstance(container, Mapping) else None
+    gpu_classes = resources.get("gpu_classes") if isinstance(resources, Mapping) else None
+    if (
+        not isinstance(gpu_classes, list)
+        or not 1 <= len(gpu_classes) <= 100
+        or any(
+            not isinstance(gpu_id, str)
+            or not 1 <= len(gpu_id) <= 128
+            or any(not character.isprintable() for character in gpu_id)
+            for gpu_id in gpu_classes
+        )
+    ):
+        raise InfraError("existing Salad container group has incompatible drift")
+    replicas = _bounded_int(
+        group.get("replicas"), minimum=0, maximum=1, label="container group replicas"
+    )
+    autoscaler = group.get("queue_autoscaler")
+    if not isinstance(autoscaler, dict):
+        raise InfraError("existing Salad container group autoscaler is malformed")
+    min_replicas = _bounded_int(
+        autoscaler.get("min_replicas"), minimum=0, maximum=1, label="minimum replicas"
+    )
+    _require_desired_subset(
+        autoscaler,
+        {
+            key: value
+            for key, value in desired_queue_autoscaler(min_replicas=min_replicas).items()
+            if key != "min_replicas"
+        },
+        "container group autoscaler",
+    )
+    if set(autoscaler) != set(desired_queue_autoscaler()):
+        raise InfraError("existing Salad container group autoscaler has incompatible drift")
+    group["replicas"] = replicas
+    return queue_name, group_name, queue, group
+
+
+def _session_patch(
+    api: SaladApi,
+    organization: str,
+    project: str,
+    group_name: str,
+    group: Mapping[str, Any],
+    *,
+    min_replicas: int,
+    replicas: int,
+) -> bool:
+    autoscaler = desired_queue_autoscaler(min_replicas=min_replicas)
+    if group["queue_autoscaler"] == autoscaler and group["replicas"] == replicas:
+        return False
+    patched = api.request(
+        "PATCH",
+        _resource_path(organization, project, f"containers/{group_name}"),
+        json_body={"queue_autoscaler": autoscaler, "replicas": replicas},
+        merge_patch=True,
+    )
+    if not isinstance(patched, Mapping):
+        raise InfraError("Salad container group update response is malformed")
+    if patched.get("name") != group_name:
+        raise InfraError("Salad container group update response is malformed")
+    if patched.get("queue_autoscaler") != autoscaler or patched.get("replicas") != replicas:
+        raise InfraError("Salad container group update did not reach requested session state")
+    return True
+
+
+def session_start(
+    api: SaladApi, organization: str, project: str, config: Mapping[str, Any]
+) -> dict[str, Any]:
+    queue_name, group_name, queue, group = _session_resources(api, organization, project, config)
+    changed = _session_patch(
+        api,
+        organization,
+        project,
+        group_name,
+        group,
+        min_replicas=1,
+        replicas=1,
+    )
+    return {
+        "changed": changed,
+        "container_group": group_name,
+        "min_replicas": 1,
+        "queue": queue_name,
+        "queue_length": queue["current_queue_length"],
+        "replicas": 1,
+        "session": "started",
+    }
+
+
+def session_stop(
+    api: SaladApi, organization: str, project: str, config: Mapping[str, Any]
+) -> dict[str, Any]:
+    queue_name, group_name, queue, group = _session_resources(api, organization, project, config)
+    if queue["current_queue_length"] != 0:
+        raise InfraError("interactive session cannot stop while the queue is nonempty")
+    jobs = _items(
+        api.request(
+            "GET",
+            _resource_path(
+                organization,
+                project,
+                f"queues/{queue_name}/jobs?page=1&page_size={MAX_QUEUE_JOBS}",
+            ),
+        ),
+        "queue jobs",
+    )
+    if len(jobs) > MAX_QUEUE_JOBS:
+        raise InfraError("Salad queue jobs response is malformed")
+    for job in jobs:
+        status = job.get("status")
+        if status not in QUEUE_JOB_STATUSES:
+            raise InfraError("Salad queue jobs response is malformed")
+        if status in ACTIVE_QUEUE_JOB_STATUSES:
+            raise InfraError("interactive session cannot stop while queue work is active")
+    changed = _session_patch(
+        api,
+        organization,
+        project,
+        group_name,
+        group,
+        min_replicas=0,
+        replicas=0,
+    )
+    return {
+        "changed": changed,
+        "container_group": group_name,
+        "min_replicas": 0,
+        "queue": queue_name,
+        "queue_length": 0,
+        "recent_jobs_checked": len(jobs),
+        "replicas": 0,
+        "session": "stopped",
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("inspect", "apply"))
+    parser.add_argument("mode", choices=("inspect", "apply", "session-start", "session-stop"))
     parser.add_argument("--organization", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--image-ref")
@@ -316,7 +543,7 @@ def main() -> int:
         config = load_config()
         if args.mode == "inspect":
             result = inspect_state(api, args.organization, args.project, config)
-        else:
+        elif args.mode == "apply":
             if not args.image_ref:
                 raise InfraError("--image-ref is required for apply")
             result = apply(
@@ -328,6 +555,10 @@ def main() -> int:
                 ghcr_username=os.environ.get("GHCR_USERNAME", ""),
                 ghcr_token=os.environ.get("GHCR_TOKEN", ""),
             )
+        elif args.mode == "session-start":
+            result = session_start(api, args.organization, args.project, config)
+        else:
+            result = session_stop(api, args.organization, args.project, config)
     finally:
         api.close()
     print(json.dumps(result, sort_keys=True))

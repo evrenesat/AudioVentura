@@ -1,5 +1,15 @@
 # Development Log
 
+## 2026-08-23 (guarded Salad interactive capacity sessions)
+
+- Corrected the earlier no-allocation conclusion: system logs proved the
+  worker allocated, downloaded, and reached `Instance Starting` at 09:58;
+  operator cancellation at 10:01 was premature.
+- Added manual, idempotent `session-start`/`session-stop` capacity controls.
+  They preserve tracked autoscaler settings, require bounded exact resources,
+  and restore zero only after queue length and recent jobs prove no active
+  work. Live acceptance remains in progress.
+
 ## 2026-08-23 (documentation consolidation)
 
 - Replaced the obsolete README handoff with a short operator and coding-agent

@@ -6,14 +6,16 @@ the same ACE-Step handler used by Runpod.
 
 ## Current deployment status
 
-The image, queue, and container group are deployed. A corrected cold
-acceptance job remained pending for 54 minutes without an instance or dispatch
-event, including attempts at batch, low, and medium priority. After the job was
-cancelled, desired replicas also had to be reset explicitly to zero.
+The image, queue, and container group are deployed. The earlier conclusion
+that a corrected job received no allocation for 54 minutes was wrong: the
+instances endpoint stayed empty, but system logs later proved allocation,
+image download, and `Instance Starting` at 09:58. Operator cancellation at
+10:01 was premature.
 
-The queue is empty and the group has no instances. Further paid acceptance is
-blocked on Salad capacity or control-plane recovery. This no-instance result
-does not indicate a worker-image or ACE-Step failure.
+Live acceptance is still in progress and is not yet complete. The current
+manual workflow keeps one worker available across an interactive cover and its
+continuation, then explicitly restores zero-at-rest after all queue work is
+terminal.
 
 ## Runtime shape
 
@@ -102,6 +104,40 @@ Infrastructure management stays outside the provider interface.
 idempotent for a matching deployment, stops on drift, and does not create queue
 jobs or delete resources automatically.
 
+For the initial manual-only interactive workflow, start a capacity session
+before submitting work:
+
+```text
+SALAD_API_KEY="$(< /root/salad_api_key)" \
+uv run python deploy/salad/saladctl.py session-start \
+  --organization <organization> \
+  --project <project>
+```
+
+`session-start` verifies the exact tracked queue and group, preserves the full
+tracked queue-autoscaler configuration except for `min_replicas=1`, and sets
+desired replicas to one. It does not require registry credentials and does not
+change the image, priority, GPU/resources, probes, or queue jobs. Wait for the
+worker to become ready, then submit the cover and any continuation while the
+session remains active.
+
+After every recent queue job is terminal and queue length is exactly zero,
+restore zero-at-rest:
+
+```text
+SALAD_API_KEY="$(< /root/salad_api_key)" \
+uv run python deploy/salad/saladctl.py session-stop \
+  --organization <organization> \
+  --project <project>
+```
+
+`session-stop` refuses to mutate capacity when the queue or its bounded recent
+job list cannot prove there is no pending/running work. On success it restores
+the tracked `min_replicas=0` and desired replicas zero. Both session commands
+are idempotent and return only bounded, secret-free status. A future automated
+idle lease belongs in deployment/capacity management, not in
+`InferenceProvider`.
+
 Inspect first:
 
 ```text
@@ -147,10 +183,12 @@ Pending Salad jobs can be cancelled. Running jobs report `too_late`. Salad
 durable queue UUID until terminal evidence or its deadline policy resolves the
 attempt.
 
-While a job is pending, the provider may inspect the single container-group
-instance. Allocation, image download, and startup are shown as deployment-level
-inferred status. Image pull progress is displayed when Salad supplies a valid
-fraction.
+While a job is pending, the provider first inspects the single container-group
+instance. If that endpoint is empty or unusable, it may use only a bounded,
+post-job system lifecycle event as a fallback. Allocation, image download, and
+startup remain deployment-level inferred status. Image pull progress is shown
+only when the instances endpoint supplies a valid fraction; logs never invent
+a percentage or readiness.
 
 ## Verification
 
@@ -167,6 +205,7 @@ uv run mypy --follow-imports=skip deploy/salad
 shellcheck deploy/salad/entrypoint.sh
 ```
 
-When capacity is available, run one cold job and record queue delay, allocation,
-image download, startup, readiness, inference, upload, completion, and return to
-zero replicas. Confirm the output digest and immutable runtime identities.
+Complete the current live acceptance before claiming Salad ready: record queue
+delay, allocation, image download, startup, readiness, inference, upload,
+continuation behavior, completion, and the explicit return to zero replicas.
+Confirm the output digest and immutable runtime identities.
