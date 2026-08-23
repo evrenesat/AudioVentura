@@ -21,6 +21,7 @@ from ace_service.providers.base import (
 from ace_service.providers.salad import SaladProvider
 
 JOB_ID = str(uuid4())
+JOB_CREATED = "2026-08-23T10:00:00+00:00"
 META = {
     "application_job_id": "app-job",
     "variation_index": 1,
@@ -104,7 +105,9 @@ def test_pending_status_uses_unambiguous_deployment_progress() -> None:
             return httpx.Response(
                 200, json={"items": [{"state": "downloading", "pulling_progress": 63}]}
             )
-        return httpx.Response(200, json={"id": JOB_ID, "status": "pending"})
+        return httpx.Response(
+            200, json={"id": JOB_ID, "status": "pending", "create_time": JOB_CREATED}
+        )
 
     async def scenario() -> None:
         provider = _provider(handler)
@@ -121,6 +124,188 @@ def test_pending_status_uses_unambiguous_deployment_progress() -> None:
         f"/api/public/organizations/org/projects/project/queues/queue/jobs/{JOB_ID}",
         "/api/public/organizations/org/projects/project/containers/group/instances",
     ]
+
+
+@pytest.mark.parametrize(
+    ("event_name", "phase", "message", "instance_status_code"),
+    [
+        ("Instance Allocated", ProviderPhase.PROVISIONING, "Allocated GPU", 500),
+        (
+            "Instance Downloading",
+            ProviderPhase.PROVISIONING,
+            "Downloading worker image",
+            200,
+        ),
+        ("Instance Starting", ProviderPhase.STARTING, "Starting worker", 200),
+        ("Instance Running", ProviderPhase.STARTING, "Initializing ACE-Step", 200),
+    ],
+)
+def test_pending_status_falls_back_to_current_system_log_lifecycle(
+    event_name: str, phase: ProviderPhase, message: str, instance_status_code: int
+) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith(f"/jobs/{JOB_ID}"):
+            return httpx.Response(
+                200, json={"id": JOB_ID, "status": "pending", "create_time": JOB_CREATED}
+            )
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(instance_status_code, json={"items": []})
+        if request.url.path.endswith("/system-logs"):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "event_name": "Container Group Started",
+                            "event_time": "2026-08-23T10:02:00Z",
+                        },
+                        {
+                            "event_name": event_name,
+                            "event_time": "2026-08-23T10:01:00Z",
+                            "instance_id": "private-instance-id",
+                            "machine_id": "private-machine-id",
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (status.phase, status.message, status.progress, status.detail_scope) == (
+            phase,
+            message,
+            None,
+            DetailScope.DEPLOYMENT,
+        )
+        assert "private-instance-id" not in repr(status)
+        assert "private-machine-id" not in repr(status)
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+    assert paths == [
+        f"/api/public/organizations/org/projects/project/queues/queue/jobs/{JOB_ID}",
+        "/api/public/organizations/org/projects/project/containers/group/instances",
+        "/api/public/organizations/org/projects/project/containers/group/system-logs",
+    ]
+
+
+def test_pending_status_ignores_pre_job_system_log_event() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/jobs/{JOB_ID}"):
+            return httpx.Response(
+                200, json={"id": JOB_ID, "status": "pending", "create_time": JOB_CREATED}
+            )
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(200, json={"instances": []})
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "event_name": "Instance Downloading",
+                        "event_time": "2026-08-23T09:59:59Z",
+                    }
+                ]
+            },
+        )
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (status.phase, status.message, status.detail_scope) == (
+            ProviderPhase.QUEUED,
+            None,
+            DetailScope.JOB,
+        )
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status_code", "logs"),
+    [
+        (500, {"items": []}),
+        (200, {"items": "invalid"}),
+        (200, {"items": ["invalid"]}),
+        (
+            200,
+            {
+                "items": [
+                    {
+                        "event_name": "Instance " + "x" * 255,
+                        "event_time": "2026-08-23T10:01:00Z",
+                    }
+                ]
+            },
+        ),
+        (
+            200,
+            {
+                "items": [
+                    {
+                        "event_name": "Instance Downloading",
+                        "event_time": "not-a-timestamp",
+                    }
+                ]
+            },
+        ),
+        (
+            200,
+            {
+                "items": [
+                    {
+                        "event_name": "Instance Downloading",
+                        "event_time": "2026-08-23T10:01:00Z",
+                    },
+                    {
+                        "event_name": "Instance Interrupted (Priority)",
+                        "event_time": "2026-08-23T10:02:00Z",
+                    },
+                ]
+            },
+        ),
+        (
+            200,
+            {
+                "items": [
+                    {
+                        "event_name": "Instance Creating",
+                        "event_time": "2026-08-23T10:01:00Z",
+                    }
+                ]
+            },
+        ),
+    ],
+)
+def test_pending_status_keeps_queued_on_uncertain_system_logs(
+    status_code: int, logs: object
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/jobs/{JOB_ID}"):
+            return httpx.Response(
+                200, json={"id": JOB_ID, "status": "pending", "create_time": JOB_CREATED}
+            )
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(200, json={"items": []})
+        return httpx.Response(status_code, json=logs)
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (status.phase, status.message, status.detail_scope) == (
+            ProviderPhase.QUEUED,
+            None,
+            DetailScope.JOB,
+        )
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("pulling_progress", (0.0, 0.19, 1.0))

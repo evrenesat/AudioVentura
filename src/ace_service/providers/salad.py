@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -29,7 +30,16 @@ from .base import (
 from .salad_names import is_salad_resource_name
 
 _MAX_BODY = 1_048_576
+_MAX_SYSTEM_LOGS = 50
+_MAX_EVENT_NAME = 255
+_MAX_TIMESTAMP = 64
 _FEATURES = frozenset(RequestFeature)
+_SYSTEM_LOG_STATUS = {
+    "Instance Allocated": (ProviderPhase.PROVISIONING, "Allocated GPU"),
+    "Instance Downloading": (ProviderPhase.PROVISIONING, "Downloading worker image"),
+    "Instance Starting": (ProviderPhase.STARTING, "Starting worker"),
+    "Instance Running": (ProviderPhase.STARTING, "Initializing ACE-Step"),
+}
 
 
 class SaladProvider:
@@ -210,66 +220,124 @@ class SaladProvider:
             raw = await self._request(
                 "GET", f"containers/{self.container_group}/instances", "instances"
             )
-            values = raw.get("items", raw.get("instances")) if isinstance(raw, Mapping) else raw
-            if (
-                not isinstance(values, list)
-                or len(values) != 1
-                or not isinstance(values[0], Mapping)
-            ):
-                return base
-            instance = values[0]
-            status = instance.get("state", instance.get("status"))
-            ready = instance.get("ready")
-            if status == "allocating":
-                return ProviderStatus(
-                    ProviderPhase.PROVISIONING,
-                    "Waiting for GPU",
-                    provider_state=state,
-                    detail_scope=DetailScope.DEPLOYMENT,
-                )
-            if status == "downloading":
-                raw_progress = instance.get("pulling_progress")
-                progress = None
-                if (
-                    isinstance(raw_progress, (int, float))
-                    and not isinstance(raw_progress, bool)
-                    and 0 <= raw_progress <= 100
-                ):
-                    numeric_progress = float(raw_progress)
-                    # Live Container Engine returns a 0..1 fraction even though
-                    # its OpenAPI describes a 0..100 percentage. Accept both.
-                    progress = numeric_progress if numeric_progress <= 1 else numeric_progress / 100
-                return ProviderStatus(
-                    ProviderPhase.PROVISIONING,
-                    "Downloading worker image",
-                    progress,
-                    state,
-                    detail_scope=DetailScope.DEPLOYMENT,
-                )
-            if status == "creating":
-                return ProviderStatus(
-                    ProviderPhase.STARTING,
-                    "Starting worker",
-                    provider_state=state,
-                    detail_scope=DetailScope.DEPLOYMENT,
-                )
-            if status == "running" and ready is False:
-                return ProviderStatus(
-                    ProviderPhase.STARTING,
-                    "Initializing ACE-Step",
-                    provider_state=state,
-                    detail_scope=DetailScope.DEPLOYMENT,
-                )
-            if status == "running" and ready is True:
-                return ProviderStatus(
-                    ProviderPhase.QUEUED,
-                    "Worker ready",
-                    provider_state=state,
-                    detail_scope=DetailScope.DEPLOYMENT,
-                )
+            instance_status = self._instance_status(raw, state)
+            if instance_status is not None:
+                return instance_status
+        except (ProviderError, ValueError, TypeError):
+            pass
+        try:
+            fallback = await self._system_log_status(body, state)
         except (ProviderError, ValueError, TypeError):
             return base
-        return base
+        return fallback or base
+
+    @staticmethod
+    def _instance_status(raw: Any, state: str) -> ProviderStatus | None:
+        values = raw.get("items", raw.get("instances")) if isinstance(raw, Mapping) else raw
+        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], Mapping):
+            return None
+        instance = values[0]
+        status = instance.get("state", instance.get("status"))
+        ready = instance.get("ready")
+        if status == "allocating":
+            return ProviderStatus(
+                ProviderPhase.PROVISIONING,
+                "Waiting for GPU",
+                provider_state=state,
+                detail_scope=DetailScope.DEPLOYMENT,
+            )
+        if status == "downloading":
+            raw_progress = instance.get("pulling_progress")
+            progress = None
+            if (
+                isinstance(raw_progress, (int, float))
+                and not isinstance(raw_progress, bool)
+                and 0 <= raw_progress <= 100
+            ):
+                numeric_progress = float(raw_progress)
+                # Live Container Engine returns a 0..1 fraction even though
+                # its OpenAPI describes a 0..100 percentage. Accept both.
+                progress = numeric_progress if numeric_progress <= 1 else numeric_progress / 100
+            return ProviderStatus(
+                ProviderPhase.PROVISIONING,
+                "Downloading worker image",
+                progress,
+                state,
+                detail_scope=DetailScope.DEPLOYMENT,
+            )
+        if status == "creating":
+            return ProviderStatus(
+                ProviderPhase.STARTING,
+                "Starting worker",
+                provider_state=state,
+                detail_scope=DetailScope.DEPLOYMENT,
+            )
+        if status == "running" and ready is False:
+            return ProviderStatus(
+                ProviderPhase.STARTING,
+                "Initializing ACE-Step",
+                provider_state=state,
+                detail_scope=DetailScope.DEPLOYMENT,
+            )
+        if status == "running" and ready is True:
+            return ProviderStatus(
+                ProviderPhase.QUEUED,
+                "Worker ready",
+                provider_state=state,
+                detail_scope=DetailScope.DEPLOYMENT,
+            )
+        return None
+
+    async def _system_log_status(self, job: Mapping[str, Any], state: str) -> ProviderStatus | None:
+        job_created = self._timestamp(job.get("create_time"))
+        if job_created is None:
+            return None
+        raw = await self._request(
+            "GET", f"containers/{self.container_group}/system-logs", "system logs"
+        )
+        if not isinstance(raw, Mapping):
+            return None
+        items = raw.get("items")
+        if not isinstance(items, list) or len(items) > _MAX_SYSTEM_LOGS:
+            return None
+        latest: tuple[datetime, str] | None = None
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            event_name = item.get("event_name")
+            event_time = self._timestamp(item.get("event_time"))
+            if (
+                not isinstance(event_name, str)
+                or not 1 <= len(event_name) <= _MAX_EVENT_NAME
+                or any(not character.isprintable() for character in event_name)
+                or not event_name.startswith("Instance ")
+                or event_time is None
+                or event_time < job_created
+            ):
+                continue
+            if latest is None or event_time > latest[0]:
+                latest = event_time, event_name
+        if latest is None or latest[1] not in _SYSTEM_LOG_STATUS:
+            return None
+        phase, message = _SYSTEM_LOG_STATUS[latest[1]]
+        return ProviderStatus(
+            phase,
+            message,
+            provider_state=state,
+            detail_scope=DetailScope.DEPLOYMENT,
+        )
+
+    @staticmethod
+    def _timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not 1 <= len(value) <= _MAX_TIMESTAMP:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None
+            return parsed.astimezone(UTC)
+        except (OverflowError, ValueError):
+            return None
 
     async def result(self, ref: ProviderJobRef) -> InferenceResult:
         body = await self._get_job(ref, "result")
