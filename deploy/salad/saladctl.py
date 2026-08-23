@@ -141,7 +141,7 @@ def desired_container_group(
         "container": {
             "image": image_ref,
             "image_caching": True,
-            "priority": "low",
+            "priority": "medium",
             "registry_authentication": {
                 "basic": {"username": ghcr_username, "password": ghcr_token}
             },

@@ -22,7 +22,9 @@
   selection, so completion evidence matches controller calibration identity.
 - After one live acceptance job remained pending for 30 minutes with desired
   replicas at one but no instance record, raised the tracked Container Engine
-  priority from batch to low without resubmitting the durable queue job.
+  priority from batch to low without resubmitting the durable queue job. Low
+  priority also produced no instance for more than ten minutes, so the same
+  queue job was promoted to medium priority for the final capacity probe.
 
 ## 2026-08-23 (Salad live pull-progress normalization)
 
