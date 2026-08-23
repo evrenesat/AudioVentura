@@ -123,6 +123,41 @@ _FAL_UNIVERSAL_FIELDS = frozenset(
         "youtube_url",
     }
 )
+_BUILTIN_GENERATION_FIELDS: dict[str, dict[str, dict[str, Any]]] = {
+    BackendOperation.TEXT_TO_MUSIC.value: {
+        "lyrics": {"type": "string", "required": False},
+        "instrumental": {"type": "boolean", "required": False},
+        "prompt_mode": {"type": "string", "required": False},
+        "vocal_language": {"type": "string", "required": False},
+        "duration": {"type": "number", "required": False, "minimum": 10, "maximum": 600},
+        "bpm": {"type": "integer", "required": False, "minimum": 30, "maximum": 300},
+        "key_scale": {"type": "string", "required": False},
+        "time_signature": {
+            "type": "integer",
+            "required": False,
+            "minimum": 2,
+            "maximum": 6,
+        },
+        "seed": {"type": "integer", "required": False, "minimum": 0},
+    },
+    BackendOperation.AUDIO_TRANSFORM.value: {
+        "lyrics": {"type": "string", "required": False},
+        "audio_cover_strength": {
+            "type": "number",
+            "required": False,
+            "minimum": 0,
+            "maximum": 1,
+        },
+        "cover_noise_strength": {
+            "type": "number",
+            "required": False,
+            "minimum": 0,
+            "maximum": 1,
+        },
+        "duration": {"type": "number", "required": False, "minimum": 10, "maximum": 600},
+        "seed": {"type": "integer", "required": False, "minimum": 0},
+    },
+}
 _FORMAT_MIME = {
     OutputFormat.MP3: "audio/mpeg",
     OutputFormat.FLAC: "audio/flac",
@@ -422,7 +457,7 @@ def _backend_choices(
                 "operation": actual_operation,
                 "media_kind": media_kind,
                 "native_formats": sorted(capabilities.native_formats),
-                "fields": {},
+                "fields": _BUILTIN_GENERATION_FIELDS[actual_operation],
                 "result_delivery": capabilities.result_delivery.value,
                 "catalog_revision": "builtin-v1",
             }
@@ -767,7 +802,11 @@ def register_web_routes(app: FastAPI) -> None:
     async def set_keep_warm(request: Request) -> Response:
         fields = await parse_form(request)
         require_csrf(request, fields)
-        raw_seconds = fields.get("keep_warm_seconds", "")
+        if "keep_warm_seconds" not in fields:
+            return RedirectResponse(
+                _route_path(request, "dashboard"), status_code=status.HTTP_303_SEE_OTHER
+            )
+        raw_seconds = fields["keep_warm_seconds"]
         try:
             seconds = int(raw_seconds)
         except ValueError as exc:

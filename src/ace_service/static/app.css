@@ -4,6 +4,7 @@ body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 sy
 a { color: var(--accent-dark); }
 .site-header { align-items: center; background: var(--card); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; padding: 1rem max(1rem, calc((100vw - 960px) / 2)); }
 .notification-control { align-items: center; display: flex; gap: .45rem; }
+.notification-control[hidden] { display: none; }
 .brand { color: var(--ink); font-weight: 750; text-decoration: none; }
 nav { display: flex; flex-wrap: wrap; gap: 1rem; }
 nav a { font-size: .92rem; text-decoration: none; }

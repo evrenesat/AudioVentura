@@ -363,21 +363,31 @@ def audit_catalog(
     discovered: dict[str, dict[str, Any]] = {}
     try:
         for category in ("text-to-audio", "audio-to-audio"):
-            response = http.get(
-                "models",
-                params={
+            cursor: str | None = None
+            seen_cursors: set[str] = set()
+            while True:
+                params = {
                     "category": category,
                     "status": "active",
                     "expand": "openapi-3.0",
-                    "limit": 50,
-                },
-                headers=headers,
-            )
-            response.raise_for_status()
-            body = response.json()
-            for item in body.get("models", []) if isinstance(body, dict) else []:
-                if isinstance(item, dict) and isinstance(item.get("endpoint_id"), str):
-                    discovered[item["endpoint_id"]] = {**item, "_category": category}
+                    # Fal limits expanded model-list responses to ten rows.
+                    "limit": 10,
+                }
+                if cursor is not None:
+                    params["cursor"] = cursor
+                response = http.get("models", params=params, headers=headers)
+                response.raise_for_status()
+                body = response.json()
+                for item in body.get("models", []) if isinstance(body, dict) else []:
+                    if isinstance(item, dict) and isinstance(item.get("endpoint_id"), str):
+                        discovered[item["endpoint_id"]] = {**item, "_category": category}
+                next_cursor = body.get("next_cursor") if isinstance(body, dict) else None
+                if not isinstance(next_cursor, str) or not next_cursor:
+                    break
+                if next_cursor in seen_cursors:
+                    raise ValueError("Fal model catalog returned a repeated cursor")
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
     except Exception:
         if owns_client:
             http.close()
@@ -526,6 +536,28 @@ def _openapi_request_schema(openapi: Mapping[str, Any], components: Mapping[str,
 def _openapi_response_schema(openapi: Mapping[str, Any], components: Mapping[str, Any]) -> Any:
     paths = openapi.get("paths")
     if isinstance(paths, Mapping):
+        # Fal's expanded OpenAPI describes both queue submission and eventual
+        # result retrieval. Prefer the result GET; the root POST response is
+        # only the queue receipt and never contains the generated artifact.
+        for path, path_item in paths.items():
+            if not str(path).endswith("/requests/{request_id}") or not isinstance(
+                path_item, Mapping
+            ):
+                continue
+            operation = path_item.get("get")
+            if not isinstance(operation, Mapping):
+                continue
+            responses = operation.get("responses")
+            if not isinstance(responses, Mapping):
+                continue
+            response = responses.get("200", responses.get("201", responses.get("default")))
+            if not isinstance(response, Mapping):
+                continue
+            content = response.get("content")
+            if isinstance(content, Mapping):
+                json_content = content.get("application/json")
+                if isinstance(json_content, Mapping) and "schema" in json_content:
+                    return _resolve_openapi_ref(json_content["schema"], components)
         for path_item in paths.values():
             if not isinstance(path_item, Mapping):
                 continue
@@ -600,35 +632,6 @@ def _openapi_field_contract(
     }
 
 
-def _openapi_required_paths(
-    schema: Any,
-    components: Mapping[str, Any],
-    *,
-    prefix: str = "",
-    depth: int = 0,
-) -> set[str]:
-    """Return required object-property paths from a bounded response schema."""
-
-    if depth > 12:
-        return set()
-    resolved = _resolve_openapi_ref(schema, components)
-    if not isinstance(resolved, Mapping):
-        return set()
-    properties = _openapi_schema_properties(resolved, components)
-    required = resolved.get("required")
-    required_names = set(required) if isinstance(required, list) else set()
-    paths: set[str] = set()
-    for name in required_names:
-        if not isinstance(name, str):
-            continue
-        path = f"{prefix}.{name}" if prefix else name
-        paths.add(path)
-        child = properties.get(name)
-        if child is not None:
-            paths.update(_openapi_required_paths(child, components, prefix=path, depth=depth + 1))
-    return paths
-
-
 def normalize_openapi_schema(
     openapi: Mapping[str, Any],
     *,
@@ -676,11 +679,16 @@ def normalize_openapi_schema(
             if actual is None:
                 fields[name] = {"missing": True}
                 continue
-            fields[name] = _openapi_field_contract(
+            contract = _openapi_field_contract(
                 policy.fal_name, actual, request_required, components
             )
+            # Fal commonly omits the optional JSON-Schema URI format even
+            # though the endpoint accepts the controller's validated URL.
+            if policy.type == "url" and contract["type"] == "string":
+                contract["type"] = "url"
+            fields[name] = contract
         for fal_name, actual in sorted(request_properties.items()):
-            if fal_name not in declared_names:
+            if fal_name not in declared_names and fal_name in request_required:
                 fields[f"__unexpected__:{fal_name}"] = _openapi_field_contract(
                     fal_name, actual, request_required, components
                 )
@@ -716,12 +724,11 @@ def normalize_openapi_schema(
     }
     if output is not None and result_schema is not None:
         result_type = _openapi_field_type(result_schema)
-        if result_type != "url":
+        # Result URLs are frequently declared as plain strings. Runtime still
+        # requires HTTPS and a maintained Fal CDN host before downloading.
+        if result_type not in {"url", "string"}:
             normalized_output["result_type"] = result_type
     if output is not None:
-        expected_paths = {
-            path for path in (output.result_path, output.seed_path, output.duration_path) if path
-        }
         expected_types = {
             path: {"integer"} if path == output.seed_path else {"integer", "number"}
             for path in (output.seed_path, output.duration_path)
@@ -747,18 +754,6 @@ def normalize_openapi_schema(
         )
         if missing_paths:
             normalized_output["__missing_paths__"] = missing_paths
-        unexpected_required = sorted(
-            path
-            for path in _openapi_required_paths(response_schema, components)
-            if not any(
-                expected == path
-                or expected.startswith(f"{path}.")
-                or path.startswith(f"{expected}.")
-                for expected in expected_paths
-            )
-        )
-        if unexpected_required:
-            normalized_output["__unexpected_required__"] = unexpected_required
     return {
         "endpoint_id": resolved_endpoint,
         "operation": resolved_operation,

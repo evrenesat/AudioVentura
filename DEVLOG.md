@@ -1,5 +1,17 @@
 # Development Log
 
+## 2026-08-23 (capability-driven forms and Fal audit recovery)
+
+- Made generation controls capability-driven for built-in and Fal backends, so
+  unsupported parameters are hidden and disabled instead of being submitted.
+- Preserved the 15-minute keep-warm default when its form field is absent,
+  removed the internal dashboard label, and hid notification enrollment after
+  a browser is subscribed.
+- Updated Fal catalog audit pagination for the live ten-row expanded-model
+  limit and compared result retrieval rather than the queue receipt. The live
+  audit found six active, contract-clean music endpoints; drifted entries remain
+  ineligible for production configuration.
+
 ## 2026-08-23 (production backend and generation-form corrections)
 
 - Corrected managed-capacity inspection to fetch RunPod's complete template

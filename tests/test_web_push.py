@@ -17,6 +17,7 @@ from ace_service.models import (
     PushSubscription,
 )
 from ace_service.notifications import MAX_ATTEMPTS
+from ace_service.repository import get_keep_warm_seconds
 from ace_service.web import _readiness
 
 
@@ -145,6 +146,19 @@ def test_service_worker_and_keep_warm_round_trip_at_beta_root(settings: ServiceS
             assert notifications_js.status_code == 200
             assert "Uint8Array.from" in notifications_js.text
             assert "applicationServerKey(key)" in notifications_js.text
+            assert "control.hidden = true" in notifications_js.text
+            with factory() as session:
+                assert get_keep_warm_seconds(session) == 900
+                session.commit()
+            unchanged = client.post(
+                "/beta/settings/keep-warm",
+                auth=_auth(),
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert unchanged.status_code == 303
+            with factory() as session:
+                assert session.get(ControllerSetting, 1).keep_warm_seconds == 900
             for value in values:
                 response = client.post(
                     "/beta/settings/keep-warm",

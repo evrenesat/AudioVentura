@@ -21,6 +21,7 @@ from ace_service.config import ServiceSettings
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, SubmissionQuote
+from ace_service.providers.base import BackendOperation
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
 from ace_service.providers.registry import ProviderRegistry
@@ -49,6 +50,31 @@ from runpod_worker.schemas import WorkerRequest
 
 RUNTIME_A = "sha256:" + "a" * 64
 RUNTIME_B = "sha256:" + "b" * 64
+
+
+def test_builtin_backend_choices_expose_only_relevant_form_fields(web_app) -> None:
+    app, _, _ = web_app
+    original = web_routes._backend_choices(app, BackendOperation.TEXT_TO_MUSIC)
+    cover = web_routes._backend_choices(app, BackendOperation.AUDIO_TRANSFORM)
+
+    assert set(original[0]["fields"]) == {
+        "lyrics",
+        "instrumental",
+        "prompt_mode",
+        "vocal_language",
+        "duration",
+        "bpm",
+        "key_scale",
+        "time_signature",
+        "seed",
+    }
+    assert set(cover[0]["fields"]) == {
+        "lyrics",
+        "audio_cover_strength",
+        "cover_noise_strength",
+        "duration",
+        "seed",
+    }
 
 
 class FakeRunpod:

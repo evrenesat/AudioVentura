@@ -5,7 +5,6 @@ from copy import deepcopy
 from pathlib import Path
 
 import httpx
-import pytest
 
 from ace_service.providers.base import BackendOperation
 from ace_service.providers.fal_catalog import audit_catalog, load_catalog
@@ -61,6 +60,38 @@ def test_audit_uses_normalized_schema_fixture_without_mutating_catalog() -> None
         result = audit_catalog(catalog, client=client)
 
     assert result["schema_changed"] == []
+
+
+def test_audit_paginates_with_fal_expanded_page_limit() -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["limit"] == "10"
+        cursor = request.url.params.get("cursor")
+        if cursor is None:
+            return httpx.Response(200, json={"models": [], "next_cursor": "page-2"})
+        assert cursor == "page-2"
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "endpoint_id": descriptor.endpoint_id,
+                        "openapi": descriptor.normalized_schema(),
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client)
+
+    assert result["schema_changed"] == []
+    assert len(requests) == 4
 
 
 def _openapi_fixture(descriptor) -> dict[str, object]:
@@ -146,8 +177,57 @@ def test_audit_normalizes_live_openapi_shape_before_fingerprinting() -> None:
     assert result["removed"]
 
 
-@pytest.mark.parametrize("drift", ["input", "output"])
-def test_audit_detects_new_required_live_contract_fields(drift: str) -> None:
+def test_audit_ignores_new_optional_input_fields() -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+    live = _openapi_fixture(descriptor)
+    operation = live["paths"]["/"]["post"]
+    request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+    request_schema["properties"]["new_optional"] = {"type": "string"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": descriptor.endpoint_id, "openapi": live}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client)
+    assert result["schema_changed"] == []
+
+
+def test_audit_prefers_result_get_schema_over_queue_receipt() -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
+    live = _openapi_fixture(descriptor)
+    paths = live["paths"]
+    paths["/queue"] = paths.pop("/")
+    paths["/queue/requests/{request_id}"] = {
+        "get": deepcopy(paths["/queue"]["post"]),
+    }
+    paths["/queue"]["post"]["responses"]["200"]["content"]["application/json"]["schema"] = {
+        "type": "object",
+        "required": ["request_id", "status"],
+        "properties": {
+            "request_id": {"type": "string"},
+            "status": {"type": "string"},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": descriptor.endpoint_id, "openapi": live}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client)
+    assert result["schema_changed"] == []
+
+
+def test_audit_detects_new_required_live_input_fields() -> None:
     catalog = load_catalog()
     descriptor = catalog.by_backend_id("fal/cassetteai/music-generator")
     live = _openapi_fixture(descriptor)
@@ -155,20 +235,12 @@ def test_audit_detects_new_required_live_contract_fields(drift: str) -> None:
     assert isinstance(paths, dict)
     operation = paths["/"]["post"]
     assert isinstance(operation, dict)
-    if drift == "input":
-        request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
-        assert isinstance(request_schema, dict)
-        properties = request_schema["properties"]
-        assert isinstance(properties, dict)
-        properties["new_required"] = {"type": "string"}
-        request_schema["required"] = [*request_schema.get("required", []), "new_required"]
-    else:
-        response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
-        assert isinstance(response_schema, dict)
-        properties = response_schema["properties"]
-        assert isinstance(properties, dict)
-        properties["new_required"] = {"type": "string"}
-        response_schema["required"] = ["new_required"]
+    request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+    assert isinstance(request_schema, dict)
+    properties = request_schema["properties"]
+    assert isinstance(properties, dict)
+    properties["new_required"] = {"type": "string"}
+    request_schema["required"] = [*request_schema.get("required", []), "new_required"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

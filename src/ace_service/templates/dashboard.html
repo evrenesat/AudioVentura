@@ -20,7 +20,7 @@
 {% endif %}
 
 <section class="form-card operations-card" aria-labelledby="operations-title">
-  <div class="section-heading"><h2 id="operations-title">GPU operations</h2><span class="muted">Database-owned</span></div>
+  <div class="section-heading"><h2 id="operations-title">GPU operations</h2></div>
   <form method="post" action="{{ urls.keep_warm }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label for="keep_warm_seconds">Keep one managed worker warm after generation</label>

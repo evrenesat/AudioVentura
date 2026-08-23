@@ -2,6 +2,7 @@
   const button = document.querySelector('[data-notifications-enable]');
   const status = document.querySelector('[data-notifications-status]');
   if (!button || !status) return;
+  const control = button.closest('.notification-control');
   const configUrl = document.querySelector('meta[name="notifications-config"]')?.content || '/notifications/config';
   const subscriptionUrl = document.querySelector('meta[name="notifications-subscriptions"]')?.content || '/notifications/subscriptions';
   const workerUrl = document.querySelector('meta[name="notifications-worker"]')?.content || '/notification-worker.js';
@@ -20,6 +21,9 @@
     return;
   }
   const update = (value) => { status.textContent = value; };
+  const hideEnabledControl = () => {
+    if (control) control.hidden = true;
+  };
   const load = async () => {
     try {
       const response = await fetch(configUrl, { credentials: 'same-origin' });
@@ -29,7 +33,7 @@
       registration = await navigator.serviceWorker.register(workerLocation, { scope: new URL('./', workerLocation).pathname });
       subscription = await registration.pushManager.getSubscription();
       if (subscription) subscription.__serverId = localStorage.getItem('ace_push_subscription_id') || '';
-      if (subscription) update('Enabled');
+      if (subscription) hideEnabledControl();
       else if (Notification.permission === 'denied') update('Blocked in browser');
       else update('Enable notifications');
       button.dataset.publicKey = config.public_key || '';
@@ -52,7 +56,7 @@
       const serialized = subscription.toJSON();
       const response = await fetch(subscriptionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() }, credentials: 'same-origin', body: JSON.stringify({ endpoint: serialized.endpoint, keys: serialized.keys, csrf_token: csrf() }) });
       if (!response.ok) { update('Unavailable'); return; }
-      const result = await response.json(); subscription.__serverId = result.subscription_id; localStorage.setItem('ace_push_subscription_id', result.subscription_id); update('Enabled');
+      const result = await response.json(); subscription.__serverId = result.subscription_id; localStorage.setItem('ace_push_subscription_id', result.subscription_id); hideEnabledControl();
     } catch (_) { update('Unavailable'); }
   });
   load();

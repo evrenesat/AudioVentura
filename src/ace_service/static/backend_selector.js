@@ -69,26 +69,25 @@
     }
 
     const fields = choice.fields || {};
-    const isFal = choice.provider === "fal.ai";
     for (const wrapper of document.querySelectorAll("[data-backend-field]")) {
       const name = wrapper.getAttribute("data-backend-field");
       const policy = name ? fields[name] : null;
-      wrapper.hidden = isFal && !policy;
+      wrapper.hidden = !policy;
       const input = wrapper.querySelector("input, select, textarea");
       if (input) {
         const defaults = fieldDefaults.get(input);
         if (!defaults) continue;
-        input.disabled = isFal ? !policy : defaults.disabled;
-        input.required = isFal ? Boolean(policy && policy.required) : defaults.required;
+        input.disabled = !policy || defaults.disabled;
+        input.required = Boolean(policy && policy.required);
         restoreAttribute(
           input,
           "min",
-          isFal && policy && policy.minimum != null ? String(policy.minimum) : defaults.min,
+          policy && policy.minimum != null ? String(policy.minimum) : defaults.min,
         );
         restoreAttribute(
           input,
           "max",
-          isFal && policy && policy.maximum != null ? String(policy.maximum) : defaults.max,
+          policy && policy.maximum != null ? String(policy.maximum) : defaults.max,
         );
       }
     }
@@ -96,7 +95,7 @@
       const policy = fields[catalogName];
       for (const alias of aliases) {
         const element = document.querySelector(`#${alias}`);
-        if (!isFal || !element || !policy) continue;
+        if (!element || !policy) continue;
         if (policy.minimum != null) element.min = policy.minimum;
         if (policy.maximum != null) element.max = policy.maximum;
         element.required = Boolean(policy.required);
