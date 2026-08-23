@@ -779,3 +779,12 @@ production-default change, or commit. Checkpoint 3 remains unchecked.
   coverage. All local tests and static checks pass without Runpod contact;
   no live campaign, paid baseline, quality result, endpoint teardown,
   deployment, or default promotion is claimed.
+## 2026-08-23 (fal.ai managed music backends)
+
+- Added exact per-job backend identity, mode defaults, migration 8 persistence,
+  reviewed fal.ai music/audio catalog, raw queue adapters, read-only pricing
+  cache, and controller-pulled private artifact materialization.
+- Added progressive Original and Cover backend selectors with server-side
+  capability validation, continuation preservation, and backend detail views.
+- Added offline catalog, queue, CDN, and atomic artifact tests. No live paid Fal
+  request or deployment mutation was performed.

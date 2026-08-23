@@ -11,11 +11,13 @@ from uuid import UUID
 import httpx
 
 from .base import (
+    BackendId,
     CancelOutcome,
     DetailScope,
     InferenceMode,
     InferenceRequest,
     InferenceResult,
+    ProviderArtifact,
     ProviderCapabilities,
     ProviderError,
     ProviderErrorKind,
@@ -34,6 +36,7 @@ _MAX_SYSTEM_LOGS = 50
 _MAX_EVENT_NAME = 255
 _MAX_TIMESTAMP = 64
 _FEATURES = frozenset(RequestFeature)
+BACKEND_ID = BackendId("salad/ace-step-v15-xl-turbo")
 _SYSTEM_LOG_STATUS = {
     "Instance Allocated": (ProviderPhase.PROVISIONING, "Allocated GPU"),
     "Instance Downloading": (ProviderPhase.PROVISIONING, "Downloading worker image"),
@@ -44,7 +47,14 @@ _SYSTEM_LOG_STATUS = {
 
 class SaladProvider:
     capabilities = ProviderCapabilities(
-        ProviderName.SALAD, frozenset(InferenceMode), _FEATURES, frozenset({2}), True, False, False
+        ProviderName.SALAD,
+        frozenset(InferenceMode),
+        _FEATURES,
+        frozenset({2}),
+        True,
+        False,
+        False,
+        BACKEND_ID,
     )
 
     def __init__(
@@ -187,10 +197,11 @@ class SaladProvider:
                 "submit",
                 "Salad submission response does not match the request",
             )
-        return ProviderJobRef(ProviderName.SALAD, external_id)
+        return ProviderJobRef(ProviderName.SALAD, external_id, BACKEND_ID)
 
     async def _get_job(self, ref: ProviderJobRef, operation: str = "status") -> dict[str, Any]:
         ref.require_provider(ProviderName.SALAD)
+        ref.require_backend(BACKEND_ID)
         requested = self._uuid(ref.external_id)
         body = self._mapping(
             await self._request("GET", self._job_path(requested), operation), operation
@@ -380,3 +391,10 @@ class SaladProvider:
             queued if isinstance(queued, int) else None,
             replicas if isinstance(replicas, int) else None,
         )
+
+    async def materialize_artifact(
+        self, ref: ProviderJobRef, artifact: ProviderArtifact
+    ) -> ProviderArtifact:
+        ref.require_provider(ProviderName.SALAD)
+        ref.require_backend(BACKEND_ID)
+        return artifact

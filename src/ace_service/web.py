@@ -10,6 +10,7 @@ import os
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -52,6 +53,7 @@ from ace_service.models import (
     SubmissionQuote,
     VariationAttempt,
 )
+from ace_service.providers.base import BackendId, BackendOperation, ProviderName
 from ace_service.repository import (
     PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH,
     cancel_cover_staging,
@@ -65,6 +67,7 @@ from ace_service.repository import (
     get_matching_runtime_calibration,
     get_output,
     get_project,
+    job_backend,
     list_project_jobs,
     list_projects,
     recent_completed_attempt_execution_ms,
@@ -244,6 +247,8 @@ def _form_estimate(
     transaction never depend on it.
     """
 
+    if str(form.get("backend", "")).startswith("fal/"):
+        return None
     try:
         raw = form.get("variation_count", "1")
         if isinstance(raw, bool):
@@ -255,6 +260,221 @@ def _form_estimate(
     except (TypeError, ValueError):
         return None
     return _cost_estimate_view(session, job_type, variation_count=variation_count)
+
+
+async def _backend_pricing_context(
+    app: FastAPI,
+    operation: BackendOperation | tuple[BackendOperation, ...],
+    form: Mapping[str, Any],
+) -> dict[str, Any]:
+    client = getattr(app.state, "fal_pricing", None)
+    if client is None:
+        return {}
+    choices = _backend_choices(app, operation)
+    default_operation = operation[0] if isinstance(operation, tuple) else operation
+    selected = str(
+        form.get("backend")
+        or app.state.provider_registry.default_for(default_operation).capabilities.backend_id
+    )
+    choice = next((item for item in choices if item["backend_id"] == selected), None)
+    if choice is None or choice["provider"] != "fal.ai":
+        return {}
+    pricing = choice["snapshot"].get("pricing")
+    declared_unit = pricing.get("unit") if isinstance(pricing, Mapping) else None
+    try:
+        units = int(form.get("variation_count", "1"))
+    except (TypeError, ValueError):
+        units = 1
+    units = units if units in {1, 2, 3, 4} else 1
+    price = await client.estimate(
+        choice["snapshot"].get("endpoint_id", selected.removeprefix("fal/")),
+        units=units,
+        declared_unit=declared_unit,
+    )
+    if price is None:
+        return {"backend_pricing": {"available": False}}
+    return {
+        "backend_pricing": {
+            "available": True,
+            "unit_price": price.unit_price_usd,
+            "unit": price.unit,
+            "fetched_at": price.fetched_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "stale": price.stale,
+            "total": (
+                f"{Decimal(price.total_micro_usd) / Decimal(1_000_000):.4f}"
+                if price.total_micro_usd is not None
+                else None
+            ),
+        }
+    }
+
+
+def _backend_choices(
+    app: FastAPI, operation: BackendOperation | tuple[BackendOperation, ...]
+) -> list[dict[str, Any]]:
+    choices: list[dict[str, Any]] = []
+    operations = (operation,) if isinstance(operation, BackendOperation) else operation
+    seen: set[str] = set()
+    providers = [
+        provider for item in operations for provider in app.state.provider_registry.selectable(item)
+    ]
+    for provider in providers:
+        capabilities = provider.capabilities
+        if capabilities.operation is not None and capabilities.operation not in operations:
+            continue
+        if str(capabilities.backend_id) in seen:
+            continue
+        seen.add(str(capabilities.backend_id))
+        descriptor = getattr(provider, "descriptor", None)
+        if descriptor is not None:
+            snapshot = descriptor.snapshot()
+            if descriptor.pricing is not None:
+                snapshot["pricing"] = descriptor.pricing
+            fields = {
+                name: {
+                    "ui_name": policy.ui_name,
+                    "required": policy.required,
+                    "minimum": policy.minimum,
+                    "maximum": policy.maximum,
+                    "choices": list(policy.choices),
+                    "advanced": policy.advanced,
+                    "semantic_note": policy.semantic_note,
+                }
+                for name, policy in descriptor.fields.items()
+            }
+            snapshot["fields"] = fields
+            snapshot["native_formats"] = list(descriptor.output.native_formats)
+            label = descriptor.label
+            provider_name = "fal.ai"
+            actual_operation = descriptor.operation.value
+            media_kind = descriptor.media_kind.value
+        else:
+            backend_id = str(capabilities.backend_id)
+            provider_name = capabilities.name.value
+            label = {
+                "runpod/ace-step-v15-xl-turbo": "Runpod · ACE-Step 1.5 XL Turbo",
+                "salad/ace-step-v15-xl-turbo": "Salad · ACE-Step 1.5 XL Turbo",
+            }.get(backend_id, backend_id)
+            actual_operation = (
+                capabilities.operation.value
+                if capabilities.operation is not None
+                else operations[0].value
+            )
+            media_kind = capabilities.media_kind.value
+            snapshot = {
+                "backend_id": backend_id,
+                "provider": capabilities.name.value,
+                "label": label,
+                "operation": actual_operation,
+                "media_kind": media_kind,
+                "native_formats": sorted(capabilities.native_formats),
+                "fields": {},
+                "result_delivery": capabilities.result_delivery.value,
+                "catalog_revision": "builtin-v1",
+            }
+        choices.append(
+            {
+                "backend_id": str(capabilities.backend_id),
+                "provider": provider_name,
+                "label": label,
+                "operation": actual_operation,
+                "media_kind": media_kind,
+                "native_formats": snapshot["native_formats"],
+                "fields": snapshot["fields"],
+                "snapshot": snapshot,
+            }
+        )
+    return sorted(choices, key=lambda item: (item["provider"], item["label"], item["backend_id"]))
+
+
+def _backend_form_context(
+    app: FastAPI,
+    operation: BackendOperation | tuple[BackendOperation, ...],
+    form: Mapping[str, Any],
+) -> dict[str, Any]:
+    choices = _backend_choices(app, operation)
+    try:
+        default_operation = operation[0] if isinstance(operation, tuple) else operation
+        default_backend = str(
+            app.state.provider_registry.default_for(default_operation).capabilities.backend_id
+        )
+    except ValueError:
+        default_backend = choices[0]["backend_id"] if choices else ""
+    selected = str(form.get("backend") or default_backend)
+    selected_choice = next((choice for choice in choices if choice["backend_id"] == selected), None)
+    native_formats = selected_choice["native_formats"] if selected_choice else ["mp3"]
+    return {
+        "backend_choices": choices,
+        "selected_backend": selected,
+        "selected_output_format": native_formats[0] if native_formats else "mp3",
+    }
+
+
+def _select_backend(
+    app: FastAPI,
+    fields: Mapping[str, str],
+    operation: BackendOperation | tuple[BackendOperation, ...],
+) -> tuple[Any, dict[str, Any]]:
+    requested = fields.get("backend", "").strip()
+    choices = _backend_choices(app, operation)
+    if not requested:
+        default_operation = operation[0] if isinstance(operation, tuple) else operation
+        requested = str(
+            app.state.provider_registry.default_for(default_operation).capabilities.backend_id
+        )
+    choice = next((item for item in choices if item["backend_id"] == requested), None)
+    if choice is None:
+        raise ValueError("selected backend is not enabled or compatible with this form")
+    try:
+        backend_id = BackendId(requested)
+        provider = app.state.provider_registry.get_persisted(backend_id)
+    except (ValueError, KeyError) as exc:
+        raise ValueError("selected backend is not configured") from exc
+    allowed_advanced = set(choice["fields"])
+    if isinstance(fields, dict) and not fields.get("output_format"):
+        fields["output_format"] = choice["native_formats"][0]
+    output_format = fields.get("output_format")
+    if output_format and output_format not in choice["native_formats"]:
+        raise ValueError("output format is not supported by the selected backend")
+    if provider.capabilities.name is ProviderName.FAL:
+        if (
+            fields.get("audio_cover_strength") not in (None, "", "0.65")
+            and "strength" not in allowed_advanced
+        ):
+            raise ValueError("audio_cover_strength is not supported by the selected backend")
+        if fields.get("cover_noise_strength") not in (None, "", "0", "0.0"):
+            raise ValueError("cover_noise_strength is not supported by the selected backend")
+    form_aliases = {
+        "prompt": ("description", "target_style"),
+        "duration": ("duration_seconds",),
+        "lyrics": ("lyrics",),
+        "start_seconds": ("start_seconds",),
+        "end_seconds": ("end_seconds",),
+        "before_seconds": ("before_seconds",),
+        "after_seconds": ("after_seconds",),
+    }
+    for field_name, policy in choice["fields"].items():
+        if not policy.get("required") or field_name in {"source_audio", "source_style"}:
+            continue
+        aliases = form_aliases.get(field_name, (field_name,))
+        if not any(fields.get(alias) not in (None, "") for alias in aliases):
+            raise ValueError(
+                f"{policy.get('ui_name', field_name)} is required for the selected backend"
+            )
+    for field_name in (
+        "negative_prompt",
+        "guidance_scale",
+        "inference_steps",
+        "prompt_expansion",
+        "strength",
+        "start_seconds",
+        "end_seconds",
+        "before_seconds",
+        "after_seconds",
+    ):
+        if fields.get(field_name) not in (None, "") and field_name not in allowed_advanced:
+            raise ValueError(f"{field_name} is not supported by the selected backend")
+    return provider, choice["snapshot"]
 
 
 def register_web_routes(app: FastAPI) -> None:
@@ -314,6 +534,9 @@ def register_web_routes(app: FastAPI) -> None:
                     "estimate_selector_js": _route_path(
                         request, "static", path="estimate_selector.js"
                     ),
+                    "backend_selector_js": _route_path(
+                        request, "static", path="backend_selector.js"
+                    ),
                 },
             },
             status_code=response_status,
@@ -332,12 +555,20 @@ def register_web_routes(app: FastAPI) -> None:
     @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
         estimate = None
+        form = {"backend": request.query_params.get("backend", "")}
         with app.state.session_factory() as session:
-            estimate = _form_estimate(session, JobType.ORIGINAL, {})
+            estimate = _form_estimate(session, JobType.ORIGINAL, form)
         return render(
             request,
             "original_form.html",
-            {"form": {}, "errors": [], "continuing": False, "estimate": estimate},
+            {
+                "form": form,
+                "errors": [],
+                "continuing": False,
+                "estimate": estimate,
+                **_backend_form_context(app, BackendOperation.TEXT_TO_MUSIC, form),
+                **await _backend_pricing_context(app, BackendOperation.TEXT_TO_MUSIC, form),
+            },
         )
 
     @app.post("/create", dependencies=[Depends(authenticated)], name="create_original")
@@ -355,6 +586,28 @@ def register_web_routes(app: FastAPI) -> None:
             )
             project_id = continuation_source.project_id if continuation_source is not None else None
             try:
+                selected_provider, backend_snapshot = _select_backend(
+                    app, fields, BackendOperation.TEXT_TO_MUSIC
+                )
+            except ValueError as exc:
+                return render(
+                    request,
+                    "original_form.html",
+                    {
+                        "form": form,
+                        "errors": [str(exc)],
+                        "continuing": project_id is not None,
+                        "project_title": (
+                            continuation_source.project.title
+                            if continuation_source is not None
+                            else None
+                        ),
+                        "estimate": _form_estimate(session, JobType.ORIGINAL, fields),
+                        **_backend_form_context(app, BackendOperation.TEXT_TO_MUSIC, form),
+                    },
+                    response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            try:
                 job_request = OriginalSongRequest(**_original_form_values(fields))
             except ValidationError as exc:
                 errors = _validation_errors(exc)
@@ -371,6 +624,7 @@ def register_web_routes(app: FastAPI) -> None:
                             else None
                         ),
                         "estimate": _form_estimate(session, JobType.ORIGINAL, fields),
+                        **_backend_form_context(app, BackendOperation.TEXT_TO_MUSIC, form),
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
@@ -378,7 +632,9 @@ def register_web_routes(app: FastAPI) -> None:
                 session,
                 job_request,
                 project=project_id,
-                inference_provider=app.state.provider_registry.default,
+                inference_provider=selected_provider.capabilities.name,
+                inference_backend=selected_provider.capabilities.backend_id,
+                backend_snapshot_json=backend_snapshot,
             )
             # TODO(re-enable): legacy submission-quote capture is disconnected
             # during the usability recovery; restore after ordinary original
@@ -397,17 +653,36 @@ def register_web_routes(app: FastAPI) -> None:
     async def cover_form(request: Request) -> Response:
         readiness = await _readiness(app, only={"home_ingest"})
         estimate = None
+        form = {"backend": request.query_params.get("backend", "")}
         with app.state.session_factory() as session:
-            estimate = _form_estimate(session, JobType.COVER, {})
+            estimate = _form_estimate(session, JobType.COVER, form)
         return render(
             request,
             "cover_form.html",
             {
-                "form": {},
+                "form": form,
                 "errors": [],
                 "readiness": readiness,
                 "continuing": False,
                 "estimate": estimate,
+                **await _backend_pricing_context(
+                    app,
+                    (
+                        BackendOperation.AUDIO_TRANSFORM,
+                        BackendOperation.AUDIO_INPAINT,
+                        BackendOperation.AUDIO_OUTPAINT,
+                    ),
+                    form,
+                ),
+                **_backend_form_context(
+                    app,
+                    (
+                        BackendOperation.AUDIO_TRANSFORM,
+                        BackendOperation.AUDIO_INPAINT,
+                        BackendOperation.AUDIO_OUTPAINT,
+                    ),
+                    form,
+                ),
             },
         )
 
@@ -425,6 +700,32 @@ def register_web_routes(app: FastAPI) -> None:
                 session, fields, expected_job_type=JobType.COVER
             )
             project_id = continuation_source.project_id if continuation_source is not None else None
+            cover_operations = (
+                BackendOperation.AUDIO_TRANSFORM,
+                BackendOperation.AUDIO_INPAINT,
+                BackendOperation.AUDIO_OUTPAINT,
+            )
+            try:
+                selected_provider, backend_snapshot = _select_backend(app, fields, cover_operations)
+            except ValueError as exc:
+                return render(
+                    request,
+                    "cover_form.html",
+                    {
+                        "form": form,
+                        "errors": [str(exc)],
+                        "readiness": await _readiness(app, only={"home_ingest"}),
+                        "continuing": project_id is not None,
+                        "project_title": (
+                            continuation_source.project.title
+                            if continuation_source is not None
+                            else None
+                        ),
+                        "estimate": _form_estimate(session, JobType.COVER, fields),
+                        **_backend_form_context(app, cover_operations, form),
+                    },
+                    response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
             request_values = _cover_form_values(fields)
             if continuation_source is not None:
                 request_values["youtube_url"] = continuation_source.source_url
@@ -446,6 +747,7 @@ def register_web_routes(app: FastAPI) -> None:
                             else None
                         ),
                         "estimate": _form_estimate(session, JobType.COVER, fields),
+                        **_backend_form_context(app, cover_operations, form),
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
@@ -453,7 +755,9 @@ def register_web_routes(app: FastAPI) -> None:
                 session,
                 cover_request,
                 project=project_id,
-                inference_provider=app.state.provider_registry.default,
+                inference_provider=selected_provider.capabilities.name,
+                inference_backend=selected_provider.capabilities.backend_id,
+                backend_snapshot_json=backend_snapshot,
             )
             job_id = job.id
             if continuation_source is not None:
@@ -496,6 +800,7 @@ def register_web_routes(app: FastAPI) -> None:
                             "continuing": True,
                             "project_title": continuation_source.project.title,
                             "estimate": _form_estimate(session, JobType.COVER, fields),
+                            **_backend_form_context(app, cover_operations, form),
                         },
                         response_status=status.HTTP_409_CONFLICT,
                     )
@@ -646,6 +951,26 @@ def register_web_routes(app: FastAPI) -> None:
                     session, job.id, expected_job_type=job.job_type
                 )
                 form = _continuation_form(source)
+                continuation_operations = (
+                    (BackendOperation.TEXT_TO_MUSIC,)
+                    if source.job_type is JobType.ORIGINAL
+                    else (
+                        BackendOperation.AUDIO_TRANSFORM,
+                        BackendOperation.AUDIO_INPAINT,
+                        BackendOperation.AUDIO_OUTPAINT,
+                    )
+                )
+                continuation_choices = _backend_choices(app, continuation_operations)
+                if source.inference_backend in {
+                    item["backend_id"] for item in continuation_choices
+                }:
+                    form["backend"] = source.inference_backend
+                elif continuation_choices:
+                    form["backend"] = continuation_choices[0]["backend_id"]
+                    form["backend_note"] = (
+                        "The original backend is no longer enabled; this version uses "
+                        "the current default."
+                    )
             except ValueError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -665,6 +990,8 @@ def register_web_routes(app: FastAPI) -> None:
                     "continuing": True,
                     "project_title": project_title,
                     "estimate": estimate,
+                    **_backend_form_context(app, BackendOperation.TEXT_TO_MUSIC, form),
+                    **await _backend_pricing_context(app, BackendOperation.TEXT_TO_MUSIC, form),
                 },
             )
         return render(
@@ -677,6 +1004,24 @@ def register_web_routes(app: FastAPI) -> None:
                 "continuing": True,
                 "project_title": project_title,
                 "estimate": estimate,
+                **await _backend_pricing_context(
+                    app,
+                    (
+                        BackendOperation.AUDIO_TRANSFORM,
+                        BackendOperation.AUDIO_INPAINT,
+                        BackendOperation.AUDIO_OUTPAINT,
+                    ),
+                    form,
+                ),
+                **_backend_form_context(
+                    app,
+                    (
+                        BackendOperation.AUDIO_TRANSFORM,
+                        BackendOperation.AUDIO_INPAINT,
+                        BackendOperation.AUDIO_OUTPAINT,
+                    ),
+                    form,
+                ),
             },
         )
 
@@ -746,7 +1091,7 @@ def register_web_routes(app: FastAPI) -> None:
         readiness = await _readiness(app)
         required_ok = all(
             readiness["components"][key]["ok"]
-            for key in ("controller_database", "runpod_api", "public_transfer")
+            for key in ("controller_database", "inference_provider", "public_transfer")
         )
         return JSONResponse(
             readiness,
@@ -817,6 +1162,11 @@ def _cover_form_values(fields: Mapping[str, str]) -> dict[str, Any]:
         "profile_id": fields.get("profile_id", "fast-beta-v1"),
         "audio_cover_strength": _optional_number(fields.get("audio_cover_strength"), default=0.65),
         "cover_noise_strength": _optional_number(fields.get("cover_noise_strength"), default=0.0),
+        "strength": _optional_number(fields.get("strength")),
+        "start_seconds": _optional_number(fields.get("start_seconds")),
+        "end_seconds": _optional_number(fields.get("end_seconds")),
+        "before_seconds": _optional_number(fields.get("before_seconds")),
+        "after_seconds": _optional_number(fields.get("after_seconds")),
         "duration_mode": fields.get("duration_mode", "source"),
         "duration_seconds": _optional_number(fields.get("duration_seconds")),
         "variation_count": _required_int(fields.get("variation_count", "1")),
@@ -1133,6 +1483,28 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
     view = {
         "job_id": job.id,
         "inference_provider": job.inference_provider or "runpod",
+        "inference_backend": str(job_backend(job)),
+        "backend_label": (
+            job.backend_snapshot_json.get("label")
+            if isinstance(job.backend_snapshot_json, dict)
+            and isinstance(job.backend_snapshot_json.get("label"), str)
+            else str(job_backend(job))
+        ),
+        "backend_endpoint_id": (
+            job.backend_snapshot_json.get("endpoint_id")
+            if isinstance(job.backend_snapshot_json, dict)
+            else None
+        ),
+        "backend_operation": (
+            job.backend_snapshot_json.get("operation")
+            if isinstance(job.backend_snapshot_json, dict)
+            else None
+        ),
+        "backend_native_formats": (
+            job.backend_snapshot_json.get("native_formats", [])
+            if isinstance(job.backend_snapshot_json, dict)
+            else []
+        ),
         "job_type": job.job_type.value,
         "job_type_label": "Cover" if job.job_type is JobType.COVER else "Original song",
         "status": job.status.value,
@@ -1197,6 +1569,7 @@ def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
     return {
         "variation_index": attempt.variation_index,
         "inference_provider": attempt.inference_provider or "runpod",
+        "inference_backend": attempt.inference_backend,
         "status": attempt.status.value,
         "status_label": _STATUS_LABELS[attempt.status],
         "queue_delay_ms": result.get("runpod_queue_delay_ms"),

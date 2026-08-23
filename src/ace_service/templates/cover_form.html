@@ -8,6 +8,16 @@
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="profile_id" value="{{ form.get('profile_id', 'fast-beta-v1') }}">
   {% if form.get('continue_from_job_id') %}<input type="hidden" name="continue_from_job_id" value="{{ form.get('continue_from_job_id') }}">{% endif %}
+  <label for="backend">Backend <span class="required">required</span></label>
+  <select id="backend" name="backend" required data-backend-capabilities='{{ backend_choices|tojson }}'>
+    {% for provider_name in backend_choices|map(attribute='provider')|unique|list %}
+    <optgroup label="{{ provider_name }}">
+      {% for backend in backend_choices if backend.provider == provider_name %}<option value="{{ backend.backend_id }}"{% if (form.get('backend', selected_backend) or selected_backend) == backend.backend_id %} selected{% endif %}>{{ backend.label }}</option>{% endfor %}
+    </optgroup>
+    {% endfor %}
+  </select>
+  {% if form.get('backend_note') %}<p class="hint">{{ form.get('backend_note') }}</p>{% endif %}
+  {% if backend_pricing %}<p class="hint">{% if backend_pricing.available %}Fal price: ~${{ backend_pricing.unit_price }} per {{ backend_pricing.unit }}; fetched {{ backend_pricing.fetched_at }}{% if backend_pricing.stale %} (stale){% endif %}.{% if backend_pricing.total %} Estimated request total: ~${{ backend_pricing.total }}.{% else %} Total cannot be estimated safely for this endpoint.{% endif %}{% else %}Price unavailable; generation is not blocked.{% endif %}</p>{% endif %}
   {% if continuing %}
   <p class="hint"><strong>Source:</strong> completed output from the selected project version.</p>
   {% else %}
@@ -24,11 +34,16 @@
   <div class="grid two">
     <div><label for="audio_cover_strength">Reference-audio influence</label><input id="audio_cover_strength" name="audio_cover_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('audio_cover_strength', '0.65') }}"><p class="hint">ACE name: <code>audio_cover_strength</code>. Lower values favor stronger style transfer.</p></div>
     <div><label for="cover_noise_strength">Source/noise retention</label><input id="cover_noise_strength" name="cover_noise_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('cover_noise_strength', '0.0') }}"><p class="hint">ACE name: <code>cover_noise_strength</code>. Higher values stay closer to source melody and structure.</p></div>
+    <div data-backend-field="strength"><label for="strength">Transform strength</label><input id="strength" name="strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('strength', '') }}"></div>
+    <div data-backend-field="start_seconds"><label for="start_seconds">Region start, seconds</label><input id="start_seconds" name="start_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('start_seconds', '') }}"></div>
+    <div data-backend-field="end_seconds"><label for="end_seconds">Region end, seconds</label><input id="end_seconds" name="end_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('end_seconds', '') }}"></div>
+    <div data-backend-field="before_seconds"><label for="before_seconds">Extend before, seconds</label><input id="before_seconds" name="before_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('before_seconds', '') }}"></div>
+    <div data-backend-field="after_seconds"><label for="after_seconds">Extend after, seconds</label><input id="after_seconds" name="after_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('after_seconds', '') }}"></div>
     <div><label for="duration_mode">Duration mode</label><select id="duration_mode" name="duration_mode"><option value="source"{% if form.get('duration_mode', 'source') == 'source' %} selected{% endif %}>Match source</option><option value="custom"{% if form.get('duration_mode') == 'custom' %} selected{% endif %}>Custom duration</option></select></div>
     <div><label for="duration_seconds">Custom duration, seconds</label><input id="duration_seconds" name="duration_seconds" type="number" min="10" max="600" step="0.1" value="{{ form.get('duration_seconds', '') if form.get('duration_mode') == 'custom' else '' }}" placeholder="10–600"></div>
     <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}{% if estimate %} data-request-text="{{ value }} variation{{ 's' if value != 1 else '' }}: ~{{ estimate.variation_request_labels[value] }}"{% endif %}>{{ value }}</option>{% endfor %}</select></div>
     <div><label for="seed">Seed <span class="hint">optional</span></label><input id="seed" name="seed" inputmode="numeric" value="{{ form.get('seed', '') }}"></div>
-    <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', 'mp3') == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
+    <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', selected_output_format) == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
   </div>
   <label class="check"><input type="checkbox" name="rights_confirmation" value="true"{% if form.get('rights_confirmation') in ['true', 'on', '1'] %} checked{% endif %} required> I have permission to use this source.</label>
   {% if estimate %}
@@ -40,5 +55,6 @@
   {% endif %}
   <button class="button" type="submit">{% if continuing %}Generate new version{% else %}Prepare and generate cover{% endif %}</button>
 </form>
+<script src="{{ urls.backend_selector_js }}" defer></script>
 {% if estimate %}<script src="{{ urls.estimate_selector_js }}" defer></script>{% endif %}
 {% endblock %}

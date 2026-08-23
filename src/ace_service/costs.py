@@ -12,9 +12,11 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
+
+import httpx
 
 MICRO_USD_PER_USD = 1_000_000
 MS_PER_HOUR = 3_600_000
@@ -42,6 +44,130 @@ GPU_ALIASES: dict[str, str] = {
     "NVIDIA L4": "L4",
     "L4": "L4",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class FalPrice:
+    """Read-only endpoint price evidence for the selector UI."""
+
+    endpoint_id: str
+    unit_price_micro_usd: int
+    unit_price_usd: str
+    unit: str
+    fetched_at: datetime
+    stale: bool = False
+    total_micro_usd: int | None = None
+
+
+class FalPricingClient:
+    """Small bounded TTL cache for Fal's mutable pricing endpoint."""
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        ttl_seconds: int = 900,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        if not api_key or len(api_key) > 4096:
+            raise ValueError("Fal pricing API key is invalid")
+        if ttl_seconds <= 0:
+            raise ValueError("Fal pricing TTL must be positive")
+        self.api_key = api_key
+        self.ttl = timedelta(seconds=ttl_seconds)
+        self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
+        self._owns_client = client is None
+        self._cache: dict[str, tuple[FalPrice, datetime]] = {}
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self.client.aclose()
+
+    @staticmethod
+    def _record(body: Any, endpoint_id: str) -> Mapping[str, Any] | None:
+        candidates: list[Any] = []
+        if isinstance(body, Mapping):
+            values = body.get("prices", body.get("models", body))
+            candidates = values if isinstance(values, list) else [values]
+        elif isinstance(body, list):
+            candidates = body
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            candidate_id = candidate.get("endpoint_id", candidate.get("model_id"))
+            if candidate_id == endpoint_id:
+                return candidate
+        return None
+
+    async def get(self, endpoint_id: str) -> FalPrice | None:
+        if not endpoint_id or len(endpoint_id) > 256 or any(char.isspace() for char in endpoint_id):
+            raise ValueError("Fal pricing endpoint ID is invalid")
+        now = utc_now()
+        cached = self._cache.get(endpoint_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        try:
+            response = await self.client.get(
+                "https://api.fal.ai/v1/models/pricing",
+                params={"endpoint_id": endpoint_id},
+                headers={"Authorization": f"Key {self.api_key}", "Accept": "application/json"},
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            body = response.json()
+            record = self._record(body, endpoint_id)
+            if record is None:
+                raise ValueError("pricing endpoint was not returned")
+            raw_price = record.get("unit_price", record.get("price"))
+            unit_text = record.get("unit", record.get("billing_unit", "request"))
+            if not isinstance(unit_text, str) or not unit_text or len(unit_text) > 64:
+                raise ValueError("pricing unit is invalid")
+            price_text, price_micro = parse_micro_usd_decimal(
+                raw_price, field_name="Fal unit price"
+            )
+            value = FalPrice(endpoint_id, price_micro, price_text, unit_text, now)
+            self._cache[endpoint_id] = (value, now + self.ttl)
+            return value
+        except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
+            if cached is None:
+                return None
+            old = cached[0]
+            return FalPrice(
+                old.endpoint_id,
+                old.unit_price_micro_usd,
+                old.unit_price_usd,
+                old.unit,
+                old.fetched_at,
+                stale=True,
+            )
+
+    async def estimate(
+        self,
+        endpoint_id: str,
+        *,
+        units: int,
+        declared_unit: str | None,
+    ) -> FalPrice | None:
+        if isinstance(units, bool) or units <= 0:
+            raise ValueError("pricing units must be positive")
+        price = await self.get(endpoint_id)
+        if price is None or declared_unit is None or price.unit != declared_unit:
+            return price
+        if price.unit == "request":
+            total = price.unit_price_micro_usd * units
+        elif price.unit == "variation":
+            total = price.unit_price_micro_usd * units
+        else:
+            total = None
+        return FalPrice(
+            price.endpoint_id,
+            price.unit_price_micro_usd,
+            price.unit_price_usd,
+            price.unit,
+            price.fetched_at,
+            price.stale,
+            total,
+        )
 
 
 def utc_now() -> datetime:

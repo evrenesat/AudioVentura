@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -443,6 +443,70 @@ def _cp7_ddl(connection: sqlite3.Connection) -> None:
     )
 
 
+def _cp8_ddl(connection: sqlite3.Connection) -> None:
+    """Add immutable backend ownership and snapshots without rewriting mirrors."""
+
+    additions = {
+        "jobs": {
+            "inference_backend": "VARCHAR(256)",
+            "backend_snapshot_json": "JSON",
+        },
+        "variation_attempts": {"inference_backend": "VARCHAR(256)"},
+        "outputs": {"inference_backend": "VARCHAR(256)"},
+    }
+    for table_name, columns in additions.items():
+        existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table_name})")}
+        for name, declaration in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {declaration}")
+
+    for table_name in ("jobs", "variation_attempts", "outputs"):
+        unknown = connection.execute(
+            f"SELECT COUNT(*) FROM {table_name} WHERE inference_provider IS NOT NULL "
+            "AND inference_provider NOT IN ('runpod', 'salad')"
+        ).fetchone()
+        if unknown is None or int(unknown[0]) != 0:
+            raise MigrationError(f"backend migration found unsupported provider in {table_name}")
+
+    connection.execute(
+        "UPDATE jobs SET inference_provider = COALESCE(inference_provider, 'runpod')"
+    )
+    connection.execute(
+        "UPDATE jobs SET inference_backend = CASE inference_provider "
+        "WHEN 'runpod' THEN 'runpod/ace-step-v15-xl-turbo' "
+        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' END "
+        "WHERE inference_backend IS NULL"
+    )
+    connection.execute(
+        "UPDATE jobs SET backend_snapshot_json = json_object("
+        "'backend_id', inference_backend, 'provider', inference_provider, "
+        "'label', CASE inference_provider WHEN 'runpod' THEN 'Runpod · ACE-Step 1.5 XL Turbo' "
+        "WHEN 'salad' THEN 'Salad · ACE-Step 1.5 XL Turbo' END, "
+        "'catalog_revision', 'builtin-v1') WHERE backend_snapshot_json IS NULL"
+    )
+    connection.execute(
+        "UPDATE variation_attempts SET inference_provider = COALESCE("
+        "inference_provider, (SELECT inference_provider FROM jobs WHERE jobs.id = "
+        "variation_attempts.job_id), 'runpod')"
+    )
+    connection.execute(
+        "UPDATE variation_attempts SET inference_backend = CASE inference_provider "
+        "WHEN 'runpod' THEN 'runpod/ace-step-v15-xl-turbo' "
+        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' END "
+        "WHERE inference_backend IS NULL"
+    )
+    connection.execute(
+        "UPDATE outputs SET inference_provider = COALESCE("
+        "inference_provider, (SELECT inference_provider FROM jobs WHERE jobs.id = outputs.job_id))"
+    )
+    connection.execute(
+        "UPDATE outputs SET inference_backend = CASE inference_provider "
+        "WHEN 'runpod' THEN 'runpod/ace-step-v15-xl-turbo' "
+        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' END "
+        "WHERE inference_backend IS NULL AND inference_provider IS NOT NULL"
+    )
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
@@ -498,9 +562,20 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     }
     required_table_columns.update(
         {
-            "jobs": {"inference_provider", "current_provider_job_id", "provider_result_json"},
-            "variation_attempts": {"inference_provider", "provider_job_id", "provider_result_json"},
-            "outputs": {"inference_provider", "provider_job_id"},
+            "jobs": {
+                "inference_provider",
+                "inference_backend",
+                "backend_snapshot_json",
+                "current_provider_job_id",
+                "provider_result_json",
+            },
+            "variation_attempts": {
+                "inference_provider",
+                "inference_backend",
+                "provider_job_id",
+                "provider_result_json",
+            },
+            "outputs": {"inference_provider", "inference_backend", "provider_job_id"},
         }
     )
     for table_name, required in required_table_columns.items():
@@ -634,7 +709,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -677,6 +752,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             if state == _STATE_UNVERSIONED_LEGACY or report["version"] in {4, 5}:
                 _cp6_ddl(connection)
             _cp7_ddl(connection)
+            _cp8_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

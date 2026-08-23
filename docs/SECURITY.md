@@ -34,6 +34,7 @@ secret store, never in Git. This includes:
 - SFTP private key;
 - Runpod and Salad API keys;
 - private registry credentials;
+- Fal API and CDN credentials;
 - any future provider credentials.
 
 The GPU worker does not need those credentials. It receives only bounded job
@@ -93,6 +94,14 @@ bounded safe classification; raw response bodies are not persisted or logged.
 
 The controller accepts completion only when provider metadata agrees with the
 uploaded output's job ID, nonce, variation, size, and SHA-256.
+
+Fal-specific controls are mandatory: use only the reviewed static catalog;
+send `sync_mode=false`, no-IO, no-fallback, and private lifecycle headers;
+never send audio bytes or data URIs; require exact endpoint/request ownership;
+exchange the API key for a short-lived CDN bearer token; reject redirects,
+non-HTTPS URLs, unapproved CDN hosts, wrong content types, and oversized
+responses; and materialize results below the private output root atomically.
+The controller does not log raw Fal request/result bodies or CDN URLs.
 
 ## Logs and retention
 

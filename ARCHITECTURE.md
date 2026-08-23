@@ -27,10 +27,10 @@ Private browser
           |                       |
           v                       v
 +-------------------+   +-----------------------------+
-| Home Ingest       |   | Inference provider          |
+| Home Ingest       |   | Inference providers         |
 | - YouTube         |   | - Runpod endpoint           |
 | - yt-dlp          |   | - Salad Job Queue           |
-| - ffmpeg/ffprobe  |   | - future compatible adapter |
+| - ffmpeg/ffprobe  |   | - fal.ai Model API queues   |
 | - restricted SFTP |   |                             |
 +-------------------+   | shared ACE-Step runtime     |
                         +-----------------------------+
@@ -152,6 +152,7 @@ not a control signal.
 - `result(ref) -> InferenceResult`
 - `cancel(ref) -> CancelOutcome`
 - `health() -> ProviderHealth`
+- `materialize_artifact(ref, artifact) -> ProviderArtifact`
 
 Capabilities declare supported modes, request features, worker schemas, and
 cancellation behavior. The current providers are:
@@ -161,16 +162,20 @@ cancellation behavior. The current providers are:
   retrying-running status with bounded container-group lifecycle evidence. A
   ready instance restores job-scoped `RUNNING`; terminal states are never
   enriched.
+- `FalProvider`, which adapts one reviewed catalog descriptor and uses
+  controller-pulled CDN artifacts rather than the worker upload contract.
 
 Deployment management is not part of this interface. Queue creation, GPU
 selection, autoscaling, image credentials, and container-group changes remain
 provider-specific operator work.
 
-The interface intentionally models prompt-to-audio and audio-to-audio plus
-individual request features. A future fal.ai adapter can therefore declare a
-smaller capability set without weakening the common job contract. The UI does
-not yet offer provider selection or hide unsupported fields; new jobs use the
-administrator-configured default.
+The interface models prompt-to-audio and audio-to-audio plus individual request
+features. `BackendId` is persisted beside the coarse provider name; every
+provider operation checks both values. A static reviewed Fal catalog maps
+finite product fields to endpoint-specific JSON and is never replaced by live
+discovery data at runtime. New jobs persist the selected backend and descriptor
+snapshot before enqueue; variations remain sequential and never fall back to
+another backend.
 
 ## Durable provider ownership
 
@@ -230,6 +235,14 @@ because the upload and status observations may arrive in either order.
 Completed outputs are stored below the configured output root with recorded
 size and digest. Authenticated playback revalidates the path, type, size, and
 SHA-256 before streaming.
+
+Fal jobs are the managed-provider exception to the worker upload contract. The
+controller persists the exact reviewed `fal/<endpoint-id>` backend and catalog
+snapshot, submits one asynchronous queue request, and on completion exchanges
+the key for a short-lived CDN token. It streams the declared audio result into
+the private output root with redirects disabled, exact CDN host allowlisting,
+size/content-type bounds, SHA-256, fsync, and an atomic rename. Fal result URLs,
+prompts, lyrics, and keys never enter durable logs or the browser.
 
 ## Persistence and migrations
 

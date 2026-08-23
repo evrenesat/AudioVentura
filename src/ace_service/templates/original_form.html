@@ -7,6 +7,16 @@
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="profile_id" value="{{ form.get('profile_id', 'fast-beta-v1') }}">
   {% if form.get('continue_from_job_id') %}<input type="hidden" name="continue_from_job_id" value="{{ form.get('continue_from_job_id') }}">{% endif %}
+  <label for="backend">Backend <span class="required">required</span></label>
+  <select id="backend" name="backend" required data-backend-capabilities='{{ backend_choices|tojson }}'>
+    {% for provider_name in backend_choices|map(attribute='provider')|unique|list %}
+    <optgroup label="{{ provider_name }}">
+      {% for backend in backend_choices if backend.provider == provider_name %}<option value="{{ backend.backend_id }}"{% if (form.get('backend', selected_backend) or selected_backend) == backend.backend_id %} selected{% endif %}>{{ backend.label }}</option>{% endfor %}
+    </optgroup>
+    {% endfor %}
+  </select>
+  {% if form.get('backend_note') %}<p class="hint">{{ form.get('backend_note') }}</p>{% endif %}
+  {% if backend_pricing %}<p class="hint">{% if backend_pricing.available %}Fal price: ~${{ backend_pricing.unit_price }} per {{ backend_pricing.unit }}; fetched {{ backend_pricing.fetched_at }}{% if backend_pricing.stale %} (stale){% endif %}.{% if backend_pricing.total %} Estimated request total: ~${{ backend_pricing.total }}.{% else %} Total cannot be estimated safely for this endpoint.{% endif %}{% else %}Price unavailable; generation is not blocked.{% endif %}</p>{% endif %}
   <label for="description">Description <span class="required">required</span></label>
   <textarea id="description" name="description" required maxlength="511" rows="5">{{ form.get('description', '') }}</textarea>
   <p class="hint">The final caption is limited to 511 characters. Duration-like prose is not interpreted as a setting.</p>
@@ -28,7 +38,7 @@
   </div>
   <div class="grid two">
     <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}{% if estimate %} data-request-text="{{ value }} variation{{ 's' if value != 1 else '' }}: ~{{ estimate.variation_request_labels[value] }}"{% endif %}>{{ value }}</option>{% endfor %}</select></div>
-    <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', 'mp3') == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
+    <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', selected_output_format) == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select></div>
   </div>
   {% if estimate %}
   <div class="cost-estimate">
@@ -39,5 +49,6 @@
   {% endif %}
   <button class="button" type="submit">{% if continuing %}Generate new version{% else %}Create original{% endif %}</button>
 </form>
+<script src="{{ urls.backend_selector_js }}" defer></script>
 {% if estimate %}<script src="{{ urls.estimate_selector_js }}" defer></script>{% endif %}
 {% endblock %}

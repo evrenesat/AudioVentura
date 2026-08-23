@@ -21,7 +21,7 @@
     </header>
     {% if job.error %}<div class="banner error">{{ job.error }}</div>{% endif %}
     <p class="request-summary">{{ job.prompt or 'No prompt stored.' }}</p>
-    <p class="muted">Created {{ job.created_at }} · {{ job.completed_variations }}/{{ job.variation_count }} variations · {{ job.output_format|upper }} · elapsed {{ job.elapsed_seconds }} seconds</p>
+    <p class="muted">{{ job.backend_label }}{% if job.backend_endpoint_id %} · {{ job.backend_endpoint_id }}{% endif %} · Created {{ job.created_at }} · {{ job.completed_variations }}/{{ job.variation_count }} variations · {{ job.output_format|upper }} · elapsed {{ job.elapsed_seconds }} seconds</p>
     <div class="version-actions"><a href="{{ job.detail_url }}">View operational details</a>{% if job.continue_url %}<a class="button" href="{{ job.continue_url }}">Continue this version</a>{% endif %}</div>
     <div class="version-outputs">
       <h3>Outputs</h3>

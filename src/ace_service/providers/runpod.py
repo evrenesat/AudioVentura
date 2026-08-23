@@ -12,10 +12,12 @@ from ace_service.runpod_client import (
 )
 
 from .base import (
+    BackendId,
     CancelOutcome,
     InferenceMode,
     InferenceRequest,
     InferenceResult,
+    ProviderArtifact,
     ProviderCapabilities,
     ProviderError,
     ProviderErrorKind,
@@ -29,6 +31,7 @@ from .base import (
 )
 
 _FEATURES = frozenset(RequestFeature)
+BACKEND_ID = BackendId("runpod/ace-step-v15-xl-turbo")
 
 
 class RunpodProvider:
@@ -40,6 +43,7 @@ class RunpodProvider:
         True,
         False,
         True,
+        BACKEND_ID,
     )
 
     def __init__(self, client: RunpodClient) -> None:
@@ -86,10 +90,11 @@ class RunpodProvider:
             )
         except Exception as exc:
             raise self._error(exc, "submit") from exc
-        return ProviderJobRef(ProviderName.RUNPOD, external_id)
+        return ProviderJobRef(ProviderName.RUNPOD, external_id, BACKEND_ID)
 
     async def status(self, ref: ProviderJobRef) -> ProviderStatus:
         ref.require_provider(ProviderName.RUNPOD)
+        ref.require_backend(BACKEND_ID)
         try:
             value = await self.client.status(ref.external_id)
         except Exception as exc:
@@ -121,6 +126,7 @@ class RunpodProvider:
 
     async def result(self, ref: ProviderJobRef) -> InferenceResult:
         ref.require_provider(ProviderName.RUNPOD)
+        ref.require_backend(BACKEND_ID)
         try:
             value = await self.client.status(ref.external_id)
         except Exception as exc:
@@ -136,6 +142,7 @@ class RunpodProvider:
 
     async def cancel(self, ref: ProviderJobRef) -> CancelOutcome:
         ref.require_provider(ProviderName.RUNPOD)
+        ref.require_backend(BACKEND_ID)
         try:
             value = await self.client.cancel(ref.external_id)
         except Exception as exc:
@@ -150,3 +157,10 @@ class RunpodProvider:
         except Exception as exc:
             raise self._error(exc, "health") from exc
         return ProviderHealth(True, "Runpod available", counts.queued, counts.active)
+
+    async def materialize_artifact(
+        self, ref: ProviderJobRef, artifact: ProviderArtifact
+    ) -> ProviderArtifact:
+        ref.require_provider(ProviderName.RUNPOD)
+        ref.require_backend(BACKEND_ID)
+        return artifact

@@ -1,0 +1,1533 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "fal-music-2026-08-23",
+  "entries": [
+    {
+      "backend_id": "fal/fal-ai/elevenlabs/music",
+      "endpoint_id": "fal-ai/elevenlabs/music",
+      "label": "fal.ai · ElevenLabs Music",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "elevenlabs_music",
+      "schema_sha256": "65e2fc155540263d4e12c2588e7202e6649d1ec77cb2ffa116f98982cbe62a60",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "seed": {
+          "ui_name": "Seed",
+          "fal_name": "seed",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3",
+          "wav"
+        ],
+        "seed_path": "seed",
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg",
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/cassetteai/music-generator",
+      "endpoint_id": "cassetteai/music-generator",
+      "label": "fal.ai · CassetteAI Music Generator",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "cassetteai_music_generator",
+      "schema_sha256": "8cbaeee3a47efc214e0065c693ba800c538aef593859171cb66e63a3af6e58f0",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "required": true,
+          "minimum": 1,
+          "maximum": 600,
+          "semantic_note": "Required generated duration."
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/minimax-music/v1.5",
+      "endpoint_id": "fal-ai/minimax-music/v1.5",
+      "label": "fal.ai · MiniMax Music v1.5",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "minimax_music",
+      "schema_sha256": "e081ec986b568631907fde0b6a95b89abbeae82168ba52634906e5c8374373d5",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "seed": {
+          "ui_name": "Seed",
+          "fal_name": "seed",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "seed_path": "seed",
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/minimax-music/v2",
+      "endpoint_id": "fal-ai/minimax-music/v2",
+      "label": "fal.ai · MiniMax Music v2",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "minimax_music",
+      "schema_sha256": "23fdacfda43f1b27af9d98ccb49c6d34b0d2f4a005c1b5c078d66744e644ca3e",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/minimax-music/v2.5",
+      "endpoint_id": "fal-ai/minimax-music/v2.5",
+      "label": "fal.ai · MiniMax Music v2.5",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "minimax_music",
+      "schema_sha256": "28800b519bc726ce413ab4d3db199464a7fddbd66da3dc9eeba7b5c4e8fcfb0c",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/minimax-music/v2.6",
+      "endpoint_id": "fal-ai/minimax-music/v2.6",
+      "label": "fal.ai · MiniMax Music v2.6",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "minimax_music",
+      "schema_sha256": "32cdca0b217df3bea11895dd926d2d909ba2878fbe1bb1d27417531646fbd714",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/minimax/music-3",
+      "endpoint_id": "minimax/music-3",
+      "label": "fal.ai · MiniMax Music 3",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "minimax_music_3",
+      "schema_sha256": "7656f774650f8b6ec25b1d136692cb945ce334d28d86434167aff025d8d81141",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration upper bound",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600,
+          "semantic_note": "The endpoint treats this as an upper bound, not an exact promise."
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/lyria2",
+      "endpoint_id": "fal-ai/lyria2",
+      "label": "fal.ai · Lyria 2",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "lyria",
+      "schema_sha256": "cdf1a11edecabc64b5eab6800d6c1a9a339092c77aac1b43cf98864fde2f6f39",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "seed": {
+          "ui_name": "Seed",
+          "fal_name": "seed",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "seed_path": "seed",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/lyria3",
+      "endpoint_id": "fal-ai/lyria3",
+      "label": "fal.ai · Lyria 3",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "lyria",
+      "schema_sha256": "9da51594e577cddd6d58a7a17557d5c7633777d7d655796555ceb04cf01741a5",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/lyria3/pro",
+      "endpoint_id": "fal-ai/lyria3/pro",
+      "label": "fal.ai · Lyria 3 Pro",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "lyria",
+      "schema_sha256": "614b103e540afa671806c61fad8c88dac557fa25f42c787f267c79d80ade468a",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/ace-step",
+      "endpoint_id": "fal-ai/ace-step",
+      "label": "fal.ai · ACE-Step",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "ace_step_text",
+      "schema_sha256": "d25621408ff3735b750562d4a439baf352dd799e8717d841003f426b1ca24e51",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "tags",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        },
+        "seed": {
+          "ui_name": "Seed",
+          "fal_name": "seed",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "seed_path": "seed",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/ace-step/prompt-to-audio",
+      "endpoint_id": "fal-ai/ace-step/prompt-to-audio",
+      "label": "fal.ai · ACE-Step Prompt to Audio",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "ace_step_text",
+      "schema_sha256": "00d3d574033638cb68a6b0e616135463b90440e8d9e9a8bea72b7571021ebfcb",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "tags",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/sonilo/v1.1/text-to-music",
+      "endpoint_id": "sonilo/v1.1/text-to-music",
+      "label": "fal.ai · Sonilo v1.1 Text to Music",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "sonilo",
+      "schema_sha256": "9537b9ab8f65d5719383b43b599a5e8bb2aa001eaf0a12fc838b98033be1b13f",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/text-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/text-to-audio",
+      "label": "fal.ai · Stable Audio 3 Medium",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "stable_audio_3",
+      "schema_sha256": "aca285716b54f5b0074aae43b359e9b631ddc67911537fe76cd0799efc309191",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/base/text-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/base/text-to-audio",
+      "label": "fal.ai · Stable Audio 3 Medium Base",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "stable_audio_3",
+      "schema_sha256": "0a435a7cb1526a06fecf1692147278fea7800658ec99cdf4b79b967fed433785",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/text-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/text-to-audio",
+      "label": "fal.ai · Stable Audio 3 Small Music",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "stable_audio_3",
+      "schema_sha256": "523e71692595e8c0f439cc89f5176396b35411c815b3b36f696c173cd9366245",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/base/text-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/base/text-to-audio",
+      "label": "fal.ai · Stable Audio 3 Small Music Base",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "stable_audio_3",
+      "schema_sha256": "bb5248e0e29b2e2964e5624d2d3d3f50727d1cb236a962c66c55f21b963638e2",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/diffrhythm",
+      "endpoint_id": "fal-ai/diffrhythm",
+      "label": "fal.ai · DiffRhythm",
+      "operation": "text_to_music",
+      "media_kind": "music",
+      "adapter": "diffrhythm",
+      "schema_sha256": "0c03fb1976261b12e7620679b884a408eafd91eca73817cd59d66b7ebdb0a5b7",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "lyrics": {
+          "ui_name": "Lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "mp3"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/mpeg"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-25/text-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-25/text-to-audio",
+      "label": "fal.ai · Stable Audio 2.5 Text to Audio",
+      "operation": "text_to_music",
+      "media_kind": "music_and_sfx",
+      "adapter": "stable_audio_25",
+      "schema_sha256": "5d3e3b0c9cb9061f0cfb5929d872a45ecb62f2d76a8c0749d8707e8362c9487b",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "seconds_total",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio",
+      "endpoint_id": "fal-ai/stable-audio",
+      "label": "fal.ai · Stable Audio",
+      "operation": "text_to_music",
+      "media_kind": "music_and_sfx",
+      "adapter": "stable_audio",
+      "schema_sha256": "3be978979e4fa03934cb97ab47419e7f79f7e037fa42116aa079763aeeeb118b",
+      "fields": {
+        "prompt": {
+          "ui_name": "Prompt/style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "seconds_total",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "duration_path": "duration",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/ace-step/audio-to-audio",
+      "endpoint_id": "fal-ai/ace-step/audio-to-audio",
+      "label": "fal.ai · ACE-Step Audio to Audio",
+      "operation": "audio_transform",
+      "media_kind": "music",
+      "adapter": "ace_step_audio",
+      "schema_sha256": "486d94bfffc2523f1283c86ba8325b2069b306578399b3b27e1c86c817704815",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "source_style": {
+          "ui_name": "Source style",
+          "fal_name": "original_tags",
+          "type": "string",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "tags",
+          "type": "string",
+          "required": true
+        },
+        "source_lyrics": {
+          "ui_name": "Source lyrics",
+          "fal_name": "original_lyrics",
+          "type": "string"
+        },
+        "lyrics": {
+          "ui_name": "Replacement lyrics",
+          "fal_name": "lyrics",
+          "type": "string"
+        },
+        "seed": {
+          "ui_name": "Seed",
+          "fal_name": "seed",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "seed_path": "seed",
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/ace-step/audio-inpaint",
+      "endpoint_id": "fal-ai/ace-step/audio-inpaint",
+      "label": "fal.ai · ACE-Step Audio Inpaint",
+      "operation": "audio_inpaint",
+      "media_kind": "music",
+      "adapter": "ace_step_inpaint",
+      "schema_sha256": "3c880790f7eb68514d1520396418a182cde90ca9a45d19792cba9bd8309a9438",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "tags",
+          "type": "string",
+          "required": true
+        },
+        "start_seconds": {
+          "ui_name": "Region start",
+          "fal_name": "start_seconds",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        },
+        "end_seconds": {
+          "ui_name": "Region end",
+          "fal_name": "end_seconds",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/ace-step/audio-outpaint",
+      "endpoint_id": "fal-ai/ace-step/audio-outpaint",
+      "label": "fal.ai · ACE-Step Audio Outpaint",
+      "operation": "audio_outpaint",
+      "media_kind": "music",
+      "adapter": "ace_step_outpaint",
+      "schema_sha256": "bb28a571cd9a1e0117c3d17b6975adce79be716ae1558bdb46ef21f278173acc",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "tags",
+          "type": "string",
+          "required": true
+        },
+        "before_seconds": {
+          "ui_name": "Extend before",
+          "fal_name": "extend_left_seconds",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        },
+        "after_seconds": {
+          "ui_name": "Extend after",
+          "fal_name": "extend_right_seconds",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/audio-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/audio-to-audio",
+      "label": "fal.ai · Stable Audio 3 Medium Audio to Audio",
+      "operation": "audio_transform",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "a1e734fec8b3e24ce500e2cac51e61b5f891df506c671d2e23361757a344b307",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "strength": {
+          "ui_name": "Remix strength",
+          "fal_name": "init_noise_level",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/audio-inpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/audio-inpainting",
+      "label": "fal.ai · Stable Audio 3 Medium Audio Inpainting",
+      "operation": "audio_inpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "f39315f402c29f722e47b0c985ba058296aa5db9de14f641c3d8af245ea38ac3",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "start_seconds": {
+          "ui_name": "Region start",
+          "fal_name": "inpaint_start",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        },
+        "end_seconds": {
+          "ui_name": "Region end",
+          "fal_name": "inpaint_end",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/audio-outpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/audio-outpainting",
+      "label": "fal.ai · Stable Audio 3 Medium Audio Outpainting",
+      "operation": "audio_outpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "69cfcf1379924fe039c96c3e9ff3bd2702f2ab14def33101b4816c53520d3011",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "before_seconds": {
+          "ui_name": "Extend before",
+          "fal_name": "left_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        },
+        "after_seconds": {
+          "ui_name": "Extend after",
+          "fal_name": "right_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/base/audio-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/base/audio-to-audio",
+      "label": "fal.ai · Stable Audio 3 Medium Base Audio to Audio",
+      "operation": "audio_transform",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "1f960b606d22a861a8d1e2e4eadb5f4681afe5779094eda55a37d15897eb8b8a",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "strength": {
+          "ui_name": "Remix strength",
+          "fal_name": "init_noise_level",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/base/audio-inpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/base/audio-inpainting",
+      "label": "fal.ai · Stable Audio 3 Medium Base Audio Inpainting",
+      "operation": "audio_inpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "ae6ae985893913bd7e4b5e94261c923b9e15124d6652aef456f40d527f192566",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "start_seconds": {
+          "ui_name": "Region start",
+          "fal_name": "inpaint_start",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        },
+        "end_seconds": {
+          "ui_name": "Region end",
+          "fal_name": "inpaint_end",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/medium/base/audio-outpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/medium/base/audio-outpainting",
+      "label": "fal.ai · Stable Audio 3 Medium Base Audio Outpainting",
+      "operation": "audio_outpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "764e5519a8dc2775363ba1599b3582fbab8efec0a6b6cb8582926ef92d37c20f",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "before_seconds": {
+          "ui_name": "Extend before",
+          "fal_name": "left_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        },
+        "after_seconds": {
+          "ui_name": "Extend after",
+          "fal_name": "right_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/audio-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/audio-to-audio",
+      "label": "fal.ai · Stable Audio 3 Small Music Audio to Audio",
+      "operation": "audio_transform",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "cf5cf12d05fce328449f31a932cf9d80c2ecb7796c267a7724b25aa7da068f07",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "strength": {
+          "ui_name": "Remix strength",
+          "fal_name": "init_noise_level",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/audio-inpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/audio-inpainting",
+      "label": "fal.ai · Stable Audio 3 Small Music Audio Inpainting",
+      "operation": "audio_inpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "9fc097c76d0192c0f9fcc6c6036302467fec466f0da878681d74f06e3bd3b301",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "start_seconds": {
+          "ui_name": "Region start",
+          "fal_name": "inpaint_start",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        },
+        "end_seconds": {
+          "ui_name": "Region end",
+          "fal_name": "inpaint_end",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/audio-outpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/audio-outpainting",
+      "label": "fal.ai · Stable Audio 3 Small Music Audio Outpainting",
+      "operation": "audio_outpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "77669345cace29fac3534096a715ca122c79f224281cf3507c9e5724d9a8c4cd",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "before_seconds": {
+          "ui_name": "Extend before",
+          "fal_name": "left_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        },
+        "after_seconds": {
+          "ui_name": "Extend after",
+          "fal_name": "right_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/base/audio-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/base/audio-to-audio",
+      "label": "fal.ai · Stable Audio 3 Small Music Base Audio to Audio",
+      "operation": "audio_transform",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "b552647b704020c3a9dd9f2970cba644fae93ff4a1fcbabc6f8348962cd9f252",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "strength": {
+          "ui_name": "Remix strength",
+          "fal_name": "init_noise_level",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/base/audio-inpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/base/audio-inpainting",
+      "label": "fal.ai · Stable Audio 3 Small Music Base Audio Inpainting",
+      "operation": "audio_inpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "6d951c88e12e75addbcebbd3fe6ff3982ef5a25548398066d693a58acca5d6f4",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "start_seconds": {
+          "ui_name": "Region start",
+          "fal_name": "inpaint_start",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        },
+        "end_seconds": {
+          "ui_name": "Region end",
+          "fal_name": "inpaint_end",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-3/small/music/base/audio-outpainting",
+      "endpoint_id": "fal-ai/stable-audio-3/small/music/base/audio-outpainting",
+      "label": "fal.ai · Stable Audio 3 Small Music Base Audio Outpainting",
+      "operation": "audio_outpaint",
+      "media_kind": "music",
+      "adapter": "stable_audio_3_audio",
+      "schema_sha256": "63e3a2d61ec7e3132c40c9e2500167c190624e6710833da8a66f1d4522aa7fbe",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "before_seconds": {
+          "ui_name": "Extend before",
+          "fal_name": "left_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        },
+        "after_seconds": {
+          "ui_name": "Extend after",
+          "fal_name": "right_extension",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-25/audio-to-audio",
+      "endpoint_id": "fal-ai/stable-audio-25/audio-to-audio",
+      "label": "fal.ai · Stable Audio 2.5 Audio to Audio",
+      "operation": "audio_transform",
+      "media_kind": "music_and_sfx",
+      "adapter": "stable_audio_25_audio",
+      "schema_sha256": "8b9609e3c45803f62f45a35f24bb660820ed584b84f9046d6ff9bff12a07a1d8",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "strength": {
+          "ui_name": "Transform strength",
+          "fal_name": "strength",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "semantic_note": "Stable Audio 2.5 model-specific strength."
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    },
+    {
+      "backend_id": "fal/fal-ai/stable-audio-25/inpaint",
+      "endpoint_id": "fal-ai/stable-audio-25/inpaint",
+      "label": "fal.ai · Stable Audio 2.5 Inpaint",
+      "operation": "audio_inpaint",
+      "media_kind": "music_and_sfx",
+      "adapter": "stable_audio_25_audio",
+      "schema_sha256": "6094acf70e1f4f9a7217cbbd3600894aca5ac24d238e6c9e3b573a7e317bacd8",
+      "fields": {
+        "source_audio": {
+          "ui_name": "Source audio",
+          "fal_name": "audio_url",
+          "type": "url",
+          "required": true
+        },
+        "prompt": {
+          "ui_name": "Target style",
+          "fal_name": "prompt",
+          "type": "string",
+          "required": true
+        },
+        "start_seconds": {
+          "ui_name": "Region start",
+          "fal_name": "start_seconds",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        },
+        "end_seconds": {
+          "ui_name": "Region end",
+          "fal_name": "end_seconds",
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 600
+        }
+      },
+      "output": {
+        "result_path": "audio.url",
+        "native_formats": [
+          "wav"
+        ],
+        "max_bytes": 268435456,
+        "content_types": [
+          "audio/wav"
+        ]
+      }
+    }
+  ],
+  "excluded": [
+    {
+      "endpoint_id": "fal-ai/minimax-music",
+      "reason": "Current schema requires reference_audio_url and cannot be mapped to the Original/Cover split."
+    },
+    {
+      "endpoint_id": "fal-ai/seed-audio",
+      "reason": "Speech/audio utility contract is not a reviewed music-generation contract."
+    },
+    {
+      "endpoint_id": "fal-ai/ltx-audio",
+      "reason": "Current endpoint contract is not a reviewed music-generation contract."
+    },
+    {
+      "endpoint_id": "fal-ai/mmaudio",
+      "reason": "Audio utility contract is not a reviewed music-generation contract."
+    },
+    {
+      "endpoint_id": "*",
+      "reason": "Pure speech, TTS, voice, SFX, source separation, understanding, compression, and media utility endpoints are out of scope."
+    }
+  ]
+}

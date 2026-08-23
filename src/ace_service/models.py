@@ -179,6 +179,8 @@ class Job(Base):
     current_variation: Mapped[int | None] = mapped_column(Integer)
     normalized_request_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     inference_provider: Mapped[str | None] = mapped_column(String(32))
+    inference_backend: Mapped[str | None] = mapped_column(String(256))
+    backend_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     current_provider_job_id: Mapped[str | None] = mapped_column(String(128))
     provider_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     current_runpod_job_id: Mapped[str | None] = mapped_column(String(128))
@@ -217,6 +219,7 @@ class Output(Base):
     result_index: Mapped[int] = mapped_column(Integer, nullable=False)
     runpod_job_id: Mapped[str | None] = mapped_column(String(128))
     inference_provider: Mapped[str | None] = mapped_column(String(32))
+    inference_backend: Mapped[str | None] = mapped_column(String(256))
     provider_job_id: Mapped[str | None] = mapped_column(String(128))
     relative_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -253,6 +256,7 @@ class VariationAttempt(Base):
     )
     runpod_job_id: Mapped[str | None] = mapped_column(String(128))
     inference_provider: Mapped[str | None] = mapped_column(String(32))
+    inference_backend: Mapped[str | None] = mapped_column(String(256))
     provider_job_id: Mapped[str | None] = mapped_column(String(128))
     submission_nonce: Mapped[str | None] = mapped_column(String(128))
     provider_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -544,6 +548,12 @@ QUOTE_UNAVAILABLE_REASONS: frozenset[str] = frozenset(
     {"rate_stale", "rate_unknown", "gpu_unknown", "provider_unreachable", "calibration_missing"}
 )
 ATTEMPT_UNAVAILABLE_REASONS: frozenset[str] = frozenset(
-    {"rate_stale", "rate_unknown", "worker_no_evidence", "timing_unavailable"}
+    {
+        "rate_stale",
+        "rate_unknown",
+        "worker_no_evidence",
+        "timing_unavailable",
+        "provider_managed_pricing",
+    }
 )
 EVIDENCE_STATUSES: frozenset[str] = frozenset({"pending", "unavailable", "complete"})

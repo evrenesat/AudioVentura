@@ -48,7 +48,7 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
-from ace_service.providers.base import DetailScope, ProviderJobRef, ProviderName
+from ace_service.providers.base import BackendId, DetailScope, ProviderJobRef, ProviderName
 from ace_service.schemas import (
     CoverRequest,
     OriginalSongRequest,
@@ -84,6 +84,72 @@ def job_provider(job: Job) -> ProviderName:
     return ProviderName(job.inference_provider or ProviderName.RUNPOD)
 
 
+def job_backend(job: Job) -> BackendId:
+    if job.inference_backend:
+        return BackendId(job.inference_backend)
+    builtins = {
+        ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
+        ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+    }
+    return BackendId(builtins.get(job_provider(job), f"{job_provider(job).value}/default"))
+
+
+def _fal_generation_contract(
+    normalized_request: dict[str, Any] | None,
+    *,
+    job_type: JobType,
+    prompt: str | None,
+    lyrics: str | None,
+    source_duration_seconds: float | None,
+    output_format: OutputFormat,
+    variation_count: int,
+) -> dict[str, Any] | None:
+    """Persist the provider-neutral contract alongside the legacy worker shape."""
+
+    if normalized_request is None:
+        return None
+    generation_value = normalized_request.get("generation")
+    generation = dict(generation_value) if isinstance(generation_value, dict) else {}
+    duration = generation.get("duration_seconds", generation.get("duration"))
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool):
+        duration = None
+    fields = {
+        key: generation[key]
+        for key in (
+            "bpm",
+            "key_scale",
+            "time_signature",
+            "strength",
+            "audio_cover_strength",
+            "cover_noise_strength",
+            "start_seconds",
+            "end_seconds",
+            "before_seconds",
+            "after_seconds",
+            "source_style",
+        )
+        if key in generation and generation[key] is not None
+    }
+    contract = {
+        "request_contract_version": 1,
+        "mode": "audio_to_audio" if job_type is JobType.COVER else "prompt_to_audio",
+        "prompt": generation.get("prompt", prompt),
+        "lyrics": generation.get("lyrics", lyrics),
+        "instrumental": bool(generation.get("instrumental", False)),
+        "duration_seconds": duration,
+        "seed": generation.get("seed"),
+        "variation_count": variation_count,
+        "output_format": generation.get("output_format", output_format.value),
+        "source_audio_url": None,
+        "source_duration_seconds": source_duration_seconds,
+        "fields": fields,
+    }
+    value = dict(normalized_request)
+    value["request_contract_version"] = 1
+    value["generation_request"] = contract
+    return value
+
+
 def attempt_provider_ref(
     attempt: VariationAttempt, job: Job | None = None
 ) -> ProviderJobRef | None:
@@ -91,8 +157,9 @@ def attempt_provider_ref(
     external_id = attempt.provider_job_id
     if provider is None and attempt.runpod_job_id:
         provider, external_id = ProviderName.RUNPOD, attempt.runpod_job_id
+    backend = attempt.inference_backend or (job_backend(job) if job is not None else None)
     if provider and external_id:
-        return ProviderJobRef(ProviderName(provider), external_id)
+        return ProviderJobRef(ProviderName(provider), external_id, backend)
     return None
 
 
@@ -324,6 +391,8 @@ def create_job(
     job_id: str | UUID | None = None,
     project: Project | str | UUID | None = None,
     inference_provider: ProviderName | str = ProviderName.RUNPOD,
+    inference_backend: BackendId | str | None = None,
+    backend_snapshot_json: dict[str, Any] | None = None,
 ) -> Job:
     if variation_count < 1 or variation_count > 4:
         raise ValueError("variation_count must be between 1 and 4")
@@ -337,6 +406,42 @@ def create_job(
         prompt=prompt,
     )
     provider = ProviderName(inference_provider)
+    backend = BackendId(
+        str(
+            inference_backend
+            or {
+                ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
+                ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+            }.get(provider, f"{provider.value}/default")
+        )
+    )
+    expected_builtin = {
+        ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
+        ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+    }.get(provider)
+    if expected_builtin is not None and str(backend) != expected_builtin:
+        raise ValueError("built-in provider and backend do not match")
+    if provider is ProviderName.FAL and not str(backend).startswith("fal/"):
+        raise ValueError("Fal provider and backend do not match")
+    snapshot = backend_snapshot_json or {
+        "backend_id": str(backend),
+        "provider": provider.value,
+        "label": str(backend),
+        "catalog_revision": "builtin-v1",
+    }
+    if snapshot.get("backend_id") != str(backend) or snapshot.get("provider") != provider.value:
+        raise ValueError("backend snapshot does not match provider ownership")
+    normalized_request = normalized_request_json
+    if provider is ProviderName.FAL:
+        normalized_request = _fal_generation_contract(
+            normalized_request_json,
+            job_type=job_type,
+            prompt=prompt,
+            lyrics=lyrics,
+            source_duration_seconds=source_duration,
+            output_format=output_format,
+            variation_count=variation_count,
+        )
     job = Job(
         id=_id_string(job_id),
         project_id=persisted_project.id,
@@ -352,8 +457,10 @@ def create_job(
         output_format=output_format,
         variation_count=variation_count,
         current_variation=1,
-        normalized_request_json=normalized_request_json,
+        normalized_request_json=normalized_request,
         inference_provider=provider.value,
+        inference_backend=str(backend),
+        backend_snapshot_json=snapshot,
     )
     session.add(job)
     persisted_project.updated_at = utc_now()
@@ -368,6 +475,8 @@ def create_original_job(
     job_id: str | UUID | None = None,
     project: Project | str | UUID | None = None,
     inference_provider: ProviderName | str = ProviderName.RUNPOD,
+    inference_backend: BackendId | str | None = None,
+    backend_snapshot_json: dict[str, Any] | None = None,
 ) -> Job:
     """Persist one validated original-song request before it is enqueued."""
 
@@ -382,6 +491,8 @@ def create_original_job(
         job_id=job_id,
         project=project,
         inference_provider=inference_provider,
+        inference_backend=inference_backend,
+        backend_snapshot_json=backend_snapshot_json,
     )
 
 
@@ -393,6 +504,8 @@ def create_cover_job(
     job_id: str | UUID | None = None,
     project: Project | str | UUID | None = None,
     inference_provider: ProviderName | str = ProviderName.RUNPOD,
+    inference_backend: BackendId | str | None = None,
+    backend_snapshot_json: dict[str, Any] | None = None,
 ) -> Job:
     """Persist one validated cover request before home ingestion is queued."""
 
@@ -413,6 +526,8 @@ def create_cover_job(
         job_id=job_id,
         project=project,
         inference_provider=inference_provider,
+        inference_backend=inference_backend,
+        backend_snapshot_json=backend_snapshot_json,
     )
 
 
@@ -431,6 +546,19 @@ def finalize_cover_job_duration(
     finalized = finalize_cover_normalized_request(
         job.normalized_request_json, source_duration_seconds
     )
+    if job.inference_provider == ProviderName.FAL.value:
+        finalized = (
+            _fal_generation_contract(
+                finalized,
+                job_type=job.job_type,
+                prompt=job.prompt,
+                lyrics=job.lyrics,
+                source_duration_seconds=source_duration_seconds,
+                output_format=job.output_format,
+                variation_count=job.variation_count,
+            )
+            or finalized
+        )
     job.normalized_request_json = finalized
     duration = float(source_duration_seconds)
     target_duration = float(finalized["resolved_target_duration_seconds"])
@@ -749,6 +877,7 @@ def create_variation_attempt(
         job_id=job.id,
         variation_index=variation_index,
         inference_provider=job_provider(job).value,
+        inference_backend=str(job_backend(job)),
     )
     session.add(attempt)
     session.flush()
@@ -793,6 +922,7 @@ def prepare_variation_submission(
     submission_nonce: str | UUID | None = None,
     now: datetime | None = None,
     inference_provider: ProviderName | str | None = None,
+    inference_backend: BackendId | str | None = None,
 ) -> tuple[Job, VariationAttempt, str]:
     """Commit the variation's nonce before the external Runpod request."""
 
@@ -803,6 +933,8 @@ def prepare_variation_submission(
     provider = ProviderName(inference_provider or job_provider(job))
     if provider is not job_provider(job):
         raise ValueError("variation provider does not match its job")
+    if inference_backend is not None and BackendId(str(inference_backend)) != job_backend(job):
+        raise ValueError("variation backend does not match its job")
     if attempt_provider_ref(attempt, job):
         raise ValueError("variation already has a provider job ID")
     if attempt.submission_nonce:
@@ -825,6 +957,7 @@ def prepare_variation_submission(
     job.updated_at = timestamp
     attempt.submission_nonce = nonce
     attempt.inference_provider = provider.value
+    attempt.inference_backend = str(job_backend(job))
     attempt.updated_at = timestamp
     session.flush()
     return job, attempt, nonce
@@ -846,7 +979,12 @@ def persist_variation_provider_job_ref(
         raise KeyError(f"unknown job: {attempt.job_id}")
     if attempt.submission_nonce != submission_nonce:
         raise ValueError("submission nonce does not match the pending variation")
-    if ref.provider is not job_provider(job) or attempt.inference_provider != ref.provider.value:
+    if (
+        ref.provider is not job_provider(job)
+        or attempt.inference_provider != ref.provider.value
+        or ref.backend_id != job_backend(job)
+        or attempt.inference_backend != str(ref.backend_id)
+    ):
         raise ValueError("provider reference does not match persisted provider")
     if attempt.provider_job_id and attempt.provider_job_id != ref.external_id:
         raise ValueError("variation already has a different provider job ID")
@@ -1284,17 +1422,29 @@ def create_output(
         raise ValueError("output provider reference is ambiguous")
     if provider_ref is None and runpod_job_id is not None:
         provider_ref = ProviderJobRef(ProviderName.RUNPOD, runpod_job_id)
+    job = get_job(session, job_id)
+    resolved_ref = provider_ref
+    if resolved_ref is None and job is not None:
+        resolved_ref = ProviderJobRef(
+            job_provider(job), runpod_job_id or "legacy-output", job_backend(job)
+        )
     output = Output(
         job_id=str(job_id),
         variation_index=variation_index,
         result_index=result_index,
         runpod_job_id=(
-            provider_ref.external_id
-            if provider_ref and provider_ref.provider is ProviderName.RUNPOD
+            resolved_ref.external_id
+            if resolved_ref and resolved_ref.provider is ProviderName.RUNPOD
             else None
         ),
-        inference_provider=provider_ref.provider.value if provider_ref else None,
-        provider_job_id=provider_ref.external_id if provider_ref else None,
+        inference_provider=resolved_ref.provider.value if resolved_ref else None,
+        inference_backend=str(resolved_ref.backend_id) if resolved_ref else None,
+        provider_job_id=(
+            resolved_ref.external_id
+            if resolved_ref
+            and not (runpod_job_id is None and resolved_ref.external_id == "legacy-output")
+            else None
+        ),
         relative_path=normalize_relative_path(relative_path),
         mime_type=mime_type,
         byte_size=byte_size,

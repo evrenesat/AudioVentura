@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
+from ace_service.artifact_store import materialize_async_stream
 from ace_service.config import ServiceSettings
 from ace_service.db import SessionFactory, initialize_database_for_settings
 from ace_service.models import (
@@ -288,34 +289,20 @@ async def _receive_output(
         )
     part_path = final_path.with_name(f"{final_path.name}{_PART_SUFFIX}")
     _unlink_quietly(part_path)
-    digest = hashlib.sha256()
-    byte_count = 0
     try:
-        with part_path.open("wb") as output_file:
-            async for chunk in request.stream():
-                if not isinstance(chunk, bytes):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST, detail="invalid body"
-                    )
-                byte_count += len(chunk)
-                if byte_count > max_bytes:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                        detail="output exceeds capability byte limit",
-                    )
-                digest.update(chunk)
-                output_file.write(chunk)
-            if byte_count <= 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="output is empty"
-                )
-            if content_length is not None and content_length != byte_count:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="body length mismatch"
-                )
-            output_file.flush()
-            os.fsync(output_file.fileno())
-        actual_sha256 = digest.hexdigest()
+        receipt = await materialize_async_stream(
+            request.stream(),
+            root=settings.paths.outputs,
+            target=part_path,
+            max_bytes=max_bytes,
+            content_type=_MIME_TYPES[normalize_extension(final_path.suffix)],
+        )
+        byte_count = receipt.byte_size
+        if content_length is not None and content_length != byte_count:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="body length mismatch"
+            )
+        actual_sha256 = receipt.sha256
         _verify_optional_digest(request, actual_sha256)
         _finalize_output(
             session_factory,

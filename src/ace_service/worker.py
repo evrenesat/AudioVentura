@@ -16,6 +16,7 @@ from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 
+from ace_service.artifact_store import materialize_remote_artifact
 from ace_service.config import ServiceSettings
 from ace_service.costs import resolve_gpu_alias, round_half_up_compute_cost_usd
 from ace_service.cover import CoverSourceError, finalize_cover_source, remove_cover_source
@@ -32,7 +33,9 @@ from ace_service.models import (
     utc_now,
 )
 from ace_service.providers.base import (
+    BackendId,
     CancelOutcome,
+    GenerationRequest,
     InferenceMode,
     InferenceRequest,
     ProviderError,
@@ -44,6 +47,7 @@ from ace_service.providers.base import (
     RequestFeature,
     unsupported_features,
 )
+from ace_service.providers.fal import FalProvider
 from ace_service.providers.registry import ProviderRegistry
 from ace_service.providers.runpod import RunpodProvider
 from ace_service.quality_profiles import MAX_SEED
@@ -52,11 +56,13 @@ from ace_service.repository import (
     attempt_provider_result,
     complete_variation_attempt,
     confirm_cover_job,
+    create_output,
     create_variation_attempt,
     fail_variation_attempt,
     finalize_cover_job_duration,
     get_job,
     get_variation_attempt,
+    job_backend,
     job_provider,
     persist_variation_provider_job_ref,
     prepare_variation_submission,
@@ -312,24 +318,32 @@ class ControllerWorker:
             if job is None:
                 raise ValueError("job is missing")
             provider_name = job_provider(job)
+            backend_id = job_backend(job)
             job, attempt, nonce = prepare_variation_submission(
-                session, job_id, variation_index, inference_provider=provider_name
+                session,
+                job_id,
+                variation_index,
+                inference_provider=provider_name,
+                inference_backend=backend_id,
             )
             payload = dict(self.payload_builder(job, attempt))
-            output_path = self._output_relative_path(job, attempt.variation_index)
-            output_issued = issue_transfer_url(
-                session,
-                self.settings,
-                job_id=job.id,
-                direction=TransferDirection.OUTPUT_UPLOAD,
-                expected_relative_path=output_path,
-                expected_extension=job.output_format.value,
-                max_bytes=self.settings.transfer_max_output_bytes,
-            )
-            payload["result_upload"] = {
-                "url": output_issued.url,
-                "max_bytes": output_issued.capability.max_bytes,
-            }
+            provider = self.provider_registry.get_persisted(backend_id)
+            fal_source: dict[str, Any] | None = None
+            if not isinstance(provider, FalProvider):
+                output_path = self._output_relative_path(job, attempt.variation_index)
+                output_issued = issue_transfer_url(
+                    session,
+                    self.settings,
+                    job_id=job.id,
+                    direction=TransferDirection.OUTPUT_UPLOAD,
+                    expected_relative_path=output_path,
+                    expected_extension=job.output_format.value,
+                    max_bytes=self.settings.transfer_max_output_bytes,
+                )
+                payload["result_upload"] = {
+                    "url": output_issued.url,
+                    "max_bytes": output_issued.capability.max_bytes,
+                }
             if job.job_type is JobType.COVER:
                 if not job.source_sha256 or not job.source_byte_size:
                     raise CoverSourceError(
@@ -344,38 +358,51 @@ class ControllerWorker:
                     expected_extension=".mp3",
                     max_bytes=job.source_byte_size,
                 )
-                payload["source"] = {
-                    "url": source_issued.url,
-                    "sha256": job.source_sha256,
-                    "bytes": job.source_byte_size,
-                    "format": "mp3",
-                }
+                if isinstance(provider, FalProvider):
+                    fal_source = {"audio_url": source_issued.url}
+                else:
+                    payload["source"] = {
+                        "url": source_issued.url,
+                        "sha256": job.source_sha256,
+                        "bytes": job.source_byte_size,
+                        "format": "mp3",
+                    }
             payload["submission_nonce"] = nonce
             session.commit()
 
         # The nonce-only commit is the no-duplicate boundary. Any exception
         # below is persisted as an uncertain submission by the task handler.
-        provider = self.provider_registry.get(provider_name)
+        provider = self.provider_registry.get_persisted(backend_id)
         mode = (
             InferenceMode.AUDIO_TO_AUDIO
             if job.job_type is JobType.COVER
             else InferenceMode.PROMPT_TO_AUDIO
         )
         features = self._requested_features(job, payload)
+        generation_request = (
+            self._generation_request(job, variation_index)
+            if isinstance(provider, FalProvider)
+            else None
+        )
         request = InferenceRequest(
             application_job_id=job_id,
             variation_index=variation_index,
             submission_nonce=nonce,
             mode=mode,
             requested_features=features,
-            worker_payload=payload,
+            worker_payload={} if isinstance(provider, FalProvider) else payload,
             execution_timeout_ms=self.settings.runpod_execution_timeout_ms,
             queue_timeout_ms=self.settings.runpod_job_ttl_ms,
+            generation_request=generation_request,
+            signed_source=fal_source,
         )
-        missing = unsupported_features(provider.capabilities, request)
-        worker_schema = request.worker_payload.get("schema_version", LEGACY_WORKER_SCHEMA_VERSION)
-        if missing or worker_schema not in provider.capabilities.accepts_worker_schema:
-            raise ValueError("inference provider does not support requested features")
+        if not isinstance(provider, FalProvider):
+            missing = unsupported_features(provider.capabilities, request)
+            worker_schema = request.worker_payload.get(
+                "schema_version", LEGACY_WORKER_SCHEMA_VERSION
+            )
+            if missing or worker_schema not in provider.capabilities.accepts_worker_schema:
+                raise ValueError("inference provider does not support requested features")
         provider_ref = await provider.submit(request)
         with self.session_factory() as session:
             persist_variation_provider_job_ref(
@@ -409,7 +436,7 @@ class ControllerWorker:
                 seconds=self.settings.inference_job_timeout_seconds
             )
 
-        provider = self.provider_registry.get(ref.provider)
+        provider = self.provider_registry.get_persisted(BackendId(str(ref.backend_id)))
 
         started = time.monotonic()
         try:
@@ -537,7 +564,9 @@ class ControllerWorker:
             if attempt is None or job is None or attempt_provider_ref(attempt, job) != ref:
                 session.rollback()
                 return
-            expected_schema_version = _stored_schema_version(job)
+            expected_schema_version = (
+                None if isinstance(provider, FalProvider) else _stored_schema_version(job)
+            )
             metadata = dict(provider_result.metadata)
             if expected_schema_version is not None or "schema_version" in metadata:
                 metadata = validate_worker_result_metadata(
@@ -546,7 +575,11 @@ class ControllerWorker:
             if expected_schema_version == WORKER_SCHEMA_VERSION:
                 if not metadata:
                     raise ValueError("schema-v2 worker completion is missing result metadata")
-            output = self._validated_output(session, job, variation_index)
+            output = (
+                None
+                if isinstance(provider, FalProvider)
+                else self._validated_output(session, job, variation_index)
+            )
             if expected_schema_version == WORKER_SCHEMA_VERSION:
                 assert metadata is not None
                 _validate_completion_metadata(metadata, job, attempt, output)
@@ -556,6 +589,85 @@ class ControllerWorker:
                 metadata,
                 project_to_output=output is not None,
             )
+            if isinstance(provider, FalProvider):
+                artifact = provider_result.artifact
+                if artifact is None:
+                    raise ValueError("Fal completion is missing its declared audio artifact")
+                relative_path = f"{job.id}/variation-{variation_index:02d}.{artifact.native_format}"
+                existing = session.scalar(
+                    select(Output).where(
+                        Output.job_id == job.id,
+                        Output.variation_index == variation_index,
+                        Output.result_index == 0,
+                    )
+                )
+                if existing is None:
+                    token = await provider.transport.cdn_token()
+                    receipt = await materialize_remote_artifact(
+                        provider.transport.client,
+                        artifact.url,
+                        root=self.settings.paths.outputs,
+                        target=self.settings.paths.outputs / relative_path,
+                        native_format=artifact.native_format,
+                        max_bytes=min(
+                            provider.descriptor.output.max_bytes,
+                            self.settings.transfer_max_output_bytes,
+                        ),
+                        bearer_token=token,
+                    )
+                    metadata.update(
+                        {
+                            "artifact_byte_size": receipt.byte_size,
+                            "artifact_sha256": receipt.sha256,
+                            "artifact_native_format": artifact.native_format,
+                            **(
+                                {"returned_seed": artifact.seed}
+                                if artifact.seed is not None
+                                else {}
+                            ),
+                            **(
+                                {"returned_duration_seconds": artifact.duration_seconds}
+                                if artifact.duration_seconds is not None
+                                else {}
+                            ),
+                        }
+                    )
+                    set_variation_provider_result(
+                        session,
+                        attempt.id,
+                        metadata,
+                        project_to_output=False,
+                    )
+                    output = create_output(
+                        session,
+                        job_id=job.id,
+                        variation_index=variation_index,
+                        result_index=0,
+                        relative_path=relative_path,
+                        mime_type=receipt.content_type,
+                        byte_size=receipt.byte_size,
+                        sha256=receipt.sha256,
+                        provider_ref=ref,
+                        seed_metadata_json={"seed": artifact.seed}
+                        if artifact.seed is not None
+                        else None,
+                        generation_metadata_json=metadata,
+                    )
+                else:
+                    output = existing
+                _ensure_terminal_evidence(
+                    session,
+                    attempt,
+                    metadata=metadata,
+                    unavailable_reason="provider_managed_pricing",
+                )
+                completed_job, _, parent_completed = complete_variation_attempt(session, attempt.id)
+                if parent_completed and completed_job.job_type is JobType.COVER:
+                    revoke_active_transfers(session, completed_job.id)
+                session.commit()
+                if parent_completed:
+                    remove_cover_source(self.settings, job_id)
+                return
             if output is None:
                 # Keep the attempt active. The output capability may be
                 # consumed just before or just after this status observation.
@@ -890,8 +1002,12 @@ class ControllerWorker:
             return self.poll_interval_seconds
         with self.session_factory() as session:
             job = get_job(session, job_id)
-            if job is not None and job_provider(job) is ProviderName.SALAD:
-                return self.settings.salad_poll_interval_seconds
+            if job is not None:
+                provider = job_provider(job)
+                if provider is ProviderName.SALAD:
+                    return self.settings.salad_poll_interval_seconds
+                if provider is ProviderName.FAL:
+                    return self.settings.fal_poll_interval_seconds
         return self.settings.runpod_poll_interval_seconds
 
     def _record_poll_error(self, job_id: str, provider: ProviderName, exc: Exception) -> None:
@@ -1157,6 +1273,75 @@ class ControllerWorker:
             return cast(Output, output)
         except (OSError, ValueError):
             return None
+
+    @staticmethod
+    def _generation_request(job: Job, variation_index: int) -> GenerationRequest:
+        normalized = (
+            job.normalized_request_json if isinstance(job.normalized_request_json, Mapping) else {}
+        )
+        generation_contract = (
+            normalized.get("generation_request") if isinstance(normalized, Mapping) else None
+        )
+        generation = (
+            generation_contract
+            if isinstance(generation_contract, Mapping)
+            else normalized.get("generation")
+            if isinstance(normalized, Mapping)
+            else None
+        )
+        generation = generation if isinstance(generation, Mapping) else {}
+        mode = (
+            InferenceMode.AUDIO_TO_AUDIO
+            if job.job_type is JobType.COVER
+            else InferenceMode.PROMPT_TO_AUDIO
+        )
+        duration = generation.get("duration_seconds", generation.get("duration"))
+        if not isinstance(duration, (int, float)) or isinstance(duration, bool):
+            duration = None
+        seed = generation.get("seed")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            seed = None
+        output_format = generation.get("output_format", job.output_format.value)
+        if not isinstance(output_format, str) or output_format not in {"mp3", "flac", "wav"}:
+            output_format = job.output_format.value
+        source_style = generation.get("source_style")
+        if job.job_type is JobType.COVER and not isinstance(source_style, str):
+            source_style = "original audio"
+        return GenerationRequest(
+            mode=mode,
+            prompt=(
+                generation.get("prompt")
+                if isinstance(generation.get("prompt"), str)
+                else job.prompt
+            ),
+            lyrics=(
+                generation.get("lyrics")
+                if isinstance(generation.get("lyrics"), str)
+                else job.lyrics
+            ),
+            instrumental=bool(generation.get("instrumental", False)),
+            duration_seconds=float(duration) if duration is not None else None,
+            seed=seed + variation_index - 1 if seed is not None else None,
+            variation_count=job.variation_count,
+            output_format=output_format,
+            source_duration_seconds=job.source_duration,
+            fields={
+                key: generation.get(key)
+                for key in (
+                    "bpm",
+                    "key_scale",
+                    "time_signature",
+                    "start_seconds",
+                    "end_seconds",
+                    "before_seconds",
+                    "after_seconds",
+                    "strength",
+                )
+                if generation.get(key) is not None
+            }
+            | {"strength": generation.get("strength", generation.get("audio_cover_strength"))}
+            | ({"source_style": source_style} if source_style is not None else {}),
+        )
 
     @staticmethod
     def _default_payload(job: Job, attempt: VariationAttempt) -> Mapping[str, Any]:

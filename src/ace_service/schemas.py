@@ -319,6 +319,11 @@ class CoverRequest(BaseModel):
     lyrics: str | None = Field(default=None, max_length=20_000)
     audio_cover_strength: float | None = None
     cover_noise_strength: float | None = None
+    strength: float | None = Field(default=None, ge=0, le=1)
+    start_seconds: float | None = Field(default=None, ge=0, le=600)
+    end_seconds: float | None = Field(default=None, ge=0, le=600)
+    before_seconds: float | None = Field(default=None, ge=0, le=600)
+    after_seconds: float | None = Field(default=None, ge=0, le=600)
     duration_mode: Literal["source", "custom"] = "source"
     duration_seconds: float | None = None
     variation_count: StrictInt = Field(default=1, ge=1, le=4)
@@ -494,6 +499,19 @@ class CoverRequest(BaseModel):
             "seed": self.seed,
             "output_format": self.output_format.value,
         }
+        generation.update(
+            {
+                name: value
+                for name, value in {
+                    "strength": self.strength,
+                    "start_seconds": self.start_seconds,
+                    "end_seconds": self.end_seconds,
+                    "before_seconds": self.before_seconds,
+                    "after_seconds": self.after_seconds,
+                }.items()
+                if value is not None
+            }
+        )
         return {
             "schema_version": WORKER_SCHEMA_VERSION,
             "task_type": "cover",

@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from ace_service.cleanup import cleanup_controller, cleanup_loop_interval
 from ace_service.config import ServiceSettings
+from ace_service.costs import FalPricingClient
 from ace_service.db import (
     SessionFactory,
     create_database_engine,
@@ -21,8 +22,10 @@ from ace_service.db import (
     initialize_database,
 )
 from ace_service.home_ingest import HomeIngestClient
-from ace_service.providers.base import ProviderName
-from ace_service.providers.registry import ProviderRegistry
+from ace_service.providers.base import BackendOperation, ProviderName
+from ace_service.providers.fal import FalProvider, FalQueueTransport
+from ace_service.providers.fal_catalog import load_catalog
+from ace_service.providers.registry import BackendRegistry
 from ace_service.providers.runpod import RunpodProvider
 from ace_service.providers.salad import SaladProvider
 from ace_service.runpod_client import RunpodClient
@@ -81,6 +84,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             getattr(provider, "client", provider)
             for provider in app.state.provider_registry.providers
         )
+        clients.extend(app.state.provider_registry.closeable_transports)
+        if app.state.fal_pricing is not None:
+            clients.append(app.state.fal_pricing)
         for client in clients:
             close = getattr(client, "aclose", None)
             if close is not None:
@@ -96,7 +102,7 @@ def create_app(
     *,
     session_factory: SessionFactory | None = None,
     runpod_client: RunpodWorkerClient | None = None,
-    provider_registry: ProviderRegistry | None = None,
+    provider_registry: BackendRegistry | None = None,
     home_ingest_client: Any | None = None,
     worker: Any | None = None,
 ) -> FastAPI:
@@ -123,9 +129,10 @@ def create_app(
     resolved_runpod = runpod_client
     if provider_registry is None:
         providers: list[Any] = []
+        enabled = set(resolved_settings.enabled_backend_ids)
         if runpod_client is not None:
             providers.append(RunpodProvider(cast(Any, runpod_client)))
-        elif resolved_settings.inference_provider == ProviderName.RUNPOD.value or all(
+        elif "runpod/ace-step-v15-xl-turbo" in enabled or all(
             value.strip().lower() not in {"", "change-me", "changeme", "replace-me", "replace_me"}
             for value in (
                 resolved_settings.runpod_api_key,
@@ -134,7 +141,7 @@ def create_app(
         ):
             resolved_runpod = RunpodClient.from_settings(resolved_settings)
             providers.append(RunpodProvider(cast(Any, resolved_runpod)))
-        if resolved_settings.inference_provider == ProviderName.SALAD.value:
+        if "salad/ace-step-v15-xl-turbo" in enabled:
             assert resolved_settings.salad_api_key is not None
             assert resolved_settings.salad_organization is not None
             assert resolved_settings.salad_project is not None
@@ -151,10 +158,41 @@ def create_app(
                     pool_timeout=resolved_settings.salad_pool_timeout_seconds,
                 )
             )
-        provider_registry = ProviderRegistry(
-            providers, default=ProviderName(resolved_settings.inference_provider)
+        if any(item.startswith("fal/") for item in enabled):
+            catalog = load_catalog(resolved_settings.fal_catalog_path)
+            transport = FalQueueTransport(
+                resolved_settings.fal_key or "",
+                output_retention_seconds=resolved_settings.fal_output_retention_seconds,
+                connect_timeout=resolved_settings.fal_connect_timeout_seconds,
+                read_timeout=resolved_settings.fal_read_timeout_seconds,
+                write_timeout=resolved_settings.fal_write_timeout_seconds,
+                pool_timeout=resolved_settings.fal_pool_timeout_seconds,
+            )
+            for backend_id in enabled:
+                if not backend_id.startswith("fal/"):
+                    continue
+                descriptor = catalog.by_backend_id(backend_id)
+                if descriptor.media_kind.value in resolved_settings.fal_allowed_media_kind_values:
+                    providers.append(FalProvider(descriptor, transport))
+        configured_provider_names = {provider.capabilities.name for provider in providers}
+        legacy_default: ProviderName | None = ProviderName(resolved_settings.inference_provider)
+        if legacy_default not in configured_provider_names:
+            legacy_default = None
+        provider_registry = BackendRegistry(
+            providers,
+            default=legacy_default,
+            defaults={
+                BackendOperation.TEXT_TO_MUSIC.value: resolved_settings.default_original_backend,
+                BackendOperation.AUDIO_TRANSFORM.value: resolved_settings.default_cover_backend,
+            },
         )
     resolved_home = home_ingest_client or HomeIngestClient(resolved_settings)
+    resolved_pricing = None
+    if resolved_settings.fal_key and any(
+        str(provider.capabilities.backend_id).startswith("fal/")
+        for provider in provider_registry.providers
+    ):
+        resolved_pricing = FalPricingClient(resolved_settings.fal_key)
     resolved_worker = worker or ControllerWorker(
         resolved_settings,
         session_factory,
@@ -175,6 +213,7 @@ def create_app(
     app.state.engine = engine
     app.state.runpod_client = resolved_runpod
     app.state.provider_registry = provider_registry
+    app.state.fal_pricing = resolved_pricing
     app.state.home_ingest_client = resolved_home
     app.state.worker = resolved_worker
     app.state.cleanup_task = None

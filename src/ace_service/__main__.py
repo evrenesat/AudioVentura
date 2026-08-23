@@ -60,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         "migrate-upgrade", help="apply the ordered additive migration (offline)"
     )
     upgrade_parser.add_argument("--database", required=True, help="explicit resolved database path")
+    catalog_parser = subparsers.add_parser("fal-catalog", help="review Fal endpoint metadata")
+    catalog_subparsers = catalog_parser.add_subparsers(dest="fal_catalog_command")
+    audit_parser = catalog_subparsers.add_parser("audit", help="read-only catalog audit")
+    audit_parser.add_argument("--catalog", required=False, help="absolute reviewed catalog path")
     return parser
 
 
@@ -74,6 +78,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _migrate_status(args.database)
     if args.command == "migrate-upgrade":
         return _migrate_upgrade(args.database)
+    if args.command == "fal-catalog" and args.fal_catalog_command == "audit":
+        from ace_service.providers.fal_catalog import main as fal_catalog_main
+
+        return fal_catalog_main([*(["--catalog", args.catalog] if args.catalog else [])])
     parser.print_help(sys.stderr)
     return 2
 

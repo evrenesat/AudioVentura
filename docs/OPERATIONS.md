@@ -11,7 +11,7 @@ The normal deployment uses:
 - one Hetzner service account for the controller and transfer processes;
 - one durable private data root, normally `/srv/ace-service/data`;
 - one private Home Ingest service on the home network;
-- one configured inference provider for new jobs;
+- one or more explicitly enabled inference backends for new jobs;
 - a private proxy for the UI and a public HTTPS proxy for signed transfers.
 
 Application code and deployment configuration are separate. Do not store
@@ -43,6 +43,11 @@ For Runpod, also set `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID`. For Salad, set
 `SALAD_API_KEY`, `SALAD_ORGANIZATION`, `SALAD_PROJECT`, and the tracked queue
 and container-group names. Keep credentials for any provider that still owns a
 nonterminal historical job.
+
+For fal.ai, first follow [the Fal runbook](FAL.md). Add only audited
+`fal/<endpoint-id>` values to `INFERENCE_ENABLED_BACKENDS`, set the two mode
+defaults to enabled IDs, and keep `FAL_KEY` available while any nonterminal Fal
+job remains. Fal prices are informational and never gate submission.
 
 Start the controller:
 
@@ -124,8 +129,10 @@ Only one controller worker may own a data root.
 
 ## Provider selection
 
-`INFERENCE_PROVIDER` accepts `runpod` or `salad`. The value is copied onto a
-new job before enqueue. Do not change provider fields on existing jobs.
+`INFERENCE_ENABLED_BACKENDS` is a comma-separated allowlist of exact backend
+IDs. `DEFAULT_ORIGINAL_BACKEND` and `DEFAULT_COVER_BACKEND` must be enabled and
+mode-compatible. The selected backend is copied onto a new job before enqueue.
+Do not change provider or backend fields on existing jobs.
 
 When changing the default:
 

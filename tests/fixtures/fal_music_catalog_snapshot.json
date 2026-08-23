@@ -1,0 +1,116 @@
+{
+  "catalog_revision": "fal-music-2026-08-23",
+  "entries": {
+    "fal-ai/elevenlabs/music": {
+      "schema_sha256": "65e2fc155540263d4e12c2588e7202e6649d1ec77cb2ffa116f98982cbe62a60"
+    },
+    "cassetteai/music-generator": {
+      "schema_sha256": "8cbaeee3a47efc214e0065c693ba800c538aef593859171cb66e63a3af6e58f0"
+    },
+    "fal-ai/minimax-music/v1.5": {
+      "schema_sha256": "e081ec986b568631907fde0b6a95b89abbeae82168ba52634906e5c8374373d5"
+    },
+    "fal-ai/minimax-music/v2": {
+      "schema_sha256": "23fdacfda43f1b27af9d98ccb49c6d34b0d2f4a005c1b5c078d66744e644ca3e"
+    },
+    "fal-ai/minimax-music/v2.5": {
+      "schema_sha256": "28800b519bc726ce413ab4d3db199464a7fddbd66da3dc9eeba7b5c4e8fcfb0c"
+    },
+    "fal-ai/minimax-music/v2.6": {
+      "schema_sha256": "32cdca0b217df3bea11895dd926d2d909ba2878fbe1bb1d27417531646fbd714"
+    },
+    "minimax/music-3": {
+      "schema_sha256": "7656f774650f8b6ec25b1d136692cb945ce334d28d86434167aff025d8d81141"
+    },
+    "fal-ai/lyria2": {
+      "schema_sha256": "cdf1a11edecabc64b5eab6800d6c1a9a339092c77aac1b43cf98864fde2f6f39"
+    },
+    "fal-ai/lyria3": {
+      "schema_sha256": "9da51594e577cddd6d58a7a17557d5c7633777d7d655796555ceb04cf01741a5"
+    },
+    "fal-ai/lyria3/pro": {
+      "schema_sha256": "614b103e540afa671806c61fad8c88dac557fa25f42c787f267c79d80ade468a"
+    },
+    "fal-ai/ace-step": {
+      "schema_sha256": "d25621408ff3735b750562d4a439baf352dd799e8717d841003f426b1ca24e51"
+    },
+    "fal-ai/ace-step/prompt-to-audio": {
+      "schema_sha256": "00d3d574033638cb68a6b0e616135463b90440e8d9e9a8bea72b7571021ebfcb"
+    },
+    "sonilo/v1.1/text-to-music": {
+      "schema_sha256": "9537b9ab8f65d5719383b43b599a5e8bb2aa001eaf0a12fc838b98033be1b13f"
+    },
+    "fal-ai/stable-audio-3/medium/text-to-audio": {
+      "schema_sha256": "aca285716b54f5b0074aae43b359e9b631ddc67911537fe76cd0799efc309191"
+    },
+    "fal-ai/stable-audio-3/medium/base/text-to-audio": {
+      "schema_sha256": "0a435a7cb1526a06fecf1692147278fea7800658ec99cdf4b79b967fed433785"
+    },
+    "fal-ai/stable-audio-3/small/music/text-to-audio": {
+      "schema_sha256": "523e71692595e8c0f439cc89f5176396b35411c815b3b36f696c173cd9366245"
+    },
+    "fal-ai/stable-audio-3/small/music/base/text-to-audio": {
+      "schema_sha256": "bb5248e0e29b2e2964e5624d2d3d3f50727d1cb236a962c66c55f21b963638e2"
+    },
+    "fal-ai/diffrhythm": {
+      "schema_sha256": "0c03fb1976261b12e7620679b884a408eafd91eca73817cd59d66b7ebdb0a5b7"
+    },
+    "fal-ai/stable-audio-25/text-to-audio": {
+      "schema_sha256": "5d3e3b0c9cb9061f0cfb5929d872a45ecb62f2d76a8c0749d8707e8362c9487b"
+    },
+    "fal-ai/stable-audio": {
+      "schema_sha256": "3be978979e4fa03934cb97ab47419e7f79f7e037fa42116aa079763aeeeb118b"
+    },
+    "fal-ai/ace-step/audio-to-audio": {
+      "schema_sha256": "486d94bfffc2523f1283c86ba8325b2069b306578399b3b27e1c86c817704815"
+    },
+    "fal-ai/ace-step/audio-inpaint": {
+      "schema_sha256": "3c880790f7eb68514d1520396418a182cde90ca9a45d19792cba9bd8309a9438"
+    },
+    "fal-ai/ace-step/audio-outpaint": {
+      "schema_sha256": "bb28a571cd9a1e0117c3d17b6975adce79be716ae1558bdb46ef21f278173acc"
+    },
+    "fal-ai/stable-audio-3/medium/audio-to-audio": {
+      "schema_sha256": "a1e734fec8b3e24ce500e2cac51e61b5f891df506c671d2e23361757a344b307"
+    },
+    "fal-ai/stable-audio-3/medium/audio-inpainting": {
+      "schema_sha256": "f39315f402c29f722e47b0c985ba058296aa5db9de14f641c3d8af245ea38ac3"
+    },
+    "fal-ai/stable-audio-3/medium/audio-outpainting": {
+      "schema_sha256": "69cfcf1379924fe039c96c3e9ff3bd2702f2ab14def33101b4816c53520d3011"
+    },
+    "fal-ai/stable-audio-3/medium/base/audio-to-audio": {
+      "schema_sha256": "1f960b606d22a861a8d1e2e4eadb5f4681afe5779094eda55a37d15897eb8b8a"
+    },
+    "fal-ai/stable-audio-3/medium/base/audio-inpainting": {
+      "schema_sha256": "ae6ae985893913bd7e4b5e94261c923b9e15124d6652aef456f40d527f192566"
+    },
+    "fal-ai/stable-audio-3/medium/base/audio-outpainting": {
+      "schema_sha256": "764e5519a8dc2775363ba1599b3582fbab8efec0a6b6cb8582926ef92d37c20f"
+    },
+    "fal-ai/stable-audio-3/small/music/audio-to-audio": {
+      "schema_sha256": "cf5cf12d05fce328449f31a932cf9d80c2ecb7796c267a7724b25aa7da068f07"
+    },
+    "fal-ai/stable-audio-3/small/music/audio-inpainting": {
+      "schema_sha256": "9fc097c76d0192c0f9fcc6c6036302467fec466f0da878681d74f06e3bd3b301"
+    },
+    "fal-ai/stable-audio-3/small/music/audio-outpainting": {
+      "schema_sha256": "77669345cace29fac3534096a715ca122c79f224281cf3507c9e5724d9a8c4cd"
+    },
+    "fal-ai/stable-audio-3/small/music/base/audio-to-audio": {
+      "schema_sha256": "b552647b704020c3a9dd9f2970cba644fae93ff4a1fcbabc6f8348962cd9f252"
+    },
+    "fal-ai/stable-audio-3/small/music/base/audio-inpainting": {
+      "schema_sha256": "6d951c88e12e75addbcebbd3fe6ff3982ef5a25548398066d693a58acca5d6f4"
+    },
+    "fal-ai/stable-audio-3/small/music/base/audio-outpainting": {
+      "schema_sha256": "63e3a2d61ec7e3132c40c9e2500167c190624e6710833da8a66f1d4522aa7fbe"
+    },
+    "fal-ai/stable-audio-25/audio-to-audio": {
+      "schema_sha256": "8b9609e3c45803f62f45a35f24bb660820ed584b84f9046d6ff9bff12a07a1d8"
+    },
+    "fal-ai/stable-audio-25/inpaint": {
+      "schema_sha256": "6094acf70e1f4f9a7217cbbd3600894aca5ac24d238e6c9e3b573a7e317bacd8"
+    }
+  }
+}

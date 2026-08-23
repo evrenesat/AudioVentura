@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .providers.base import BackendId, MediaKind
 from .providers.salad_names import is_salad_resource_name
 
 _PLACEHOLDERS = frozenset(
@@ -169,6 +170,63 @@ class ServiceSettings(BaseSettings):
     inference_provider: str = Field(
         default="runpod",
         validation_alias=AliasChoices("INFERENCE_PROVIDER", "inference_provider"),
+    )
+    inference_enabled_backends: str = Field(
+        default="runpod/ace-step-v15-xl-turbo,salad/ace-step-v15-xl-turbo",
+        validation_alias=AliasChoices("INFERENCE_ENABLED_BACKENDS", "inference_enabled_backends"),
+    )
+    default_original_backend: str = Field(
+        default="runpod/ace-step-v15-xl-turbo",
+        validation_alias=AliasChoices("DEFAULT_ORIGINAL_BACKEND", "default_original_backend"),
+    )
+    default_cover_backend: str = Field(
+        default="salad/ace-step-v15-xl-turbo",
+        validation_alias=AliasChoices("DEFAULT_COVER_BACKEND", "default_cover_backend"),
+    )
+    fal_key: str | None = Field(default=None, validation_alias=AliasChoices("FAL_KEY", "fal_key"))
+    fal_allowed_media_kinds: str = Field(
+        default="music",
+        validation_alias=AliasChoices("FAL_ALLOWED_MEDIA_KINDS", "fal_allowed_media_kinds"),
+    )
+    fal_catalog_path: Path | None = Field(
+        default=None, validation_alias=AliasChoices("FAL_CATALOG_PATH", "fal_catalog_path")
+    )
+    fal_poll_interval_seconds: float = Field(
+        default=2,
+        validation_alias=AliasChoices("FAL_POLL_INTERVAL_SECONDS", "fal_poll_interval_seconds"),
+        gt=0,
+    )
+    fal_connect_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices("FAL_CONNECT_TIMEOUT_SECONDS", "fal_connect_timeout_seconds"),
+        gt=0,
+    )
+    fal_read_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("FAL_READ_TIMEOUT_SECONDS", "fal_read_timeout_seconds"),
+        gt=0,
+    )
+    fal_write_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("FAL_WRITE_TIMEOUT_SECONDS", "fal_write_timeout_seconds"),
+        gt=0,
+    )
+    fal_pool_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices("FAL_POOL_TIMEOUT_SECONDS", "fal_pool_timeout_seconds"),
+        gt=0,
+    )
+    fal_output_retention_seconds: int = Field(
+        default=86_400,
+        validation_alias=AliasChoices(
+            "FAL_OUTPUT_RETENTION_SECONDS", "fal_output_retention_seconds"
+        ),
+        gt=0,
+    )
+    fal_cdn_token_ttl_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices("FAL_CDN_TOKEN_TTL_SECONDS", "fal_cdn_token_ttl_seconds"),
+        gt=0,
     )
     inference_job_timeout_seconds: int = Field(
         default=7200,
@@ -391,6 +449,64 @@ class ServiceSettings(BaseSettings):
             raise ValueError("inference provider must be runpod or salad")
         return normalized
 
+    @field_validator("inference_enabled_backends")
+    @classmethod
+    def validate_backend_list_text(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("enabled backends must be a comma-separated string")
+        values = [item.strip() for item in value.split(",") if item.strip()]
+        if not values:
+            raise ValueError("at least one inference backend must be enabled")
+        if len(set(values)) != len(values):
+            raise ValueError("enabled inference backends must not contain duplicates")
+        for item in values:
+            BackendId(item)
+        return ",".join(values)
+
+    @field_validator("default_original_backend", "default_cover_backend")
+    @classmethod
+    def validate_backend_id_field(cls, value: str) -> str:
+        return str(BackendId(value.strip()))
+
+    @field_validator("fal_allowed_media_kinds")
+    @classmethod
+    def validate_fal_media_kinds(cls, value: str) -> str:
+        values = [item.strip() for item in value.split(",") if item.strip()]
+        allowed = {item.value for item in MediaKind}
+        if (
+            not values
+            or any(item not in allowed for item in values)
+            or len(set(values)) != len(values)
+        ):
+            raise ValueError("FAL_ALLOWED_MEDIA_KINDS contains an unsupported or duplicate value")
+        if any(item in {"sfx", "speech", "utility"} for item in values):
+            raise ValueError("pure non-music Fal media kinds are not supported")
+        return ",".join(values)
+
+    @field_validator("fal_key")
+    @classmethod
+    def validate_fal_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("fal_catalog_path")
+    @classmethod
+    def validate_fal_catalog_path(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        if not value.is_absolute():
+            raise ValueError("FAL_CATALOG_PATH must be absolute")
+        if value.is_symlink() or not value.is_file():
+            raise ValueError("FAL_CATALOG_PATH must be an existing regular file")
+        try:
+            if value.stat().st_mode & 0o022:
+                raise ValueError("FAL_CATALOG_PATH must not be group/world writable")
+        except OSError as exc:
+            raise ValueError("FAL_CATALOG_PATH cannot be inspected") from exc
+        return value
+
     @field_validator("salad_queue_name", "salad_container_group_name")
     @classmethod
     def validate_salad_names(cls, value: str) -> str:
@@ -467,12 +583,48 @@ class ServiceSettings(BaseSettings):
             if value in _PLACEHOLDERS or value.endswith(".example.invalid"):
                 raise ValueError(f"{field_name} still contains a configuration placeholder")
 
-        if self.inference_provider == "runpod":
+        enabled = self.enabled_backend_ids
+        # Preserve the old single-provider environment as a migration alias
+        # when the new backend settings were not changed.
+        explicit_backend_selection = bool(
+            self.model_fields_set
+            & {"inference_enabled_backends", "default_original_backend", "default_cover_backend"}
+        )
+        if (
+            not explicit_backend_selection
+            and self.inference_provider in {"runpod", "salad"}
+            and self.inference_enabled_backends
+            == "runpod/ace-step-v15-xl-turbo,salad/ace-step-v15-xl-turbo"
+            and self.default_original_backend == "runpod/ace-step-v15-xl-turbo"
+            and self.default_cover_backend == "salad/ace-step-v15-xl-turbo"
+        ):
+            enabled = (f"{self.inference_provider}/ace-step-v15-xl-turbo",)
+            self.inference_enabled_backends = enabled[0]
+            self.default_original_backend = enabled[0]
+            self.default_cover_backend = enabled[0]
+        elif (
+            self.inference_provider in {"runpod", "salad"}
+            and len(enabled) == 1
+            and enabled[0].split("/", 1)[0] != self.inference_provider
+            and enabled[0]
+            in {
+                "runpod/ace-step-v15-xl-turbo",
+                "salad/ace-step-v15-xl-turbo",
+            }
+            and self.default_original_backend == enabled[0]
+            and self.default_cover_backend == enabled[0]
+        ):
+            enabled = (f"{self.inference_provider}/ace-step-v15-xl-turbo",)
+            self.inference_enabled_backends = enabled[0]
+            self.default_original_backend = enabled[0]
+            self.default_cover_backend = enabled[0]
+
+        if any(item.startswith("runpod/") for item in enabled):
             for field_name in ("runpod_api_key", "runpod_endpoint_id"):
                 value = getattr(self, field_name).strip().lower()
                 if value in _PLACEHOLDERS:
                     raise ValueError(f"{field_name} still contains a configuration placeholder")
-        else:
+        if any(item.startswith("salad/") for item in enabled):
             for field_name in ("salad_api_key", "salad_organization", "salad_project"):
                 value = getattr(self, field_name)
                 if value is None or not value.strip() or value.strip().lower() in _PLACEHOLDERS:
@@ -483,6 +635,21 @@ class ServiceSettings(BaseSettings):
             ):
                 raise ValueError("Salad organization and project must be DNS-compatible")
 
+        if any(item.startswith("fal/") for item in enabled):
+            if self.fal_key is None or self.fal_key.lower() in _PLACEHOLDERS:
+                raise ValueError("fal_key is required when a Fal backend is enabled")
+            if self.transfer_token_ttl_seconds < self.inference_job_timeout_seconds + 600:
+                raise ValueError(
+                    "transfer_token_ttl_seconds must exceed the inference deadline by ten minutes"
+                )
+            if self.fal_output_retention_seconds < 86_400:
+                raise ValueError("fal_output_retention_seconds is below the recovery window")
+
+        if (
+            self.default_original_backend not in enabled
+            or self.default_cover_backend not in enabled
+        ):
+            raise ValueError("mode defaults must be present in INFERENCE_ENABLED_BACKENDS")
         if self.eligible_gpu_ids and self.runpod_worker_runtime_identity is None:
             raise ValueError(
                 "runpod_worker_runtime_identity is required when eligible GPU IDs are configured"
@@ -499,6 +666,14 @@ class ServiceSettings(BaseSettings):
     @property
     def paths(self) -> DataPaths:
         return DataPaths(self.data_root)
+
+    @property
+    def enabled_backend_ids(self) -> tuple[str, ...]:
+        return tuple(item for item in self.inference_enabled_backends.split(",") if item)
+
+    @property
+    def fal_allowed_media_kind_values(self) -> frozenset[str]:
+        return frozenset(item for item in self.fal_allowed_media_kinds.split(",") if item)
 
     @property
     def campaign_database_path(self) -> Path:

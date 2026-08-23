@@ -10,7 +10,8 @@ and hardware requirements:
 - the controller owns the private UI, SQLite state, and job orchestration;
 - the transfer service moves audio through short-lived signed URLs;
 - Home Ingest downloads and prepares YouTube audio on the home network;
-- Runpod or SaladCloud runs the GPU worker.
+- Runpod or SaladCloud runs the GPU worker; reviewed fal.ai Model APIs run as
+  controller-pulled managed backends.
 
 The controller does not run media tools or inference. GPU providers never
 receive YouTube, SSH, SFTP, home-network, or controller credentials.
@@ -23,9 +24,10 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
 - SaladCloud infrastructure and the model-inclusive worker image are deployed.
   Live acceptance is currently blocked by Salad capacity: a queued job did not
   receive an instance. See [the Salad runbook](docs/SALAD.md).
-- Provider selection is an administrator setting. A browser provider selector
-  and fal.ai support are future work. The provider contract already models
-  prompt-to-audio, audio-to-audio, and explicit feature capabilities.
+- Provider selection is an administrator-configured, per-job backend choice.
+  The Original form lists reviewed text-to-music backends; Cover / Remix lists
+  compatible audio transform, inpaint, and outpaint backends. See [the Fal
+  runbook](docs/FAL.md) before enabling paid endpoints.
 - The quality-evaluation CLI is intentionally quarantined until ordinary
   original and cover generation are stable.
 
@@ -85,7 +87,12 @@ Important groups are:
   public hostname;
 - `ACE_TRANSFER_*`: public signed-transfer origin, limits, and token lifetime;
 - `ACE_HOME_INGEST_*`: private Home Ingest endpoint and bearer token;
-- `INFERENCE_PROVIDER`: `runpod` or `salad` for newly created jobs;
+- `INFERENCE_ENABLED_BACKENDS` and `DEFAULT_*_BACKEND`: exact backend IDs and
+  mode-specific defaults for new jobs;
+- `FAL_KEY` and `FAL_*`: optional reviewed fal.ai catalog, queue, CDN, and
+  retention settings;
+- `INFERENCE_PROVIDER`: legacy coarse-provider compatibility for existing
+  deployment configuration;
 - `RUNPOD_*`: Runpod API, endpoint, polling, and timeout settings;
 - `SALAD_*`: Salad API, organization, project, queue, container group, and
   timeout settings;
