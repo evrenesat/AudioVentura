@@ -11,6 +11,7 @@ from deploy.salad.saladctl import (
     desired_container_group,
     desired_queue,
     load_config,
+    resolve_gpu_ids,
 )
 
 
@@ -121,6 +122,26 @@ class _FakeSaladApi:
             self.groups.append(group)
             return group
         raise AssertionError(f"unexpected fake request: {method} {path}")
+
+
+def test_gpu_resolution_accepts_only_the_catalog_vram_annotation() -> None:
+    class _GpuApi:
+        def request(self, method: str, path: str) -> object:
+            assert method == "GET"
+            assert path == "/organizations/org-name/gpu-classes"
+            return {
+                "items": [
+                    {"id": "3090-id", "name": "RTX 3090 (24 GB)"},
+                    {"id": "3090ti-id", "name": "RTX 3090 Ti (24 GB)"},
+                    {"id": "4090-id", "name": "RTX 4090 (24 GB)"},
+                ]
+            }
+
+    assert resolve_gpu_ids(
+        _GpuApi(),  # type: ignore[arg-type]
+        "org-name",
+        ["RTX 3090", "RTX 3090 Ti", "RTX 4090"],
+    ) == ["3090-id", "3090ti-id", "4090-id"]
 
 
 def test_apply_is_idempotent_and_ignores_only_write_only_registry_auth(tmp_path: Path) -> None:

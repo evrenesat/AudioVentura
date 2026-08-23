@@ -18,6 +18,7 @@ CONFIG_PATH = Path(__file__).with_name("deployment.json")
 IMAGE_RE = re.compile(
     r"^ghcr\.io/evrenesat/audioventura-ace-step-salad-worker@sha256:[0-9a-f]{64}$"
 )
+GPU_VRAM_SUFFIX_RE = re.compile(r"\s+\([0-9]+\s*GB\)\s*$", re.IGNORECASE)
 
 
 class InfraError(RuntimeError):
@@ -77,7 +78,9 @@ def resolve_gpu_ids(api: SaladApi, organization: str, names: list[str]) -> list[
     value = api.request("GET", f"/organizations/{organization}/gpu-classes")
     items = _items(value, "GPU classes")
     by_name = {
-        str(item.get("name", "")).casefold(): str(item.get("id", ""))
+        GPU_VRAM_SUFFIX_RE.sub("", str(item.get("name", "")).strip()).casefold(): str(
+            item.get("id", "")
+        )
         for item in items
         if item.get("name") and item.get("id")
     }

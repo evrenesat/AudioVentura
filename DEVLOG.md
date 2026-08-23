@@ -9,6 +9,8 @@
   megabyte unit (`8192` MiB for 8 GiB), bounded the startup probe to the API's
   20-failure maximum while retaining a 30-minute window, and supplied the
   required non-empty HTTP probe headers before provisioning any live resource.
+- Matched configured GPU families to the live catalog's trailing VRAM labels
+  exactly, after the first create attempt failed closed before making resources.
 
 ## 2026-08-23 (Salad live-contract and retry-safety corrections)
 
