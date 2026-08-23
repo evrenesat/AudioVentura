@@ -50,7 +50,7 @@ decimal total no greater than 35,000,000,000 bytes before provisioning.
 ## Desired remote state
 
 `deploy/salad/deployment.json` defines queue `audioventura-jobs` and container
-group `audioventura-ace-step-v2` with batch priority, 8 vCPU, 32 GiB RAM,
+group `audioventura-ace-step-v2` with low priority, 8 vCPU, 32 GiB RAM,
 compatible 24+ GiB GPU classes, startup/readiness/liveness probes, and:
 
 ```text

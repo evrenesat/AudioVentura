@@ -20,6 +20,9 @@
 - The deployment passes that bare manifest digest as the worker runtime
   identity while retaining the full repository-at-digest value for image
   selection, so completion evidence matches controller calibration identity.
+- After one live acceptance job remained pending for 30 minutes with desired
+  replicas at one but no instance record, raised the tracked Container Engine
+  priority from batch to low without resubmitting the durable queue job.
 
 ## 2026-08-23 (Salad live pull-progress normalization)
 

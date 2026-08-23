@@ -71,6 +71,7 @@ def test_desired_state_is_scale_to_zero_and_secret_is_not_serialized_elsewhere(
         "queue_name": "queue-name",
     }
     assert group["container"]["image"] == image
+    assert group["container"]["priority"] == "low"
     assert group["container"]["resources"]["shm_size"] == 8192
     assert group["startup_probe"]["failure_threshold"] == 20
     assert group["startup_probe"]["period_seconds"] == 90
