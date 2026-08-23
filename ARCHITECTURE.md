@@ -157,8 +157,10 @@ Capabilities declare supported modes, request features, worker schemas, and
 cancellation behavior. The current providers are:
 
 - `RunpodProvider`, which adapts the existing Runpod queue API;
-- `SaladProvider`, which adapts Salad Job Queues and enriches pending status
-  with container-group lifecycle evidence.
+- `SaladProvider`, which adapts Salad Job Queues and enriches pending or
+  retrying-running status with bounded container-group lifecycle evidence. A
+  ready instance restores job-scoped `RUNNING`; terminal states are never
+  enriched.
 
 Deployment management is not part of this interface. Queue creation, GPU
 selection, autoscaling, image credentials, and container-group changes remain

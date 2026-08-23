@@ -333,6 +333,166 @@ def test_pending_status_accepts_live_fractional_pull_progress(pulling_progress: 
     asyncio.run(scenario())
 
 
+def test_running_status_reflects_retry_image_download() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(
+                200, json={"items": [{"state": "downloading", "pulling_progress": 19}]}
+            )
+        return httpx.Response(
+            200, json={"id": JOB_ID, "status": "running", "create_time": JOB_CREATED}
+        )
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (
+            status.phase,
+            status.message,
+            status.progress,
+            status.provider_state,
+            status.detail_scope,
+        ) == (
+            ProviderPhase.PROVISIONING,
+            "Downloading worker image",
+            0.19,
+            "running",
+            DetailScope.DEPLOYMENT,
+        )
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_running_status_reflects_retry_worker_initialization() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(200, json={"items": [{"state": "running", "ready": False}]})
+        return httpx.Response(200, json={"id": JOB_ID, "status": "running"})
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (
+            status.phase,
+            status.message,
+            status.provider_state,
+            status.detail_scope,
+        ) == (
+            ProviderPhase.STARTING,
+            "Initializing ACE-Step",
+            "running",
+            DetailScope.DEPLOYMENT,
+        )
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_running_status_with_ready_instance_remains_job_scoped_running() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(200, json={"items": [{"state": "running", "ready": True}]})
+        return httpx.Response(200, json={"id": JOB_ID, "status": "running"})
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (
+            status.phase,
+            status.message,
+            status.progress,
+            status.provider_state,
+            status.detail_scope,
+        ) == (ProviderPhase.RUNNING, None, None, "running", DetailScope.JOB)
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("state", ("succeeded", "failed", "cancelled", "future"))
+def test_terminal_or_unknown_status_does_not_request_deployment_enrichment(state: str) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"id": JOB_ID, "status": state})
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+    assert paths == [f"/api/public/organizations/org/projects/project/queues/queue/jobs/{JOB_ID}"]
+
+
+@pytest.mark.parametrize(
+    ("logs", "expected_phase", "expected_message", "expected_scope"),
+    [
+        (
+            {
+                "items": [
+                    {
+                        "event_name": "Instance Starting",
+                        "event_time": "2026-08-23T10:01:00Z",
+                    }
+                ]
+            },
+            ProviderPhase.STARTING,
+            "Starting worker",
+            DetailScope.DEPLOYMENT,
+        ),
+        (
+            {
+                "items": [
+                    {
+                        "event_name": "Instance " + "x" * 255,
+                        "event_time": "2026-08-23T10:01:00Z",
+                    }
+                ]
+            },
+            ProviderPhase.RUNNING,
+            None,
+            DetailScope.JOB,
+        ),
+        (
+            {"items": [{"event_name": "Instance Starting"}] * 51},
+            ProviderPhase.RUNNING,
+            None,
+            DetailScope.JOB,
+        ),
+    ],
+)
+def test_running_status_uses_only_bounded_current_system_log_fallback(
+    logs: object,
+    expected_phase: ProviderPhase,
+    expected_message: str | None,
+    expected_scope: DetailScope,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/jobs/{JOB_ID}"):
+            return httpx.Response(
+                200, json={"id": JOB_ID, "status": "running", "create_time": JOB_CREATED}
+            )
+        if request.url.path.endswith("/instances"):
+            return httpx.Response(200, json={"items": []})
+        return httpx.Response(200, json=logs)
+
+    async def scenario() -> None:
+        provider = _provider(handler)
+        status = await provider.status(ProviderJobRef(ProviderName.SALAD, JOB_ID))
+        assert (
+            status.phase,
+            status.message,
+            status.provider_state,
+            status.detail_scope,
+        ) == (expected_phase, expected_message, "running", expected_scope)
+        await provider._client.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_health_uses_container_path_and_current_queue_length() -> None:
     paths: list[str] = []
 

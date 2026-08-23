@@ -1,5 +1,12 @@
 # Development Log
 
+## 2026-08-23 (Salad retry lifecycle status)
+
+- Corrected `running` Salad queue jobs during worker replacement so allocation,
+  image pull, and startup remain deployment-scoped instead of falsely showing
+  generation. Ready workers return to job-scoped running; terminal states are
+  unchanged.
+
 ## 2026-08-23 (guarded Salad interactive capacity sessions)
 
 - Corrected the earlier no-allocation conclusion: system logs proved the

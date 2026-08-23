@@ -214,7 +214,7 @@ class SaladProvider:
             "cancelled": ProviderPhase.CANCELLED,
         }.get(state if isinstance(state, str) else "", ProviderPhase.UNKNOWN)
         base = ProviderStatus(phase, provider_state=state if isinstance(state, str) else None)
-        if state != "pending":
+        if state not in {"pending", "running"}:
             return base
         try:
             raw = await self._request(
@@ -280,6 +280,8 @@ class SaladProvider:
                 detail_scope=DetailScope.DEPLOYMENT,
             )
         if status == "running" and ready is True:
+            if state == "running":
+                return ProviderStatus(ProviderPhase.RUNNING, provider_state=state)
             return ProviderStatus(
                 ProviderPhase.QUEUED,
                 "Worker ready",

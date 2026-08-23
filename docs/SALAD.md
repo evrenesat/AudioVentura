@@ -183,10 +183,12 @@ Pending Salad jobs can be cancelled. Running jobs report `too_late`. Salad
 durable queue UUID until terminal evidence or its deadline policy resolves the
 attempt.
 
-While a job is pending, the provider first inspects the single container-group
-instance. If that endpoint is empty or unusable, it may use only a bounded,
-post-job system lifecycle event as a fallback. Allocation, image download, and
-startup remain deployment-level inferred status. Image pull progress is shown
+While a job is pending, or while a Salad retry still reports the queue job as
+`running`, the provider first inspects the single container-group instance. If
+that endpoint is empty or unusable, it may use only a bounded, post-job system
+lifecycle event as a fallback. Allocation, image download, and startup remain
+deployment-level inferred status. A ready instance restores job-scoped
+`RUNNING`; terminal states are never enriched. Image pull progress is shown
 only when the instances endpoint supplies a valid fraction; logs never invent
 a percentage or readiness.
 
