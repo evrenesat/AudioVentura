@@ -10,6 +10,19 @@ root, store timestamps in UTC, and do not commit `.env` files or generated
 audio/database state. Run the full Checkpoint #1 verification commands before
 handing work to review.
 
+After changing anything in this repository:
+
+1. Deploy the exact committed revision to the beta environment.
+2. Test that beta deployment yourself, including the changed behavior.
+3. Tell the user the beta URL and exact deployed revision, and ask the user to
+   test it manually.
+4. Only after the user's beta test, ask for explicit approval to deploy the
+   tested revision to production. Never infer production approval from approval
+   to change, commit, push, or deploy beta.
+
+Always state which environment and exact revision is currently deployed. Keep
+beta and production labels explicit in plans, progress updates, and handoffs.
+
 Keep documentation ownership simple:
 
 - `README.md` is the operator and coding-agent entry point.
