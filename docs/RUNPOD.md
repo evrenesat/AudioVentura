@@ -21,8 +21,9 @@ inside the worker to that immutable digest. The controller's
 `RUNPOD_WORKER_RUNTIME_IDENTITY` must identify the same release.
 
 The image contains pinned ACE-Step v0.1.8 source and runtime dependencies. It
-does not contain model weights. The endpoint must mount the exact
-revision-pinned Hugging Face cache at:
+does not contain model weights. The endpoint selects the exact aggregate
+Hugging Face repository revision through Runpod cached models. Runpod exposes
+that platform cache at:
 
 ```text
 /runpod-volume/huggingface-cache/hub
@@ -33,6 +34,10 @@ bundle tag, manifest SHA-256, and complete 25.25 GB file inventory. Missing or
 changed files fail initialization. Offline mode is enabled; the worker does
 not download models or fall back to another checkpoint path.
 
+Do not attach a customer network volume to the endpoint. Network volumes pin
+workers to one data center even though the cached-model path is also rooted at
+`/runpod-volume`.
+
 ## Endpoint settings
 
 The intended personal scale-to-zero shape is:
@@ -42,6 +47,7 @@ workersMin: 0
 workersMax: 1
 gpuCount: 1
 GPU memory: at least 24 GB
+GPU choices: RTX 5090, RTX 4090, L4, RTX A6000
 idleTimeout: 30 seconds
 executionTimeout: 1200 seconds
 FlashBoot: enabled when available
@@ -93,6 +99,12 @@ temporary source and output files are removed after success or failure.
 may use endpoint health to report that a worker is initializing. A worker
 progress phase can describe source download, generation, finalization, or
 output upload.
+
+For a managed Runpod backend, capacity retention must report an idle ready
+worker before the controller commits the submission nonce. Warming capacity is
+a transient retry and does not consume the provider job TTL. A zero keep-warm
+setting releases capacity after work; it does not bypass pre-submission
+readiness.
 
 Before `/run`, the controller commits a submission nonce. It stores the
 returned Runpod ID immediately. A nonce without an ID is uncertain and is not

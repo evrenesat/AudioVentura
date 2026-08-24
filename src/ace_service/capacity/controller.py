@@ -137,10 +137,6 @@ class CapacityController:
         manager = self.registry.for_backend(backend_id)
         if manager is None:
             return
-        with self.session_factory() as session:
-            keep_warm = get_keep_warm_seconds(session)
-        if keep_warm == 0:
-            return
         try:
             before = await manager.inspect()
             if before.configured_maximum != 1:
@@ -165,6 +161,12 @@ class CapacityController:
                     lease.last_error_code = None
                     lease.updated_at = now
                     session.commit()
+                if before.phase is not CapacityPhase.READY:
+                    raise CapacityError(
+                        CapacityErrorKind.TRANSIENT,
+                        "retain",
+                        "capacity is still warming",
+                    )
                 return
             action = await self._provider_action(manager, "retain", before)
             if action is None:
@@ -207,6 +209,12 @@ class CapacityController:
             if updated is None:
                 raise CapacityError(
                     CapacityErrorKind.TRANSIENT, "retain", "capacity action became stale"
+                )
+            if after.phase is not CapacityPhase.READY:
+                raise CapacityError(
+                    CapacityErrorKind.TRANSIENT,
+                    "retain",
+                    "capacity is still warming",
                 )
         except CapacityError:
             raise

@@ -99,6 +99,26 @@ def _string_list(mapping: Mapping[str, Any], key: str, operation: str) -> list[s
     return list(value)
 
 
+def _optional_string(mapping: Mapping[str, Any], key: str, operation: str) -> str:
+    value = mapping.get(key)
+    if value in {None, ""}:
+        return ""
+    if not isinstance(value, str) or len(value) > 512:
+        raise CapacityError(
+            CapacityErrorKind.DRIFT,
+            operation,
+            f"capacity identity field is invalid: {key}",
+        )
+    return value
+
+
+def _optional_string_list(mapping: Mapping[str, Any], key: str, operation: str) -> list[str]:
+    value = mapping.get(key)
+    if value is None or value == []:
+        return []
+    return _string_list(mapping, key, operation)
+
+
 def _environment(
     mapping: Mapping[str, Any], key: str, required_keys: tuple[str, ...], operation: str
 ) -> dict[str, str]:
@@ -127,8 +147,8 @@ def build_runpod_fingerprint_payload(endpoint: Mapping[str, Any]) -> dict[str, A
 
     operation = "inspect"
     template = _mapping(endpoint, "template", operation)
-    network_volume_id = _string(endpoint, "networkVolumeId", operation)
-    network_volume_ids = _string_list(endpoint, "networkVolumeIds", operation)
+    network_volume_id = _optional_string(endpoint, "networkVolumeId", operation)
+    network_volume_ids = _optional_string_list(endpoint, "networkVolumeIds", operation)
     endpoint_fields: dict[str, Any] = {
         "id": _string(endpoint, "id", operation),
         "name": _string(endpoint, "name", operation),
@@ -147,7 +167,9 @@ def build_runpod_fingerprint_payload(endpoint: Mapping[str, Any]) -> dict[str, A
             "value": _integer(endpoint, "scalerValue", operation),
         },
     }
-    if network_volume_id not in network_volume_ids:
+    if (network_volume_id and network_volume_id not in network_volume_ids) or (
+        not network_volume_id and network_volume_ids
+    ):
         raise CapacityError(
             CapacityErrorKind.DRIFT,
             operation,

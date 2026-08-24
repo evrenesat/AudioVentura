@@ -53,6 +53,15 @@ def _safe_endpoint_id(value: str) -> str:
     return value
 
 
+def _is_allowed_result_host(hostname: str | None) -> bool:
+    """Accept reviewed Fal CDN hosts, including Fal's versioned media subdomains."""
+
+    if hostname is None:
+        return False
+    host = hostname.rstrip(".").lower()
+    return host in _CDN_HOSTS or host.endswith(".fal.media")
+
+
 class FalQueueTransport:
     """One authenticated queue client shared by endpoint adapters."""
 
@@ -468,7 +477,7 @@ class FalProvider:
                 ProviderErrorKind.INVALID_RESPONSE, "result", "Fal result audio URL is invalid"
             )
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname not in _CDN_HOSTS:
+        if parsed.scheme != "https" or not _is_allowed_result_host(parsed.hostname):
             raise ProviderError(
                 ProviderErrorKind.INVALID_RESPONSE, "result", "Fal result URL host is not allowed"
             )

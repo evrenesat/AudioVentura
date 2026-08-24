@@ -109,6 +109,9 @@ small local HTTP service for Salad's Job Queue Worker.
 The runtime loads one pinned ACE-Step source revision and one pinned model
 bundle before accepting work. It accepts worker schema 1 for old Runpod jobs
 and schema 2 for current jobs. New provider-neutral submissions use schema 2.
+Runpod supplies the exact aggregate Hugging Face revision through its
+datacenter-independent cached-model facility; no customer network volume is
+attached to the endpoint.
 
 For each request the worker:
 
@@ -187,6 +190,9 @@ maximum above one, and refuses immutable resource or deployment drift. The
 complete secret-free identity payloads and pinned v1 digests live in
 `capacity/fingerprint_fixtures.json`; the preflight command compares those
 digests with live provider metadata without mutating floors.
+Before provider submission, managed capacity must be ready. A warming worker
+causes a bounded retry before nonce creation, so provider TTL starts only after
+capacity is available.
 
 `controller_settings` stores the global keep-warm seconds after migration 9.
 `capacity_leases` stores last activity, the durable deadline, action fencing,

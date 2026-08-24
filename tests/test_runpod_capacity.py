@@ -118,7 +118,8 @@ def test_runpod_fingerprint_fixture_matches_provider_normalization() -> None:
         "idleTimeout": canonical["endpoint"]["idle_timeout_seconds"],
         "flashboot": canonical["endpoint"]["flash_boot"],
         "networkVolumeId": canonical["endpoint"]["network_volume_id"],
-        "networkVolumeIds": canonical["endpoint"]["network_volume_ids"],
+        # The v1 API normalizes a detached volume to an empty string plus null.
+        "networkVolumeIds": None,
         "gpuTypeIds": canonical["endpoint"]["gpu_type_ids"],
         "scalerType": canonical["endpoint"]["scaler"]["type"],
         "scalerValue": canonical["endpoint"]["scaler"]["value"],

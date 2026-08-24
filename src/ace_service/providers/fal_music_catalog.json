@@ -329,7 +329,7 @@
       "operation": "text_to_music",
       "media_kind": "music",
       "adapter": "lyria",
-      "schema_sha256": "9da51594e577cddd6d58a7a17557d5c7633777d7d655796555ceb04cf01741a5",
+      "schema_sha256": "4bbccf2992dd3316e514a3bc75c67bd2d019047b907dbfb1f088233aa4494b15",
       "fields": {
         "prompt": {
           "ui_name": "Prompt/style",
@@ -341,11 +341,11 @@
       "output": {
         "result_path": "audio.url",
         "native_formats": [
-          "wav"
+          "mp3"
         ],
         "max_bytes": 268435456,
         "content_types": [
-          "audio/wav"
+          "audio/mpeg"
         ]
       }
     },
@@ -356,7 +356,7 @@
       "operation": "text_to_music",
       "media_kind": "music",
       "adapter": "lyria",
-      "schema_sha256": "614b103e540afa671806c61fad8c88dac557fa25f42c787f267c79d80ade468a",
+      "schema_sha256": "b06d8418be9eef7f96a2a110522bf9c5b7cfb6d5c19e082f1aae1dff76aaf263",
       "fields": {
         "prompt": {
           "ui_name": "Prompt/style",
@@ -368,11 +368,11 @@
       "output": {
         "result_path": "audio.url",
         "native_formats": [
-          "wav"
+          "mp3"
         ],
         "max_bytes": 268435456,
         "content_types": [
-          "audio/wav"
+          "audio/mpeg"
         ]
       }
     },

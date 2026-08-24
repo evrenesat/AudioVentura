@@ -88,6 +88,80 @@ def test_fal_queue_submit_status_and_result_are_endpoint_scoped() -> None:
 
 
 @pytest.mark.parametrize(
+    "url",
+    (
+        "https://fal.media/audio.mp3",
+        "https://v3b.fal.media/audio.mp3",
+        "https://nested.v3b.fal.media/audio.mp3",
+    ),
+)
+def test_fal_result_accepts_reviewed_media_hosts_and_subdomains(url: str) -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/fal-ai/lyria3")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"request_id": "fal-host-policy"})
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "COMPLETED"})
+        return httpx.Response(200, json={"audio": {"url": url}})
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = FalProvider(descriptor, FalQueueTransport("test-key", http_client=client))
+        ref = await provider.submit(
+            _request(
+                generation=GenerationRequest(
+                    mode=InferenceMode.PROMPT_TO_AUDIO,
+                    prompt="host policy",
+                )
+            )
+        )
+        result = await provider.result(ref)
+        assert result.artifact is not None and result.artifact.url == url
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://evilfal.media/audio.mp3",
+        "https://fal.media.example.com/audio.mp3",
+        "https://v3b.fal.media.example.com/audio.mp3",
+    ),
+)
+def test_fal_result_rejects_suffix_confusion_hosts(url: str) -> None:
+    catalog = load_catalog()
+    descriptor = catalog.by_backend_id("fal/fal-ai/lyria3")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"request_id": "fal-host-policy"})
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "COMPLETED"})
+        return httpx.Response(200, json={"audio": {"url": url}})
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = FalProvider(descriptor, FalQueueTransport("test-key", http_client=client))
+        ref = await provider.submit(
+            _request(
+                generation=GenerationRequest(
+                    mode=InferenceMode.PROMPT_TO_AUDIO,
+                    prompt="host policy",
+                )
+            )
+        )
+        with pytest.raises(ProviderError, match="host is not allowed"):
+            await provider.result(ref)
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [("seed", "wrong"), ("duration", {"value": 30})],
 )

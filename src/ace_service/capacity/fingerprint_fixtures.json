@@ -12,16 +12,13 @@
         "execution_timeout_ms": 1200000,
         "idle_timeout_seconds": 30,
         "flash_boot": true,
-        "network_volume_id": "bgh5crlzt8",
-        "network_volume_ids": [
-          "bgh5crlzt8"
-        ],
+        "network_volume_id": "",
+        "network_volume_ids": [],
         "gpu_type_ids": [
           "NVIDIA GeForce RTX 5090",
-          "NVIDIA RTX PRO 6000 Blackwell Server Edition",
-          "NVIDIA B200",
+          "NVIDIA GeForce RTX 4090",
           "NVIDIA L4",
-          "NVIDIA RTX 4000 Ada Generation"
+          "NVIDIA RTX A6000"
         ],
         "scaler": {
           "type": "QUEUE_DELAY",
@@ -57,7 +54,7 @@
         }
       }
     },
-    "sha256": "11b5e5ad481e3a1ac5ccd4aaac6d030e744912313eb8c8a818c63268c396f937"
+    "sha256": "6b31d64a50c6b2e8c7ef4ff2192ead07b90b4ddebe70c81badd55a7c1a353b7d"
   },
   "salad": {
     "schema": "salad-capacity-v1",

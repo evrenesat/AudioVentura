@@ -373,7 +373,8 @@ def test_warm_session_begins_only_after_provider_reports_ready(settings) -> None
         clock=lambda: current[0],
     )
 
-    asyncio.run(controller.ensure_retained(next(iter(manager.backend_ids))))
+    with pytest.raises(CapacityError, match="still warming"):
+        asyncio.run(controller.ensure_retained(next(iter(manager.backend_ids))))
     with factory() as database_session:
         lease = database_session.get(CapacityLease, manager.key)
         assert lease is not None
@@ -393,4 +394,23 @@ def test_warm_session_begins_only_after_provider_reports_ready(settings) -> None
         assert lease.state == "idle"
         assert lease.warmed_at == current[0]
         assert lease.next_reminder_at == current[0] + timedelta(minutes=5)
+    engine.dispose()
+
+
+def test_zero_keep_warm_still_requires_ready_capacity_before_submission(settings) -> None:
+    from ace_service.db import create_database_engine, create_session_factory, initialize_database
+
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    manager = FakeManager()
+    controller = CapacityController(settings, factory, CapacityRegistry([manager]))
+    with factory() as database_session:
+        set_keep_warm_seconds(database_session, 0)
+        database_session.commit()
+
+    asyncio.run(controller.ensure_retained(next(iter(manager.backend_ids))))
+
+    assert manager.retain_calls == 1
+    assert manager.ready is True
     engine.dispose()

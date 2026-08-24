@@ -1,5 +1,20 @@
 # Development Log
 
+## 2026-08-24 (Runpod cached-model capacity recovery)
+
+- Detached the EU-RO-1 network volume while retaining the exact aggregate
+  Hugging Face cached-model revision, allowing Runpod to allocate workers in
+  other regions. The reviewed fallback set is RTX 5090, RTX 4090, L4, and RTX
+  A6000; every choice has at least 24 GB VRAM.
+- Made managed submission wait for an actually ready worker even when
+  keep-warm is disabled, so Runpod's provider job TTL does not begin during GPU,
+  image, or model initialization.
+- Accepted Fal's versioned `fal.media` CDN subdomains and corrected both Lyria
+  3 catalog entries to their documented MP3 output contract.
+- Verification: 83 focused capacity/provider/worker tests, Ruff, formatting,
+  and mypy pass. The full suite remains at its known expired private-quality
+  fixture baseline (96 failures; 569 passes).
+
 ## 2026-08-23 (capability-driven forms and Fal audit recovery)
 
 - Made generation controls capability-driven for built-in and Fal backends, so
