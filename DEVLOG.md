@@ -1,5 +1,19 @@
 # Development Log
 
+## 2026-08-26 (fal.ai ACE-Step and MiniMax Music 3)
+
+- Enabled the reviewed ACE-Step and MiniMax Music 3 Original contracts with
+  current duration, native WAV, seed, and schema-fingerprint metadata.
+- Added live fal.ai account rates and exact output-second totals or published
+  references that follow the selected backend, duration, and variation count
+  without reusing GPU-hour estimates.
+- Kept pricing informational and fail-open: unavailable or runtime-metered
+  prices never invent an account total and never gate generation.
+- Verification: focused fal/catalog/pricing/provider/web tests, Ruff,
+  formatting, mypy, compileall, and all Home Ingest checks pass. The full suite
+  remains at its known expired private-quality fixture baseline (96 failures;
+  572 passes).
+
 ## 2026-08-24 (Runpod cached-model capacity recovery)
 
 - Detached the EU-RO-1 network volume while retaining the exact aggregate

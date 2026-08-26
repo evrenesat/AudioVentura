@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 import ace_service.web as web_routes
 from ace_service.app import create_app
 from ace_service.config import ServiceSettings
+from ace_service.costs import FalPricingClient
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, SubmissionQuote
@@ -332,6 +333,102 @@ def test_fal_cassette_rejects_unsupported_original_fields(settings) -> None:
             assert session.query(Job).count() == 0
     finally:
         asyncio.run(fal_client.aclose())
+        engine.dispose()
+
+
+def test_fal_backend_pricing_tracks_selected_model_duration_and_variations(settings) -> None:
+    engine = create_database_engine(settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    catalog = load_catalog()
+    descriptors = [
+        catalog.by_backend_id("fal/fal-ai/ace-step"),
+        catalog.by_backend_id("fal/minimax/music-3"),
+    ]
+
+    async def health_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        endpoint_id = request.url.params["endpoint_id"]
+        return httpx.Response(200, json={"models": [{"endpoint_id": endpoint_id}]})
+
+    async def pricing_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models/pricing"
+        endpoint_id = request.url.params["endpoint_id"]
+        unit_price, unit = {
+            "fal-ai/ace-step": (0.0002, "seconds"),
+            "minimax/music-3": (0.00125, "compute seconds"),
+        }[endpoint_id]
+        return httpx.Response(
+            200,
+            json={
+                "prices": [
+                    {
+                        "endpoint_id": endpoint_id,
+                        "unit_price": unit_price,
+                        "unit": unit,
+                    }
+                ]
+            },
+        )
+
+    fal_client = httpx.AsyncClient(transport=httpx.MockTransport(health_handler))
+    pricing_http = httpx.AsyncClient(transport=httpx.MockTransport(pricing_handler))
+    transport = FalQueueTransport("test-fal-key", http_client=fal_client)
+    app = create_app(
+        settings,
+        session_factory=factory,
+        provider_registry=ProviderRegistry(
+            [FalProvider(descriptor, transport) for descriptor in descriptors]
+        ),
+        home_ingest_client=FakeHome(),
+        worker=FakeWorker(),
+    )
+    app.state.fal_pricing = FalPricingClient("test-fal-key", ttl_seconds=60, client=pricing_http)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/backend-pricing").status_code == 401
+
+            ace_form = client.get("/create?backend=fal/fal-ai/ace-step", auth=_auth(client))
+            assert ace_form.status_code == 200
+            assert "Fal account rate: ~$0.0002 per second" in ace_form.text
+            assert "Estimated request total: ~$0.0120" in ace_form.text
+
+            minimax_form = client.get("/create?backend=fal/minimax/music-3", auth=_auth(client))
+            assert minimax_form.status_code == 200
+            assert "Fal account rate: ~$0.00125 per compute second" in minimax_form.text
+            assert "Published output-price reference: up to ~$0.1200" in minimax_form.text
+            assert "account total depends on runtime usage" in minimax_form.text
+            assert 'data-pricing-url="/backend-pricing"' in minimax_form.text
+
+            ace_quote = client.get(
+                "/backend-pricing",
+                auth=_auth(client),
+                params={
+                    "backend": "fal/fal-ai/ace-step",
+                    "duration_mode": "custom",
+                    "duration_seconds": "90",
+                    "variation_count": "3",
+                },
+            ).json()
+            assert ace_quote["total"] == "0.0540"
+            assert ace_quote["duration_seconds"] == "90"
+            assert ace_quote["variation_count"] == 3
+
+            minimax_quote = client.get(
+                "/backend-pricing",
+                auth=_auth(client),
+                params={
+                    "backend": "fal/minimax/music-3",
+                    "duration_mode": "custom",
+                    "duration_seconds": "90",
+                    "variation_count": "3",
+                },
+            ).json()
+            assert minimax_quote["total"] is None
+            assert minimax_quote["reference_total"] == "0.5400"
+    finally:
+        asyncio.run(fal_client.aclose())
+        asyncio.run(pricing_http.aclose())
         engine.dispose()
 
 

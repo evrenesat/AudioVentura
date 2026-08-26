@@ -13,8 +13,7 @@ schema fingerprints, media-kind policy, and exclusions. Live discovery is
 read-only:
 
 ```text
-uv run python -m ace_service fal-catalog audit \
-  --catalog src/ace_service/providers/fal_music_catalog.json
+uv run python -m ace_service fal-catalog audit
 ```
 
 Run the audit with the deployment key before enabling a new endpoint. Resolve
@@ -38,6 +37,18 @@ Disabling an ID removes it from new-job selectors only. The controller unions
 the enabled list with backend IDs owned by nonterminal jobs, keeps those
 adapters available for exact-request recovery, and requires `FAL_KEY` while
 any retained Fal request is nonterminal.
+
+The reviewed Original backends enabled for this release are:
+
+```text
+fal/fal-ai/ace-step
+fal/minimax/music-3
+```
+
+ACE-Step accepts 5–240 generated seconds and returns native WAV. MiniMax Music
+3 accepts a 1–300 second upper bound, requires lyrics, and returns native WAV
+with actual duration and seed metadata. AudioVentura's general Original form
+still enforces its stricter 10-second minimum.
 
 Fal endpoint activity is cached per backend for a short interval. An endpoint
 reported inactive or unreachable is omitted from new-job selectors and is
@@ -84,6 +95,18 @@ time and stale/unavailable state. A total is shown only when the catalog
 declares a safe unit mapping; otherwise the UI says that total estimation is
 unsafe. Fal attempts record compute evidence as
 `provider_managed_pricing`; the existing GPU-hour formula is never reused.
+
+For the two reviewed Original backends, the catalog pins the currently
+published billing contracts as drift evidence: ACE-Step is USD 0.0002 per
+generated second and MiniMax Music 3 is USD 0.002 per generated second. The UI
+always shows the authenticated live account unit and rate. When that unit is an
+output second, it multiplies exact-decimal price by the selected duration (60
+seconds in Auto mode) and variation count. If the account is billed in a
+runtime-dependent unit such as compute-seconds, the UI instead shows the live
+account rate and a separately labeled upper-bound reference using the published
+output-second price; it does not invent an exact account total. Estimates update
+when backend, duration, or variations change, and generation is not blocked by
+price drift.
 
 If submission returns no request ID, treat the result as uncertain and do not
 resubmit. Keep `FAL_KEY` and the catalog available until all nonterminal Fal

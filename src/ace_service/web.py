@@ -11,7 +11,7 @@ import tempfile
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -358,24 +358,64 @@ async def _backend_pricing_context(
     pricing = choice["snapshot"].get("pricing")
     declared_unit = pricing.get("unit") if isinstance(pricing, Mapping) else None
     try:
-        units = int(form.get("variation_count", "1"))
+        variation_count = int(form.get("variation_count", "1"))
     except (TypeError, ValueError):
-        units = 1
-    units = units if units in {1, 2, 3, 4} else 1
-    price = await client.estimate(
-        choice["snapshot"].get("endpoint_id", selected.removeprefix("fal/")),
-        units=units,
-        declared_unit=declared_unit,
+        variation_count = 1
+    variation_count = variation_count if variation_count in {1, 2, 3, 4} else 1
+    quantity: Decimal | None = None
+    duration: Decimal | None = None
+    if declared_unit in {"request", "variation"}:
+        quantity = Decimal(variation_count)
+    elif declared_unit == "second":
+        duration_policy = choice["snapshot"].get("fields", {}).get("duration", {})
+        raw_duration = (
+            form.get("duration_seconds")
+            if form.get("duration_mode", "auto") == "custom"
+            else duration_policy.get("default")
+        )
+        try:
+            duration = Decimal(str(raw_duration))
+        except (ArithmeticError, TypeError, ValueError):
+            duration = None
+        if duration is not None and duration.is_finite() and duration > 0:
+            minimum = duration_policy.get("minimum")
+            maximum = duration_policy.get("maximum")
+            if (minimum is None or duration >= Decimal(str(minimum))) and (
+                maximum is None or duration <= Decimal(str(maximum))
+            ):
+                quantity = duration * variation_count
+    endpoint_id = choice["snapshot"].get("endpoint_id", selected.removeprefix("fal/"))
+    price = (
+        await client.estimate(
+            endpoint_id,
+            unit_quantity=quantity,
+            declared_unit=declared_unit,
+        )
+        if quantity is not None
+        else await client.get(endpoint_id)
     )
     if price is None:
         return {"backend_pricing": {"available": False}}
+    reference_total: str | None = None
+    if quantity is not None and isinstance(pricing, Mapping) and price.unit != declared_unit:
+        try:
+            reference_micro = (
+                Decimal(str(pricing.get("unit_price"))) * quantity * Decimal(1_000_000)
+            ).to_integral_value(rounding=ROUND_HALF_UP)
+            reference_total = f"{reference_micro / Decimal(1_000_000):.4f}"
+        except (ArithmeticError, TypeError, ValueError):
+            reference_total = None
     return {
         "backend_pricing": {
             "available": True,
             "unit_price": price.unit_price_usd,
             "unit": price.unit,
+            "unit_label": price.unit.replace("_", " "),
             "fetched_at": price.fetched_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "stale": price.stale,
+            "duration_seconds": format(duration, "f") if duration is not None else None,
+            "variation_count": variation_count,
+            "reference_total": reference_total,
             "total": (
                 f"{Decimal(price.total_micro_usd) / Decimal(1_000_000):.4f}"
                 if price.total_micro_usd is not None
@@ -423,6 +463,7 @@ def _backend_choices(
                     "ui_name": policy.ui_name,
                     "type": policy.type,
                     "required": policy.required,
+                    "default": policy.default,
                     "minimum": policy.minimum,
                     "maximum": policy.maximum,
                     "choices": list(policy.choices),
@@ -696,6 +737,7 @@ def register_web_routes(app: FastAPI) -> None:
                     "backend_selector_js": _route_path(
                         request, "static", path="backend_selector.js"
                     ),
+                    "backend_pricing": _route_path(request, "backend_pricing"),
                     "notifications_js": _route_path(request, "static", path="notifications.js"),
                     "notifications_config": _route_path(request, "notifications_config"),
                     "notifications_subscriptions": _route_path(
@@ -709,6 +751,28 @@ def register_web_routes(app: FastAPI) -> None:
         )
         attach_csrf_cookie(request, response, token)
         return response
+
+    @app.get(
+        "/backend-pricing",
+        dependencies=[Depends(authenticated)],
+        name="backend_pricing",
+    )
+    async def backend_pricing(request: Request) -> JSONResponse:
+        form = {
+            "backend": request.query_params.get("backend", ""),
+            "duration_mode": request.query_params.get("duration_mode", "auto"),
+            "duration_seconds": request.query_params.get("duration_seconds", ""),
+            "variation_count": request.query_params.get("variation_count", "1"),
+        }
+        context = await _backend_pricing_context(
+            app,
+            tuple(BackendOperation),
+            form,
+        )
+        pricing = context.get("backend_pricing")
+        return JSONResponse(
+            pricing if isinstance(pricing, Mapping) else {"available": False, "applicable": False}
+        )
 
     @app.get(
         "/notifications/config", dependencies=[Depends(authenticated)], name="notifications_config"

@@ -22,6 +22,17 @@ def test_reviewed_catalog_contains_original_and_cover_choices() -> None:
     assert all(item.schema_sha256 == item.schema_fingerprint() for item in catalog.entries)
     assert not any(item.endpoint_id == "fal-ai/minimax-music" for item in catalog.entries)
 
+    ace = catalog.by_backend_id("fal/fal-ai/ace-step")
+    minimax = catalog.by_backend_id("fal/minimax/music-3")
+    assert ace.pricing == {"unit_price": "0.0002", "unit": "second"}
+    assert ace.fields["duration"].default == 60
+    assert ace.fields["duration"].maximum == 240
+    assert minimax.pricing == {"unit_price": "0.002", "unit": "second"}
+    assert minimax.fields["duration"].default == 60
+    assert minimax.fields["duration"].maximum == 300
+    assert minimax.output.native_formats == ("wav",)
+    assert minimax.output.seed_path == "seed"
+
 
 def test_catalog_snapshot_fixture_matches_reviewed_hashes() -> None:
     root = Path(__file__).parent / "fixtures" / "fal_music_catalog_snapshot.json"
@@ -92,6 +103,40 @@ def test_audit_paginates_with_fal_expanded_page_limit() -> None:
 
     assert result["schema_changed"] == []
     assert len(requests) == 4
+
+
+def test_audit_compares_exact_live_prices_for_reviewed_endpoints() -> None:
+    catalog = load_catalog()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"models": []})
+        assert request.url.path == "/v1/models/pricing"
+        requested = set(request.url.params["endpoint_id"].split(","))
+        assert {"fal-ai/ace-step", "minimax/music-3"} <= requested
+        return httpx.Response(
+            200,
+            json={
+                "prices": [
+                    {
+                        "endpoint_id": "fal-ai/ace-step",
+                        "unit_price": 0.0002,
+                        "unit": "seconds",
+                    },
+                    {
+                        "endpoint_id": "minimax/music-3",
+                        "unit_price": 0.00125,
+                        "unit": "compute seconds",
+                    },
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, base_url="https://api.fal.ai/v1/") as client:
+        result = audit_catalog(catalog, client=client, include_pricing=True)
+    assert result["pricing_changed"] == ["minimax/music-3"]
+    assert result["pricing_unavailable"] is False
 
 
 def _openapi_fixture(descriptor) -> dict[str, object]:

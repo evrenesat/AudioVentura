@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "fal-music-2026-08-23",
+  "catalog_revision": "fal-music-2026-08-26",
   "entries": [
     {
       "backend_id": "fal/fal-ai/elevenlabs/music",
@@ -253,7 +253,11 @@
       "operation": "text_to_music",
       "media_kind": "music",
       "adapter": "minimax_music_3",
-      "schema_sha256": "7656f774650f8b6ec25b1d136692cb945ce334d28d86434167aff025d8d81141",
+      "schema_sha256": "5a330c269545ab10233ae039c7727ed5003b78b9977ac84191228916e240a5b9",
+      "pricing": {
+        "unit_price": "0.002",
+        "unit": "second"
+      },
       "fields": {
         "prompt": {
           "ui_name": "Prompt/style",
@@ -271,20 +275,27 @@
           "ui_name": "Duration upper bound",
           "fal_name": "duration",
           "type": "number",
+          "default": 60,
           "minimum": 1,
-          "maximum": 600,
+          "maximum": 300,
           "semantic_note": "The endpoint treats this as an upper bound, not an exact promise."
+        },
+        "seed": {
+          "ui_name": "Seed",
+          "fal_name": "seed",
+          "type": "integer"
         }
       },
       "output": {
         "result_path": "audio.url",
         "native_formats": [
-          "mp3"
+          "wav"
         ],
+        "seed_path": "seed",
         "duration_path": "duration",
         "max_bytes": 268435456,
         "content_types": [
-          "audio/mpeg"
+          "audio/wav"
         ]
       }
     },
@@ -383,7 +394,11 @@
       "operation": "text_to_music",
       "media_kind": "music",
       "adapter": "ace_step_text",
-      "schema_sha256": "d25621408ff3735b750562d4a439baf352dd799e8717d841003f426b1ca24e51",
+      "schema_sha256": "e1ec0ee61be84ada479a0884d988069d22414011c75cf3262655fb145d241b06",
+      "pricing": {
+        "unit_price": "0.0002",
+        "unit": "second"
+      },
       "fields": {
         "prompt": {
           "ui_name": "Prompt/style",
@@ -396,11 +411,18 @@
           "fal_name": "lyrics",
           "type": "string"
         },
+        "duration": {
+          "ui_name": "Duration",
+          "fal_name": "duration",
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 240
+        },
         "seed": {
           "ui_name": "Seed",
           "fal_name": "seed",
-          "type": "integer",
-          "minimum": 0
+          "type": "integer"
         }
       },
       "output": {

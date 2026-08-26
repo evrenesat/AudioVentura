@@ -1,5 +1,5 @@
 {
-  "catalog_revision": "fal-music-2026-08-23",
+  "catalog_revision": "fal-music-2026-08-26",
   "entries": {
     "fal-ai/elevenlabs/music": {
       "schema_sha256": "65e2fc155540263d4e12c2588e7202e6649d1ec77cb2ffa116f98982cbe62a60"
@@ -20,7 +20,7 @@
       "schema_sha256": "32cdca0b217df3bea11895dd926d2d909ba2878fbe1bb1d27417531646fbd714"
     },
     "minimax/music-3": {
-      "schema_sha256": "7656f774650f8b6ec25b1d136692cb945ce334d28d86434167aff025d8d81141"
+      "schema_sha256": "5a330c269545ab10233ae039c7727ed5003b78b9977ac84191228916e240a5b9"
     },
     "fal-ai/lyria2": {
       "schema_sha256": "cdf1a11edecabc64b5eab6800d6c1a9a339092c77aac1b43cf98864fde2f6f39"
@@ -32,7 +32,7 @@
       "schema_sha256": "b06d8418be9eef7f96a2a110522bf9c5b7cfb6d5c19e082f1aae1dff76aaf263"
     },
     "fal-ai/ace-step": {
-      "schema_sha256": "d25621408ff3735b750562d4a439baf352dd799e8717d841003f426b1ca24e51"
+      "schema_sha256": "e1ec0ee61be84ada479a0884d988069d22414011c75cf3262655fb145d241b06"
     },
     "fal-ai/ace-step/prompt-to-audio": {
       "schema_sha256": "00d3d574033638cb68a6b0e616135463b90440e8d9e9a8bea72b7571021ebfcb"
