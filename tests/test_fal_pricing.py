@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 import httpx
 
@@ -21,8 +22,8 @@ def test_fal_pricing_is_cached_exact_and_total_is_unit_gated() -> None:
                 "prices": [
                     {
                         "endpoint_id": "cassetteai/music-generator",
-                        "unit_price": "0.125",
-                        "unit": "variation",
+                        "unit_price": 0.002,
+                        "unit": "seconds",
                     }
                 ]
             },
@@ -32,12 +33,17 @@ def test_fal_pricing_is_cached_exact_and_total_is_unit_gated() -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         pricing = FalPricingClient("test-key", ttl_seconds=60, client=client)
         first = await pricing.estimate(
-            "cassetteai/music-generator", units=2, declared_unit="variation"
+            "cassetteai/music-generator",
+            unit_quantity=Decimal("123.5"),
+            declared_unit="second",
         )
         second = await pricing.estimate(
-            "cassetteai/music-generator", units=2, declared_unit="request"
+            "cassetteai/music-generator",
+            unit_quantity=Decimal("123.5"),
+            declared_unit="request",
         )
-        assert first is not None and first.total_micro_usd == 250_000
+        assert first is not None and first.total_micro_usd == 247_000
+        assert first.unit_price_usd == "0.002"
         assert second is not None and second.total_micro_usd is None
         assert calls == 1
         await client.aclose()

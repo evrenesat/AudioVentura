@@ -17,7 +17,7 @@
   </select>
   <p class="hint">Choose the provider and model that will generate this song. The fields below adapt to the selected backend.</p>
   {% if form.get('backend_note') %}<p class="hint">{{ form.get('backend_note') }}</p>{% endif %}
-  {% if backend_pricing %}<p class="hint">{% if backend_pricing.available %}Fal price: ~${{ backend_pricing.unit_price }} per {{ backend_pricing.unit }}; fetched {{ backend_pricing.fetched_at }}{% if backend_pricing.stale %} (stale){% endif %}.{% if backend_pricing.total %} Estimated request total: ~${{ backend_pricing.total }}.{% else %} Total cannot be estimated safely for this endpoint.{% endif %}{% else %}Price unavailable; generation is not blocked.{% endif %}</p>{% endif %}
+  <p class="hint" id="backend-pricing-note" data-pricing-url="{{ urls.backend_pricing }}"{% if not backend_pricing %} hidden{% endif %}>{% if backend_pricing %}{% if backend_pricing.available %}Fal account rate: ~${{ backend_pricing.unit_price }} per {{ backend_pricing.unit_label }}; fetched {{ backend_pricing.fetched_at }}{% if backend_pricing.stale %} (stale){% endif %}.{% if backend_pricing.total %} Estimated request total: ~${{ backend_pricing.total }}.{% elif backend_pricing.reference_total %} Published output-price reference: up to ~${{ backend_pricing.reference_total }}; account total depends on runtime usage.{% else %} Enter a supported duration to estimate this request.{% endif %}{% else %}Fal price unavailable; generation is not blocked.{% endif %}{% endif %}</p>
   <label for="description">Description <span class="required">required</span></label>
   <textarea id="description" name="description" required maxlength="511" rows="5">{{ form.get('description', '') }}</textarea>
   <p class="hint">The final caption is limited to 511 characters. Duration-like prose is not interpreted as a setting.</p>
@@ -42,7 +42,7 @@
     <div><label for="output_format">Output</label><select id="output_format" name="output_format">{% for value in ['mp3', 'flac', 'wav'] %}<option value="{{ value }}"{% if form.get('output_format', selected_output_format) == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select><p class="hint">MP3 is compact; FLAC and WAV preserve lossless audio when the backend supports them.</p></div>
   </div>
   {% if estimate %}
-  <div class="cost-estimate">
+  <div class="cost-estimate" id="gpu-cost-estimate"{% if selected_backend_is_fal %} hidden{% endif %}>
     <p class="hint"><strong>Approximate cost (informational only)</strong> — {{ estimate.rate_label }}: ~{{ estimate.per_variation_label }} per variation{% if estimate.used_seed %} ({{ estimate.seed_note }}){% endif %}.</p>
     {% if estimate.samples %}<p class="hint">Latest {{ estimate.sample_count }} completed {{ estimate.kind_label }}{% if estimate.average_label %}, average ~{{ estimate.average_label }}{% endif %}: {% for sample in estimate.samples %}~{{ sample.cost_label }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
     <p class="hint">This request (<span id="estimate-request-text">{{ estimate.variation_count }} variation{{ 's' if estimate.variation_count != 1 else '' }}: ~{{ estimate.variation_request_labels[estimate.variation_count] }}</span>). Estimates never affect generation.</p>

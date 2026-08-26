@@ -32,6 +32,11 @@ _ESTIMATE_DISPLAY_QUANTUM = Decimal("0.0001")  # 4-decimal USD presentation
 
 _DECIMAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+_FAL_PRICING_UNIT_ALIASES = {
+    "seconds": "second",
+    "compute seconds": "compute_second",
+    "compute_seconds": "compute_second",
+}
 
 # Server-owned alias map: worker-reported GPU identities (torch device
 # names) resolve to canonical catalog keys.  An unknown alias has no rate and
@@ -114,7 +119,7 @@ class FalPricingClient:
                 follow_redirects=False,
             )
             response.raise_for_status()
-            body = response.json()
+            body = json.loads(response.content, parse_float=Decimal)
             record = self._record(body, endpoint_id)
             if record is None:
                 raise ValueError("pricing endpoint was not returned")
@@ -122,6 +127,9 @@ class FalPricingClient:
             unit_text = record.get("unit", record.get("billing_unit", "request"))
             if not isinstance(unit_text, str) or not unit_text or len(unit_text) > 64:
                 raise ValueError("pricing unit is invalid")
+            unit_text = _FAL_PRICING_UNIT_ALIASES.get(
+                unit_text.strip().lower(), unit_text.strip().lower().replace(" ", "_")
+            )
             price_text, price_micro = parse_micro_usd_decimal(
                 raw_price, field_name="Fal unit price"
             )
@@ -145,20 +153,27 @@ class FalPricingClient:
         self,
         endpoint_id: str,
         *,
-        units: int,
+        unit_quantity: Decimal | int,
         declared_unit: str | None,
     ) -> FalPrice | None:
-        if isinstance(units, bool) or units <= 0:
-            raise ValueError("pricing units must be positive")
+        if isinstance(unit_quantity, bool):
+            raise ValueError("pricing unit quantity must be positive")
+        try:
+            quantity = Decimal(unit_quantity)
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("pricing unit quantity must be positive") from exc
+        if not quantity.is_finite() or quantity <= 0:
+            raise ValueError("pricing unit quantity must be positive")
         price = await self.get(endpoint_id)
         if price is None or declared_unit is None or price.unit != declared_unit:
             return price
-        if price.unit == "request":
-            total = price.unit_price_micro_usd * units
-        elif price.unit == "variation":
-            total = price.unit_price_micro_usd * units
-        else:
-            total = None
+        total = int(
+            (Decimal(price.unit_price_micro_usd) * quantity).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        )
+        if total > MAX_AMOUNT_MICRO_USD:
+            raise ValueError("pricing estimate exceeds the supported amount")
         return FalPrice(
             price.endpoint_id,
             price.unit_price_micro_usd,

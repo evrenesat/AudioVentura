@@ -87,6 +87,42 @@ def test_fal_queue_submit_status_and_result_are_endpoint_scoped() -> None:
     asyncio.run(scenario())
 
 
+def test_requested_fal_original_backends_map_current_duration_and_seed_contracts() -> None:
+    catalog = load_catalog()
+    generation = GenerationRequest(
+        mode=InferenceMode.PROMPT_TO_AUDIO,
+        prompt="warm acoustic pop",
+        lyrics="[verse]\nMorning light",
+        duration_seconds=90,
+        seed=42,
+        output_format="wav",
+    )
+
+    ace = build_fal_payload(
+        catalog.by_backend_id("fal/fal-ai/ace-step"),
+        _request(generation=generation),
+    )
+    assert ace == {
+        "sync_mode": False,
+        "tags": "warm acoustic pop",
+        "lyrics": "[verse]\nMorning light",
+        "duration": 90,
+        "seed": 42,
+    }
+
+    minimax = build_fal_payload(
+        catalog.by_backend_id("fal/minimax/music-3"),
+        _request(generation=generation),
+    )
+    assert minimax == {
+        "sync_mode": False,
+        "prompt": "warm acoustic pop",
+        "lyrics": "[verse]\nMorning light",
+        "duration": 90,
+        "seed": 42,
+    }
+
+
 @pytest.mark.parametrize(
     "url",
     (

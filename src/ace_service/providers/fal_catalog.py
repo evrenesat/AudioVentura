@@ -13,6 +13,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,12 @@ _OUTPUT_KEYS = {
     "duration_path",
     "max_bytes",
     "content_types",
+}
+_PRICING_KEYS = {"unit_price", "unit"}
+_PRICING_UNIT_ALIASES = {
+    "seconds": "second",
+    "compute seconds": "compute_second",
+    "compute_seconds": "compute_second",
 }
 
 
@@ -166,6 +173,29 @@ class OutputPolicy:
             max_bytes,
             tuple(content_types),
         )
+
+
+def _pricing_policy(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != _PRICING_KEYS:
+        raise ValueError("Fal catalog pricing policy is malformed")
+    unit = value.get("unit")
+    raw_price = value.get("unit_price")
+    if not isinstance(unit, str):
+        raise ValueError("Fal catalog pricing unit is invalid")
+    unit = _PRICING_UNIT_ALIASES.get(unit.strip().lower(), unit.strip().lower().replace(" ", "_"))
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", unit):
+        raise ValueError("Fal catalog pricing unit is invalid")
+    if isinstance(raw_price, bool) or not isinstance(raw_price, (str, int, Decimal)):
+        raise ValueError("Fal catalog unit price must be exact decimal text")
+    try:
+        price = Decimal(raw_price)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Fal catalog unit price is invalid") from exc
+    if not price.is_finite() or price <= 0:
+        raise ValueError("Fal catalog unit price is invalid")
+    return {"unit_price": format(price, "f"), "unit": unit}
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,7 +366,7 @@ def load_catalog(path: Path | str | None = None) -> ReviewedCatalog:
             str(raw_entry.get("catalog_revision", revision)),
             bool(raw_entry.get("available", True)),
             raw_entry.get("unavailable_reason"),
-            raw_entry.get("pricing") if isinstance(raw_entry.get("pricing"), dict) else None,
+            _pricing_policy(raw_entry.get("pricing")),
         )
         if not entry.label or not entry.adapter:
             raise ValueError("Fal catalog label and adapter are required")
@@ -408,18 +438,26 @@ def audit_catalog(
     pricing_unavailable = False
     if include_pricing:
         try:
-            response = http.get("models/pricing", headers=headers)
+            priced_endpoints = sorted(
+                endpoint_id for endpoint_id, entry in reviewed.items() if entry.pricing is not None
+            )
+            response = http.get(
+                "models/pricing",
+                params={"endpoint_id": ",".join(priced_endpoints)},
+                headers=headers,
+            )
             response.raise_for_status()
-            body = response.json()
+            body = json.loads(response.content, parse_float=Decimal)
             prices = body.get("prices", body.get("models", [])) if isinstance(body, dict) else body
             if not isinstance(prices, list):
                 raise ValueError("Fal pricing response is malformed")
             discovered_prices = {
-                item.get("endpoint_id", item.get("model_id")): {
-                    key: item.get(key)
-                    for key in ("unit_price", "price", "unit", "billing_unit")
-                    if key in item
-                }
+                item.get("endpoint_id", item.get("model_id")): _pricing_policy(
+                    {
+                        "unit_price": item.get("unit_price", item.get("price")),
+                        "unit": item.get("unit", item.get("billing_unit")),
+                    }
+                )
                 for item in prices
                 if isinstance(item, dict)
                 and isinstance(item.get("endpoint_id", item.get("model_id")), str)
@@ -606,6 +644,13 @@ def _openapi_path_schema(schema: Any, path: str, components: Mapping[str, Any]) 
 def _openapi_field_type(schema: Any) -> str:
     if not isinstance(schema, Mapping):
         return "string"
+    variants = schema.get("anyOf")
+    if isinstance(variants, list):
+        concrete = [
+            item for item in variants if isinstance(item, Mapping) and item.get("type") != "null"
+        ]
+        if len(concrete) == 1:
+            return _openapi_field_type(concrete[0])
     if schema.get("format") in {"uri", "url"}:
         return "url"
     value = schema.get("type")
