@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,7 +23,14 @@ from ace_service.costs import FalPricingClient
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, OutputFormat, SubmissionQuote
-from ace_service.providers.base import BackendOperation, ProviderName
+from ace_service.providers.base import (
+    BackendOperation,
+    InferenceMode,
+    ProviderCapabilities,
+    ProviderHealth,
+    ProviderName,
+    RequestFeature,
+)
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
 from ace_service.providers.mock import MockProvider
@@ -52,6 +60,193 @@ from runpod_worker.schemas import WorkerRequest
 
 RUNTIME_A = "sha256:" + "a" * 64
 RUNTIME_B = "sha256:" + "b" * 64
+
+ORIGINAL_BACKEND_INVENTORY = (
+    (
+        "fal.ai",
+        (
+            ("fal/fal-ai/ace-step", "fal.ai · ACE-Step", False),
+            ("fal/fal-ai/lyria3", "fal.ai · Lyria 3", False),
+            ("fal/fal-ai/lyria3/pro", "fal.ai · Lyria 3 Pro", False),
+            ("fal/minimax/music-3", "fal.ai · MiniMax Music 3", False),
+        ),
+    ),
+    ("mock", (("mock/midi-sequential", "Mock · Sequential MIDI → MP3", False),)),
+    ("runpod", (("runpod/ace-step-v15-xl-turbo", "Runpod · ACE-Step 1.5 XL Turbo", True),)),
+    ("salad", (("salad/ace-step-v15-xl-turbo", "Salad · ACE-Step 1.5 XL Turbo", False),)),
+)
+COVER_BACKEND_INVENTORY = (
+    (
+        "fal.ai",
+        (
+            (
+                "fal/fal-ai/stable-audio-3/medium/audio-to-audio",
+                "fal.ai · Stable Audio 3 Medium Audio to Audio",
+                False,
+            ),
+            (
+                "fal/fal-ai/stable-audio-3/medium/base/audio-to-audio",
+                "fal.ai · Stable Audio 3 Medium Base Audio to Audio",
+                False,
+            ),
+            (
+                "fal/fal-ai/stable-audio-3/small/music/audio-to-audio",
+                "fal.ai · Stable Audio 3 Small Music Audio to Audio",
+                False,
+            ),
+            (
+                "fal/fal-ai/stable-audio-3/small/music/base/audio-to-audio",
+                "fal.ai · Stable Audio 3 Small Music Base Audio to Audio",
+                False,
+            ),
+        ),
+    ),
+    ("mock", (("mock/midi-sequential", "Mock · Sequential MIDI → MP3", False),)),
+    ("runpod", (("runpod/ace-step-v15-xl-turbo", "Runpod · ACE-Step 1.5 XL Turbo", False),)),
+    ("salad", (("salad/ace-step-v15-xl-turbo", "Salad · ACE-Step 1.5 XL Turbo", True),)),
+)
+
+
+class _InventoryProvider:
+    def __init__(self, name: ProviderName, backend_id: str) -> None:
+        self.capabilities = ProviderCapabilities(
+            name=name,
+            modes=frozenset(InferenceMode),
+            request_features=frozenset(RequestFeature),
+            accepts_worker_schema=frozenset({2}),
+            supports_pending_cancel=True,
+            supports_running_cancel=False,
+            not_found_after_deadline_is_terminal=True,
+            backend_id=backend_id,
+        )
+
+
+class _InventoryFalProvider(FalProvider):
+    def __init__(self, descriptor) -> None:
+        super().__init__(descriptor, object())
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(True, "ready")
+
+
+def _selector_inventory(html: str) -> tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...]:
+    class Parser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.in_backend_select = False
+            self.group: str | None = None
+            self.option: tuple[str, bool, list[str]] | None = None
+            self.groups: list[tuple[str, tuple[tuple[str, str, bool], ...]]] = []
+            self.options: list[tuple[str, str, bool]] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            values = dict(attrs)
+            if tag == "select" and values.get("name") == "backend":
+                self.in_backend_select = True
+            elif self.in_backend_select and tag == "optgroup":
+                self.group = values.get("label")
+                self.options = []
+            elif self.in_backend_select and tag == "option":
+                value = values.get("value")
+                assert self.group is not None and value is not None
+                self.option = (value, "selected" in values, [])
+
+        def handle_data(self, data: str) -> None:
+            if self.option is not None:
+                self.option[2].append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if not self.in_backend_select:
+                return
+            if tag == "option":
+                assert self.option is not None
+                value, selected, text = self.option
+                self.options.append((value, "".join(text).strip(), selected))
+                self.option = None
+            elif tag == "optgroup":
+                assert self.group is not None
+                self.groups.append((self.group, tuple(self.options)))
+                self.group = None
+                self.options = []
+            elif tag == "select":
+                self.in_backend_select = False
+
+    parser = Parser()
+    parser.feed(html)
+    parser.close()
+    return tuple(parser.groups)
+
+
+def _assert_selector_inventory(
+    actual: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...],
+    expected: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...],
+) -> None:
+    actual_ids = [value for _, options in actual for value, _, _ in options]
+    assert len(actual_ids) == len(set(actual_ids))
+    assert actual == expected
+
+
+def _inventory_registry() -> ProviderRegistry:
+    catalog = load_catalog()
+    real_ids = [
+        "runpod/ace-step-v15-xl-turbo",
+        "salad/ace-step-v15-xl-turbo",
+        "fal/fal-ai/lyria3",
+        "fal/fal-ai/lyria3/pro",
+        "fal/fal-ai/ace-step",
+        "fal/minimax/music-3",
+        "fal/fal-ai/stable-audio-3/medium/audio-to-audio",
+        "fal/fal-ai/stable-audio-3/medium/base/audio-to-audio",
+        "fal/fal-ai/stable-audio-3/small/music/audio-to-audio",
+        "fal/fal-ai/stable-audio-3/small/music/base/audio-to-audio",
+    ]
+    providers: list[Any] = [
+        _InventoryProvider(ProviderName.RUNPOD, real_ids[0]),
+        _InventoryProvider(ProviderName.SALAD, real_ids[1]),
+        _InventoryProvider(ProviderName.MOCK, "mock/midi-sequential"),
+    ]
+    providers.extend(
+        _InventoryFalProvider(catalog.by_backend_id(backend_id)) for backend_id in real_ids[2:]
+    )
+    return ProviderRegistry(
+        providers,
+        defaults={
+            BackendOperation.TEXT_TO_MUSIC: "runpod/ace-step-v15-xl-turbo",
+            BackendOperation.AUDIO_TRANSFORM: "salad/ace-step-v15-xl-turbo",
+        },
+        selectable_backends=[*real_ids, "mock/midi-sequential"],
+    )
+
+
+def test_rendered_backend_selector_inventories_are_exact(web_app) -> None:
+    app, _, _ = web_app
+    app.state.provider_registry = _inventory_registry()
+    with TestClient(app) as client:
+        original_response = client.get("/create", auth=_auth(client))
+        cover_response = client.get("/cover", auth=_auth(client))
+    assert original_response.status_code == 200
+    assert cover_response.status_code == 200
+    _assert_selector_inventory(
+        _selector_inventory(original_response.text), ORIGINAL_BACKEND_INVENTORY
+    )
+    _assert_selector_inventory(_selector_inventory(cover_response.text), COVER_BACKEND_INVENTORY)
+
+
+def test_rendered_backend_selector_negative_cases_cannot_pass(web_app) -> None:
+    app, _, _ = web_app
+    app.state.provider_registry = _inventory_registry()
+    with TestClient(app) as client:
+        original_response = client.get("/create", auth=_auth(client))
+        cover_response = client.get("/cover", auth=_auth(client))
+    original = _selector_inventory(original_response.text)
+    cover = _selector_inventory(cover_response.text)
+    missing_runpod = tuple(group for group in original if group[0] != "runpod")
+    with pytest.raises(AssertionError):
+        _assert_selector_inventory(missing_runpod, ORIGINAL_BACKEND_INVENTORY)
+    with pytest.raises(AssertionError):
+        _assert_selector_inventory(original, COVER_BACKEND_INVENTORY)
+    with pytest.raises(AssertionError):
+        _assert_selector_inventory(cover, ORIGINAL_BACKEND_INVENTORY)
 
 
 def test_builtin_backend_choices_expose_only_relevant_form_fields(web_app) -> None:

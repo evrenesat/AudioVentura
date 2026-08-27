@@ -1,5 +1,12 @@
 # Development Log
 
+## 2026-08-27 (beta provider parity regression)
+
+- Added exact rendered Original/Cover selector inventory coverage for the ten
+  deployment-owned real backends plus the beta-only sequential MIDI mock. The
+  tests assert optgroup order, labels, uniqueness, and the RunPod/Salad
+  production-aligned defaults without submitting a generation.
+
 ## 2026-08-27 (sequential MIDI mock integration backend)
 
 - Added the opt-in `mock/midi-sequential` backend and standalone
