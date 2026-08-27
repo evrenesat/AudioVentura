@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import math
 import os
 import tempfile
@@ -43,6 +44,12 @@ from ace_service.cover import (
     remove_cover_source,
     stage_cover_continuation_source,
 )
+from ace_service.media_library import (
+    MediaLibraryError,
+    MediaLibraryService,
+    media_file_content_disposition,
+    verify_media_file,
+)
 from ace_service.models import (
     KEEP_WARM_LABELS,
     KEEP_WARM_SECONDS,
@@ -51,9 +58,14 @@ from ace_service.models import (
     Job,
     JobStatus,
     JobType,
+    MediaDeletionState,
+    MediaFileState,
+    MediaItem,
     NotificationDelivery,
     Output,
     OutputFormat,
+    Playlist,
+    PlaylistKind,
     Project,
     SubmissionQuote,
     VariationAttempt,
@@ -68,23 +80,42 @@ from ace_service.providers.base import BackendId, BackendOperation, ProviderHeal
 from ace_service.providers.fal import FalProvider
 from ace_service.repository import (
     PROVIDER_PROGRESS_MESSAGE_MAX_LENGTH,
+    MediaLibraryQuery,
+    PlaylistConflictError,
+    add_playlist_entry,
     cancel_cover_staging,
     confirm_cover_job,
     create_cover_job,
+    create_custom_playlist,
     create_original_job,
+    create_project_deletion_audit,
     create_submission_quote,
+    delete_playlist,
     finalize_cover_job_duration,
     get_job,
     get_keep_warm_seconds,
     get_latest_gpu_rates,
     get_matching_runtime_calibration,
+    get_media_file,
     get_output,
+    get_playlist,
     get_project,
     job_backend,
+    list_media_library,
+    list_media_queue,
+    list_playlist_entries,
+    list_playlists,
     list_project_jobs,
     list_projects,
+    project_is_deletable,
+    query_media_library,
     recent_completed_attempt_execution_ms,
+    remove_playlist_entry,
+    rename_media_item,
+    rename_playlist,
     rename_project,
+    reorder_playlist_entries,
+    request_job_cancellation,
     resolve_continuation_source,
     resolve_cover_continuation_output,
     set_keep_warm_seconds,
@@ -171,6 +202,7 @@ _STATUS_LABELS = {
     JobStatus.GENERATING: "Generating",
     JobStatus.COMPLETED: "Completed",
     JobStatus.FAILED: "Failed",
+    JobStatus.CANCELLED: "Cancelled",
 }
 _PHASE_LABELS = {
     "cloud_wait": "Waiting for the cloud provider",
@@ -517,6 +549,13 @@ def _backend_choices(
     return sorted(choices, key=lambda item: (item["provider"], item["label"], item["backend_id"]))
 
 
+def _preferred_output_format(formats: Any) -> str:
+    values = [str(value).lower() for value in formats]
+    if "mp3" in values:
+        return "mp3"
+    return sorted(values)[0] if values else "mp3"
+
+
 async def _refresh_fal_health(app: FastAPI, *, force: bool = False) -> None:
     """Refresh endpoint-scoped Fal health into the selection cache."""
 
@@ -577,7 +616,7 @@ def _backend_form_context(
         "selected_backend_is_fal": bool(
             selected_choice is not None and selected_choice["provider"] == "fal.ai"
         ),
-        "selected_output_format": native_formats[0] if native_formats else "mp3",
+        "selected_output_format": _preferred_output_format(native_formats),
     }
 
 
@@ -603,7 +642,7 @@ def _select_backend(
         raise ValueError("selected backend is not configured") from exc
     allowed_advanced = set(choice["fields"])
     if isinstance(fields, dict) and not fields.get("output_format"):
-        fields["output_format"] = choice["native_formats"][0]
+        fields["output_format"] = _preferred_output_format(choice["native_formats"])
     output_format = fields.get("output_format")
     if output_format and output_format not in choice["native_formats"]:
         raise ValueError("output format is not supported by the selected backend")
@@ -727,6 +766,8 @@ def register_web_routes(app: FastAPI) -> None:
                     "dashboard": _route_path(request, "dashboard"),
                     "create": _route_path(request, "create_form"),
                     "cover": _route_path(request, "cover_form"),
+                    "library": _route_path(request, "library"),
+                    "playlists": _route_path(request, "playlists"),
                     "projects": _route_path(request, "projects"),
                     "jobs": _route_path(request, "jobs"),
                     "app_css": _route_path(request, "static", path="app.css"),
@@ -745,6 +786,9 @@ def register_web_routes(app: FastAPI) -> None:
                     ),
                     "notifications_worker": _route_path(request, "notification_worker"),
                     "keep_warm": _route_path(request, "set_keep_warm"),
+                    "player_js": _route_path(request, "static", path="player.js"),
+                    "app_shell_js": _route_path(request, "static", path="app_shell.js"),
+                    "media_library_js": _route_path(request, "static", path="media_library.js"),
                 },
             },
             status_code=response_status,
@@ -1244,6 +1288,346 @@ def register_web_routes(app: FastAPI) -> None:
             project_views = [_project_view(request, project) for project in list_projects(session)]
         return render(request, "projects.html", {"projects": project_views})
 
+    @app.get("/library", dependencies=[Depends(authenticated)], name="library")
+    async def library(request: Request) -> Response:
+        raw_page = request.query_params.get("page", "1")
+        try:
+            page_number = int(raw_page)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="library page is invalid") from exc
+        query = request.query_params.get("q", "")
+        project_id = request.query_params.get("project") or None
+        sort = request.query_params.get("sort", "recent")
+        try:
+            with app.state.session_factory() as session:
+                if project_id is not None and get_project(session, project_id) is None:
+                    raise HTTPException(status_code=404, detail="project not found")
+                result = query_media_library(
+                    session,
+                    MediaLibraryQuery(q=query, project_id=project_id, sort=sort, page=page_number),
+                )
+                project_views = [
+                    _project_view(request, project) for project in list_projects(session)
+                ]
+                media_views = [_media_item_view(request, item) for item in result.items]
+                playlist_views = [
+                    _playlist_view(request, playlist, include_entries=False)
+                    for playlist in list_playlists(session)
+                ]
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return render(
+            request,
+            "library.html",
+            {
+                "media_items": media_views,
+                "library_query": result.query,
+                "library_has_next": result.has_next,
+                "library_projects": project_views,
+                "library_playlists": playlist_views,
+                "library_page": result.page,
+            },
+        )
+
+    @app.get("/playlists", dependencies=[Depends(authenticated)], name="playlists")
+    async def playlists(request: Request) -> Response:
+        with app.state.session_factory() as session:
+            views = [
+                _playlist_view(request, playlist, include_entries=False)
+                for playlist in list_playlists(session)
+            ]
+        return render(request, "playlists.html", {"playlists": views})
+
+    @app.post("/playlists", dependencies=[Depends(authenticated)], name="create_playlist")
+    async def create_playlist_route(request: Request) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        try:
+            with app.state.session_factory() as session:
+                playlist = create_custom_playlist(session, fields.get("title", ""))
+                session.commit()
+                playlist_id = playlist.id
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return RedirectResponse(
+            _route_path(request, "playlist_detail", playlist_id=playlist_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.get(
+        "/playlists/{playlist_id}", dependencies=[Depends(authenticated)], name="playlist_detail"
+    )
+    async def playlist_detail(request: Request, playlist_id: str) -> Response:
+        with app.state.session_factory() as session:
+            playlist = get_playlist(session, playlist_id)
+            if playlist is None:
+                raise HTTPException(status_code=404, detail="playlist not found")
+            view = _playlist_view(request, playlist, include_entries=True)
+            available = [
+                _media_item_view(request, item) for item in list_media_library(session, page=1)
+            ]
+        return render(
+            request,
+            "playlist_detail.html",
+            {"playlist": view, "available_media_items": available[:50]},
+        )
+
+    @app.post(
+        "/playlists/{playlist_id}/rename",
+        dependencies=[Depends(authenticated)],
+        name="rename_playlist",
+    )
+    async def rename_playlist_route(request: Request, playlist_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        try:
+            with app.state.session_factory() as session:
+                rename_playlist(session, playlist_id, fields.get("title", ""))
+                session.commit()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="playlist not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return RedirectResponse(
+            _route_path(request, "playlist_detail", playlist_id=playlist_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.post(
+        "/playlists/{playlist_id}/delete",
+        dependencies=[Depends(authenticated)],
+        name="delete_playlist",
+    )
+    async def delete_playlist_route(request: Request, playlist_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        try:
+            with app.state.session_factory() as session:
+                delete_playlist(session, playlist_id)
+                session.commit()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="playlist not found") from exc
+        return RedirectResponse(
+            _route_path(request, "playlists"), status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    @app.post(
+        "/playlists/{playlist_id}/entries",
+        dependencies=[Depends(authenticated)],
+        name="add_playlist_entry",
+    )
+    async def add_playlist_entry_route(request: Request, playlist_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        media_item_id = fields.get("media_item_id", "").strip()
+        if not media_item_id:
+            raise HTTPException(status_code=422, detail="media item is required")
+        try:
+            with app.state.session_factory() as session:
+                add_playlist_entry(session, playlist_id, media_item_id)
+                session.commit()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="playlist or media item not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(
+            _route_path(request, "playlist_detail", playlist_id=playlist_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.post(
+        "/playlists/{playlist_id}/entries/{entry_id}/remove",
+        dependencies=[Depends(authenticated)],
+        name="remove_playlist_entry",
+    )
+    async def remove_playlist_entry_route(
+        request: Request, playlist_id: str, entry_id: int
+    ) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        try:
+            with app.state.session_factory() as session:
+                remove_playlist_entry(session, playlist_id, entry_id)
+                session.commit()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="playlist entry not found") from exc
+        return RedirectResponse(
+            _route_path(request, "playlist_detail", playlist_id=playlist_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.post(
+        "/playlists/{playlist_id}/entries/reorder",
+        dependencies=[Depends(authenticated)],
+        name="reorder_playlist_entries",
+    )
+    async def reorder_playlist_entries_route(request: Request, playlist_id: str) -> JSONResponse:
+        raw_body = await request.body()
+        if len(raw_body) > 256 * 1024:
+            raise HTTPException(status_code=413, detail="playlist reorder body is too large")
+        try:
+            body = json.loads(raw_body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail="playlist reorder body is invalid") from exc
+        if not isinstance(body, dict) or set(body) != {"csrf_token", "entry_ids"}:
+            raise HTTPException(status_code=422, detail="playlist reorder body is invalid")
+        require_csrf(request, {"csrf_token": str(body.get("csrf_token", ""))})
+        entry_ids = body.get("entry_ids")
+        if not isinstance(entry_ids, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) for value in entry_ids
+        ):
+            raise HTTPException(status_code=422, detail="playlist entry IDs are invalid")
+        try:
+            with app.state.session_factory() as session:
+                entries = reorder_playlist_entries(session, playlist_id, entry_ids)
+                session.commit()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="playlist not found") from exc
+        except (PlaylistConflictError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return JSONResponse(
+            {"playlist_id": playlist_id, "entry_ids": [entry.id for entry in entries]},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get(
+        "/player/queue/playlist/{playlist_id}",
+        dependencies=[Depends(authenticated)],
+        name="player_playlist_queue",
+    )
+    async def player_playlist_queue(request: Request, playlist_id: str) -> JSONResponse:
+        with app.state.session_factory() as session:
+            playlist = get_playlist(session, playlist_id)
+            if playlist is None:
+                raise HTTPException(status_code=404, detail="playlist not found")
+            items = [
+                _safe_queue_media_view(request, entry.media_item)
+                for entry in list_playlist_entries(session, playlist_id)
+                if entry.media_item.deletion_state is MediaDeletionState.ACTIVE
+            ]
+        return JSONResponse(
+            {"playlist_id": playlist_id, "items": items},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get(
+        "/player/queue/library",
+        dependencies=[Depends(authenticated)],
+        name="player_library_queue",
+    )
+    async def player_library_queue(request: Request) -> JSONResponse:
+        with app.state.session_factory() as session:
+            try:
+                items = list_media_queue(
+                    session,
+                    q=request.query_params.get("q", ""),
+                    project_id=request.query_params.get("project") or None,
+                    sort=request.query_params.get("sort", "recent"),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            payload = [_safe_queue_media_view(request, item) for item in items]
+        return JSONResponse({"items": payload}, headers={"Cache-Control": "no-store"})
+
+    @app.post(
+        "/media/{media_item_id}/rename",
+        dependencies=[Depends(authenticated)],
+        name="rename_media",
+    )
+    async def rename_media_route(request: Request, media_item_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        try:
+            with app.state.session_factory() as session:
+                rename_media_item(session, media_item_id, fields.get("title", ""))
+                session.commit()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="media item not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(
+            _route_path(request, "library"), status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    @app.post(
+        "/media/{media_item_id}/delete",
+        dependencies=[Depends(authenticated)],
+        name="delete_media",
+    )
+    async def delete_media_route(request: Request, media_item_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        service = MediaLibraryService(app.state.settings, app.state.session_factory)
+        try:
+            service.request_item_deletion(media_item_id)
+            service.reconcile_item_deletion(media_item_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="media item not found") from exc
+        except (MediaLibraryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="audio deletion is pending and will be retried safely",
+            ) from exc
+        return RedirectResponse(
+            _route_path(request, "library"), status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    @app.post(
+        "/jobs/{job_id}/cancel",
+        dependencies=[Depends(authenticated)],
+        name="cancel_job",
+    )
+    async def cancel_job_route(request: Request, job_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        with app.state.session_factory() as session:
+            job = get_job(session, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="job not found")
+            if not _job_cancellation_available(app, job):
+                raise HTTPException(status_code=409, detail="cancellation is not available")
+            try:
+                request_job_cancellation(session, job.id)
+                session.commit()
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _enqueue(app, job_id)
+        return RedirectResponse(
+            _route_path(request, "job_detail", job_id=job_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.post(
+        "/projects/{project_id}/delete",
+        dependencies=[Depends(authenticated)],
+        name="delete_project",
+    )
+    async def delete_project_route(request: Request, project_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        with app.state.session_factory() as session:
+            project = get_project(session, project_id)
+            if project is None:
+                raise HTTPException(status_code=404, detail="project not found")
+            if not project_is_deletable(session, project.id):
+                raise HTTPException(status_code=409, detail="project has active jobs")
+            if fields.get("confirm_title", "") != project.title:
+                raise HTTPException(status_code=422, detail="type the current project title")
+            create_project_deletion_audit(session, project.id)
+            session.commit()
+        service = MediaLibraryService(app.state.settings, app.state.session_factory)
+        try:
+            service.reconcile_project_deletion(project_id)
+        except (MediaLibraryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="project audio deletion is pending; retry after cleanup converges",
+            ) from exc
+        _remove_empty_project_dirs(app.state.settings, project_id)
+        return RedirectResponse(
+            _route_path(request, "projects"), status_code=status.HTTP_303_SEE_OTHER
+        )
+
     @app.get(
         "/projects/{project_id}",
         dependencies=[Depends(authenticated)],
@@ -1404,6 +1788,46 @@ def register_web_routes(app: FastAPI) -> None:
             if job is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
             return JSONResponse(_job_view(request, job), headers={"Cache-Control": "no-store"})
+
+    @app.get(
+        "/media/library/{media_file_id}",
+        dependencies=[Depends(authenticated)],
+        name="library_media",
+    )
+    async def library_media(media_file_id: int) -> FileResponse:
+        with app.state.session_factory() as session:
+            media_file = get_media_file(session, media_file_id)
+            if media_file is None:
+                raise HTTPException(status_code=404, detail="media file not found")
+            try:
+                path = verify_media_file(app.state.settings, media_file)
+            except MediaLibraryError as exc:
+                raise HTTPException(status_code=404, detail="media file not available") from exc
+            disposition = media_file_content_disposition(media_file, attachment=False)
+            media_type = media_file.mime_type
+        return FileResponse(
+            path, media_type=media_type, headers={"Content-Disposition": disposition}
+        )
+
+    @app.get(
+        "/files/library/{media_file_id}/download",
+        dependencies=[Depends(authenticated)],
+        name="library_download",
+    )
+    async def library_download(media_file_id: int) -> FileResponse:
+        with app.state.session_factory() as session:
+            media_file = get_media_file(session, media_file_id)
+            if media_file is None:
+                raise HTTPException(status_code=404, detail="media file not found")
+            try:
+                path = verify_media_file(app.state.settings, media_file)
+            except MediaLibraryError as exc:
+                raise HTTPException(status_code=404, detail="media file not available") from exc
+            disposition = media_file_content_disposition(media_file, attachment=True)
+            media_type = media_file.mime_type
+        return FileResponse(
+            path, media_type=media_type, headers={"Content-Disposition": disposition}
+        )
 
     @app.get("/media/{output_id}", dependencies=[Depends(authenticated)], name="media")
     async def media(output_id: int) -> FileResponse:
@@ -1838,6 +2262,10 @@ def _route_path(request: Request, name: str, **path_params: Any) -> str:
 
 
 def _project_view(request: Request, project: Project) -> dict[str, Any]:
+    deletable = all(
+        job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        for job in project.jobs
+    )
     return {
         "project_id": project.id,
         "title": project.title,
@@ -1846,10 +2274,13 @@ def _project_view(request: Request, project: Project) -> dict[str, Any]:
             "Cover project" if project.job_type is JobType.COVER else "Original project"
         ),
         "job_count": len(project.jobs),
+        "media_count": len(project.media_items),
+        "deletable": deletable,
         "created_at": _iso(project.created_at),
         "updated_at": _iso(project.updated_at),
         "detail_url": _route_path(request, "project_detail", project_id=project.id),
         "rename_url": _route_path(request, "rename_project", project_id=project.id),
+        "delete_url": _route_path(request, "delete_project", project_id=project.id),
     }
 
 
@@ -1906,7 +2337,7 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
     provider_message: str | None = None
     provider_progress: float | None = None
     detail_scope: str | None = None
-    if job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+    if job.status not in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
         active_attempt = next(
             (item for item in attempts if item.variation_index == (job.current_variation or 1)),
             None,
@@ -1995,8 +2426,12 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         "variation_count": job.variation_count,
         "current_variation": job.current_variation,
         "completed_variations": completed_variations,
-        "error": job.user_facing_error if job.status is JobStatus.FAILED else None,
-        "error_code": job.error_code if job.status is JobStatus.FAILED else None,
+        "error": (
+            job.user_facing_error if job.status in {JobStatus.FAILED, JobStatus.CANCELLED} else None
+        ),
+        "error_code": (
+            job.error_code if job.status in {JobStatus.FAILED, JobStatus.CANCELLED} else None
+        ),
         "created_at": _iso(job.created_at),
         "started_at": _iso(job.started_at),
         "completed_at": _iso(job.completed_at),
@@ -2008,6 +2443,11 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         "provider_message": provider_message,
         "provider_progress": provider_progress,
         "detail_scope": detail_scope,
+        "cancel_requested_at": _iso(job.cancel_requested_at),
+        "cancel_completed_at": _iso(job.cancel_completed_at),
+        "cancel_outcome": job.cancel_outcome,
+        "cancel_available": _job_cancellation_available(request.app, job),
+        "cancel_job_url": _route_path(request, "cancel_job", job_id=job.id),
         "detail_url": _route_path(request, "job_detail", job_id=job.id),
         "status_url": _route_path(request, "job_status", job_id=job.id),
         "confirm_url": _route_path(request, "confirm_cover", job_id=job.id),
@@ -2054,6 +2494,45 @@ def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
 
 
 def _output_view(request: Request, output: Output) -> dict[str, Any]:
+    media_item = output.media_item
+    if media_item is not None:
+        playback_file = next(
+            (
+                media_file
+                for media_file in media_item.files
+                if media_file.format is OutputFormat.MP3
+                and media_file.is_playback == 1
+                and media_file.is_primary_download == 1
+                and media_file.state is MediaFileState.ACTIVE
+            ),
+            None,
+        )
+        active = (
+            media_item.deletion_state is MediaDeletionState.ACTIVE and playback_file is not None
+        )
+        return {
+            "id": output.id,
+            "variation_index": output.variation_index,
+            "result_index": output.result_index,
+            "mime_type": output.mime_type,
+            "byte_size": output.byte_size,
+            "size_label": _size_label(output.byte_size),
+            "media_url": (
+                _route_path(request, "library_media", media_file_id=playback_file.id)
+                if active and playback_file is not None
+                else None
+            ),
+            "download_url": (
+                _route_path(request, "library_download", media_file_id=playback_file.id)
+                if active and playback_file is not None
+                else None
+            ),
+            "created_at": _iso(output.created_at),
+            "title": media_item.title,
+            "media_item_id": media_item.id,
+            "deleted": not active,
+            "legacy": False,
+        }
     return {
         "id": output.id,
         "variation_index": output.variation_index,
@@ -2064,7 +2543,162 @@ def _output_view(request: Request, output: Output) -> dict[str, Any]:
         "media_url": _route_path(request, "media", output_id=output.id),
         "download_url": _route_path(request, "download", output_id=output.id),
         "created_at": _iso(output.created_at),
+        "title": None,
+        "media_item_id": None,
+        "deleted": False,
+        "legacy": True,
     }
+
+
+def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
+    playback_file = next(
+        (
+            media_file
+            for media_file in item.files
+            if media_file.format is OutputFormat.MP3
+            and media_file.is_playback == 1
+            and media_file.is_primary_download == 1
+            and media_file.state is MediaFileState.ACTIVE
+        ),
+        None,
+    )
+    active = item.deletion_state is MediaDeletionState.ACTIVE and playback_file is not None
+    project = item.project
+    return {
+        "id": item.id,
+        "title": item.title if active else "Deleted audio",
+        "original_title": item.title,
+        "project_id": item.project_id,
+        "project_title": project.title if project is not None else "Deleted project",
+        "project_url": (
+            _route_path(request, "project_detail", project_id=item.project_id)
+            if project is not None
+            else None
+        ),
+        "duration_seconds": item.duration_seconds,
+        "size_label": _size_label(playback_file.byte_size) if playback_file is not None else None,
+        "created_at": _iso(item.created_at),
+        "updated_at": _iso(item.updated_at),
+        "deletion_state": item.deletion_state.value,
+        "deleted": not active,
+        "file_available": active,
+        "media_file_id": playback_file.id if active and playback_file is not None else None,
+        "media_url": (
+            _route_path(request, "library_media", media_file_id=playback_file.id)
+            if active and playback_file is not None
+            else None
+        ),
+        "download_url": (
+            _route_path(request, "library_download", media_file_id=playback_file.id)
+            if active and playback_file is not None
+            else None
+        ),
+        "rename_url": _route_path(request, "rename_media", media_item_id=item.id)
+        if active
+        else None,
+        "delete_url": _route_path(request, "delete_media", media_item_id=item.id)
+        if active
+        else None,
+    }
+
+
+def _playlist_view(
+    request: Request, playlist: Playlist, *, include_entries: bool
+) -> dict[str, Any]:
+    entries = sorted(playlist.entries, key=lambda entry: (entry.position, entry.id))
+    entry_views = []
+    if include_entries:
+        entry_views = [
+            {
+                "entry_id": entry.id,
+                "position": entry.position,
+                "media": _media_item_view(request, entry.media_item),
+                "remove_url": _route_path(
+                    request,
+                    "remove_playlist_entry",
+                    playlist_id=playlist.id,
+                    entry_id=entry.id,
+                ),
+            }
+            for entry in entries
+        ]
+    return {
+        "id": playlist.id,
+        "title": playlist.title,
+        "kind": playlist.kind.value,
+        "is_project": playlist.kind is PlaylistKind.PROJECT,
+        "editable": playlist.kind is PlaylistKind.CUSTOM,
+        "project_id": playlist.project_id,
+        "project_url": (
+            _route_path(request, "project_detail", project_id=playlist.project_id)
+            if playlist.project_id is not None
+            else None
+        ),
+        "entry_count": len(entries),
+        "detail_url": _route_path(request, "playlist_detail", playlist_id=playlist.id),
+        "rename_url": _route_path(request, "rename_playlist", playlist_id=playlist.id),
+        "delete_url": _route_path(request, "delete_playlist", playlist_id=playlist.id),
+        "add_url": _route_path(request, "add_playlist_entry", playlist_id=playlist.id),
+        "reorder_url": _route_path(request, "reorder_playlist_entries", playlist_id=playlist.id),
+        "entries": entry_views,
+    }
+
+
+def _safe_queue_media_view(request: Request, item: MediaItem) -> dict[str, Any]:
+    view = _media_item_view(request, item)
+    return {
+        "id": view["id"],
+        "title": view["title"],
+        "project_id": view["project_id"],
+        "project_title": view["project_title"],
+        "duration_seconds": view["duration_seconds"],
+        "media_url": view["media_url"],
+        "download_url": view["download_url"],
+    }
+
+
+def _job_cancellation_available(app: FastAPI, job: Job) -> bool:
+    if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
+        return False
+    if job.cancel_outcome in {"too_late", "unsupported"}:
+        return False
+    if job.status in {JobStatus.QUEUED, JobStatus.INGESTING, JobStatus.STAGING}:
+        return True
+    attempt = next(
+        (
+            item
+            for item in job.variation_attempts
+            if item.variation_index == (job.current_variation or 1)
+        ),
+        None,
+    )
+    backend_id = (
+        attempt.inference_backend if attempt is not None else None
+    ) or job.inference_backend
+    if not backend_id:
+        return True
+    try:
+        provider = app.state.provider_registry.get_persisted(BackendId(str(backend_id)))
+    except (AttributeError, KeyError, ValueError):
+        return False
+    if job.status is JobStatus.CLOUD_QUEUED:
+        return bool(provider.capabilities.supports_pending_cancel)
+    if job.status is JobStatus.GENERATING:
+        return bool(provider.capabilities.supports_running_cancel)
+    return True
+
+
+def _remove_empty_project_dirs(settings: ServiceSettings, project_id: str) -> None:
+    """Remove only known empty per-project directories after a delete."""
+
+    for root in (settings.paths.incoming, settings.paths.library, settings.paths.temporary):
+        candidate = root / project_id
+        try:
+            candidate.relative_to(root)
+            if candidate.is_dir() and not candidate.is_symlink() and not any(candidate.iterdir()):
+                candidate.rmdir()
+        except (OSError, ValueError):
+            continue
 
 
 def _iso(value: datetime | None) -> str | None:

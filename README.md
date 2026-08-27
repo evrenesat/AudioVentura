@@ -28,6 +28,17 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   The Original form lists reviewed text-to-music backends; Cover / Remix lists
   compatible audio transform, inpaint, and outpaint backends. See [the Fal
   runbook](docs/FAL.md) before enabling paid endpoints.
+- Completed MP3 variations are published into the authenticated media library
+  only after output verification. Library tracks can be renamed, deleted into
+  a recoverable trash state, and placed in ordered custom playlists or
+  generated auto-playlists.
+- The persistent player owns one global audio element and keeps its queue,
+  playback position, shuffle, repeat, and rate across same-origin navigation.
+  It intentionally has no source-upload or offline-cache feature.
+- Queued and in-flight jobs can be cancelled when the persisted provider state
+  permits it. Project deletion is available only after every job is terminal;
+  it records a bounded audit summary before path-verifying and removing the
+  project tree, including legacy and lossless output files.
 - The quality-evaluation CLI is intentionally quarantined until ordinary
   original and cover generation are stable.
 - Managed Salad and RunPod capacity use durable database leases. Browser
@@ -37,7 +48,8 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
 ## Repository map
 
 ```text
-src/ace_service/       controller, transfer service, persistence, providers
+src/ace_service/       controller, transfer service, persistence, providers,
+                       media library, templates, and player assets
 runpod_worker/         shared ACE-Step runtime and Runpod entry point
 home_ingest/           private YouTube/media preparation service
 deploy/salad/          Salad worker wrapper, image, and infrastructure tool
@@ -175,6 +187,28 @@ uv run python -m ace_service migrate-upgrade \
 
 Do not retry an incomplete migration. Restore the verified backup and
 investigate first.
+
+Schema v10 adds media items/files, playlists and entries, project-deletion
+audits, and durable cancellation outcomes. It is additive and does not
+backfill the library: only later verified completions are published. See the
+[operations runbook](docs/OPERATIONS.md) for the backup, rehearsal, and
+rollback sequence.
+
+## Browser verification
+
+Install the checked-in browser test dependencies and both supported engines:
+
+```text
+uv sync --frozen
+uv run playwright install --with-deps chromium firefox
+uv run pytest -q tests/e2e --browser chromium --browser firefox
+```
+
+The browser suite uses a disposable loopback server and fake providers. It
+checks the `/beta` root-path contract, library and playlist flows, one global
+player across soft navigation, mobile target sizes, deletion, and
+cancellation. The optional live beta acceptance script is separate and
+requires an explicit `--allow-paid` flag; see [Operations](docs/OPERATIONS.md).
 
 ## Verification
 

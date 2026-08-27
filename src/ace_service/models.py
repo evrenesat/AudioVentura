@@ -74,6 +74,7 @@ class JobStatus(_ValueEnum):
     GENERATING = "generating"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
     queued = QUEUED
     ingesting = INGESTING
@@ -82,6 +83,7 @@ class JobStatus(_ValueEnum):
     generating = GENERATING
     completed = COMPLETED
     failed = FAILED
+    cancelled = CANCELLED
 
 
 class OutputFormat(_ValueEnum):
@@ -92,6 +94,28 @@ class OutputFormat(_ValueEnum):
     mp3 = MP3
     flac = FLAC
     wav = WAV
+
+
+class MediaItemKind(_ValueEnum):
+    GENERATED = "generated"
+    SOURCE = "source"
+
+
+class MediaDeletionState(_ValueEnum):
+    ACTIVE = "active"
+    PENDING = "pending"
+    DELETED = "deleted"
+
+
+class MediaFileState(_ValueEnum):
+    ACTIVE = "active"
+    QUARANTINED = "quarantined"
+    PURGED = "purged"
+
+
+class PlaylistKind(_ValueEnum):
+    PROJECT = "project"
+    CUSTOM = "custom"
 
 
 class TransferDirection(_ValueEnum):
@@ -128,6 +152,7 @@ class Base(DeclarativeBase):
 
 
 PROJECT_TITLE_MAX_LENGTH = 160
+MEDIA_TITLE_MAX_LENGTH = 300
 
 
 class Project(Base):
@@ -141,7 +166,15 @@ class Project(Base):
         UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
     )
 
-    jobs: Mapped[list[Job]] = relationship(back_populates="project")
+    jobs: Mapped[list[Job]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    media_items: Mapped[list[MediaItem]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    playlists: Mapped[list[Playlist]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     @validates("job_type")
     def _keep_job_type_immutable(self, key: str, value: JobType) -> JobType:
@@ -154,10 +187,16 @@ class Project(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "cancel_outcome IS NULL OR cancel_outcome IN ('cancelled', 'too_late', 'unsupported')",
+            name="ck_jobs_cancel_outcome",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     job_type: Mapped[JobType] = mapped_column(_enum_type(JobType), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
@@ -191,6 +230,9 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    cancel_completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    cancel_outcome: Mapped[str | None] = mapped_column(String(16))
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
     )
@@ -230,6 +272,178 @@ class Output(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
 
     job: Mapped[Job] = relationship(back_populates="outputs")
+    media_item: Mapped[MediaItem | None] = relationship(back_populates="generated_output")
+
+
+class MediaItem(Base):
+    """Logical playable media, published only after output verification."""
+
+    __tablename__ = "media_items"
+    __table_args__ = (
+        CheckConstraint("kind IN ('generated', 'source')", name="ck_media_items_kind"),
+        CheckConstraint(
+            "kind = 'source' OR generated_output_id IS NOT NULL",
+            name="ck_media_items_generated_output",
+        ),
+        CheckConstraint(
+            "deletion_state IN ('active', 'pending', 'deleted')",
+            name="ck_media_items_deletion_state",
+        ),
+        CheckConstraint(
+            "duration_seconds IS NULL OR (duration_seconds > 0 AND "
+            "duration_seconds = duration_seconds)",
+            name="ck_media_items_duration",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generated_output_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("outputs.id", ondelete="SET NULL"), unique=True, index=True
+    )
+    kind: Mapped[MediaItemKind] = mapped_column(
+        _enum_type(MediaItemKind), nullable=False, default=MediaItemKind.GENERATED
+    )
+    title: Mapped[str] = mapped_column(String(MEDIA_TITLE_MAX_LENGTH), nullable=False)
+    duration_seconds: Mapped[float | None]
+    deletion_state: Mapped[MediaDeletionState] = mapped_column(
+        _enum_type(MediaDeletionState), nullable=False, default=MediaDeletionState.ACTIVE
+    )
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[Project] = relationship(back_populates="media_items")
+    generated_output: Mapped[Output | None] = relationship(back_populates="media_item")
+    files: Mapped[list[MediaFile]] = relationship(
+        back_populates="media_item", cascade="all, delete-orphan", passive_deletes=True
+    )
+    playlist_entries: Mapped[list[PlaylistEntry]] = relationship(
+        back_populates="media_item", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    @validates("title")
+    def _validate_title(self, key: str, value: str) -> str:
+        del key
+        title = value.strip() if isinstance(value, str) else ""
+        if not title or len(title) > MEDIA_TITLE_MAX_LENGTH:
+            raise ValueError(f"media title must be 1..{MEDIA_TITLE_MAX_LENGTH} characters")
+        return title
+
+
+class MediaFile(Base):
+    """One physical file variant belonging to a logical media item."""
+
+    __tablename__ = "media_files"
+    __table_args__ = (
+        UniqueConstraint("media_item_id", "format"),
+        CheckConstraint(
+            "storage_namespace IN ('outputs', 'library')", name="ck_media_files_namespace"
+        ),
+        CheckConstraint("format IN ('mp3', 'flac', 'wav')", name="ck_media_files_format"),
+        CheckConstraint(
+            "state IN ('active', 'quarantined', 'purged')", name="ck_media_files_state"
+        ),
+        CheckConstraint("byte_size > 0", name="ck_media_files_byte_size"),
+        CheckConstraint("is_playback IN (0, 1)", name="ck_media_files_playback"),
+        CheckConstraint("is_primary_download IN (0, 1)", name="ck_media_files_download"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    media_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    storage_namespace: Mapped[str] = mapped_column(String(16), nullable=False, default="outputs")
+    format: Mapped[OutputFormat] = mapped_column(_enum_type(OutputFormat), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_playback: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_primary_download: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    state: Mapped[MediaFileState] = mapped_column(
+        _enum_type(MediaFileState), nullable=False, default=MediaFileState.ACTIVE
+    )
+    quarantine_relative_path: Mapped[str | None] = mapped_column(String(1024))
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    purged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    media_item: Mapped[MediaItem] = relationship(back_populates="files")
+
+
+class Playlist(Base):
+    """An editable project playlist or user-created custom playlist."""
+
+    __tablename__ = "playlists"
+    __table_args__ = (
+        UniqueConstraint("project_id"),
+        CheckConstraint("kind IN ('project', 'custom')", name="ck_playlists_kind"),
+        CheckConstraint(
+            "(kind = 'project' AND project_id IS NOT NULL) OR "
+            "(kind = 'custom' AND project_id IS NULL)",
+            name="ck_playlists_project_pairing",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kind: Mapped[PlaylistKind] = mapped_column(_enum_type(PlaylistKind), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(PROJECT_TITLE_MAX_LENGTH), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[Project | None] = relationship(back_populates="playlists")
+    entries: Mapped[list[PlaylistEntry]] = relationship(
+        back_populates="playlist",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PlaylistEntry.position",
+    )
+
+
+class PlaylistEntry(Base):
+    """A position in a playlist; no item uniqueness permits duplicates."""
+
+    __tablename__ = "playlist_entries"
+    __table_args__ = (UniqueConstraint("playlist_id", "position"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    playlist_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("playlists.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    media_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    playlist: Mapped[Playlist] = relationship(back_populates="entries")
+    media_item: Mapped[MediaItem] = relationship(back_populates="playlist_entries")
+
+
+class ProjectDeletionAudit(Base):
+    """Redacted, bounded evidence that a project was intentionally deleted."""
+
+    __tablename__ = "project_deletion_audits"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    job_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    media_item_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    cost_summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    project_created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    deleted_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class VariationAttempt(Base):

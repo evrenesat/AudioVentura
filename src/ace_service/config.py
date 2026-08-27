@@ -50,6 +50,10 @@ class DataPaths:
         return self.root / "outputs"
 
     @property
+    def library(self) -> Path:
+        return self.root / "library"
+
+    @property
     def temporary(self) -> Path:
         return self.root / "temporary"
 
@@ -62,6 +66,10 @@ class DataPaths:
         return self.root / "evaluations"
 
     @property
+    def trash(self) -> Path:
+        return self.root / "trash"
+
+    @property
     def campaign_database(self) -> Path:
         return self.evaluations / "quality-campaign.sqlite3"
 
@@ -71,9 +79,11 @@ class DataPaths:
             self.root,
             self.incoming,
             self.outputs,
+            self.library,
             self.temporary,
             self.logs,
             self.evaluations,
+            self.trash,
         )
 
     def job_incoming(self, job_id: str) -> Path:
@@ -84,6 +94,9 @@ class DataPaths:
 
     def job_temporary(self, job_id: str) -> Path:
         return self.temporary / job_id
+
+    def media_trash_item(self, media_item_id: str) -> Path:
+        return self.trash / "media" / media_item_id
 
 
 class ServiceSettings(BaseSettings):

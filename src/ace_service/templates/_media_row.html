@@ -1,0 +1,20 @@
+{% from "_icons.html" import icon %}
+<article class="media-row" data-media-id="{{ item.id }}"{% if entry_id|default(None) %} data-playlist-entry data-entry-id="{{ entry_id }}"{% endif %} data-player-track data-player-title="{{ item.title }}" data-player-project="{{ item.project_title }}" data-player-src="{{ item.media_url or '' }}" data-player-download="{{ item.download_url or '' }}">
+  <div class="media-row-main">
+    <button class="play-button" type="button" data-player-play aria-label="Play {{ item.title }}"{% if not item.file_available %} disabled{% endif %}>{{ icon("play") }}</button>
+    <div class="media-row-copy">
+      <h3>{{ item.title }}</h3>
+      <p class="muted">{% if item.project_url %}<a href="{{ item.project_url }}">{{ item.project_title }}</a>{% else %}{{ item.project_title }}{% endif %}{% if item.duration_seconds %} · {{ item.duration_seconds|round(1) }} sec{% endif %}{% if item.size_label %} · {{ item.size_label }}{% endif %}</p>
+    </div>
+  </div>
+  <div class="media-row-actions">
+    {% if item.file_available %}<a class="button small secondary" href="{{ item.download_url }}">Download</a>{% endif %}
+    {% if add_playlists|default([]) and item.file_available %}<details class="add-playlist-menu"><summary class="button small secondary">Add to playlist</summary><div class="add-playlist-options">{% for playlist in add_playlists %}<form method="post" action="{{ playlist.add_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="media_item_id" value="{{ item.id }}"><button class="button small secondary" type="submit" aria-label="Add {{ item.title }} to {{ playlist.title }}">{{ playlist.title }}</button></form>{% endfor %}</div></details>{% endif %}
+    {% if show_manage|default(false) and item.file_available %}
+    <form method="post" action="{{ item.rename_url }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="title" value="{{ item.original_title }}" maxlength="300" aria-label="Rename {{ item.title }}"><button class="button small secondary" type="submit">Rename</button></form>
+    <form method="post" action="{{ item.delete_url }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button small danger" type="submit">Delete</button></form>
+    {% endif %}
+    {% if entry_id|default(None) %}<button class="button small secondary icon-action" type="button" data-playlist-move="up" aria-label="Move {{ item.title }} up">{{ icon("up") }}</button><button class="button small secondary icon-action" type="button" data-playlist-move="down" aria-label="Move {{ item.title }} down">{{ icon("down") }}</button>{% endif %}
+    {% if remove_url %}<form method="post" action="{{ remove_url }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button small secondary" type="submit">Remove</button></form>{% endif %}
+  </div>
+</article>

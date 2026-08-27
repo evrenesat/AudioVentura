@@ -22,7 +22,12 @@ from ace_service.capacity.controller import CapacityController
 from ace_service.capacity.registry import CapacityRegistry
 from ace_service.config import ServiceSettings
 from ace_service.costs import resolve_gpu_alias, round_half_up_compute_cost_usd
-from ace_service.cover import CoverSourceError, finalize_cover_source, remove_cover_source
+from ace_service.cover import (
+    CoverSourceError,
+    discard_staged_cover_source,
+    finalize_cover_source,
+    remove_cover_source,
+)
 from ace_service.db import SessionFactory
 from ace_service.home_ingest import HomeIngestError, HomeIngestService
 from ace_service.models import (
@@ -64,6 +69,7 @@ from ace_service.repository import (
     create_variation_attempt,
     fail_variation_attempt,
     finalize_cover_job_duration,
+    finalize_job_cancellation,
     get_job,
     get_variation_attempt,
     insert_notification_event,
@@ -71,6 +77,7 @@ from ace_service.repository import (
     job_provider,
     persist_variation_provider_job_ref,
     prepare_variation_submission,
+    publish_completed_variation_media,
     record_attempt_evidence,
     recover_uncertain_submissions,
     recover_uncertain_variation_submissions,
@@ -277,11 +284,17 @@ class ControllerWorker:
     async def _process_one(self, job_id: str) -> None:
         with self.session_factory() as session:
             job = get_job(session, job_id)
-            if job is None or job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            if job is None or job.status in {
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            }:
                 return
             status = job.status
             variation_index = job.current_variation or 1
             job_type = job.job_type.value
+        if await self._handle_requested_cancellation(job_id, variation_index):
+            return
         LOGGER.info(
             "job=%s stage=%s component=controller job_type=%s variation=%d",
             job_id,
@@ -320,6 +333,91 @@ class ControllerWorker:
                 return
             await self._poll_variation(job_id, variation_index)
 
+    async def _handle_requested_cancellation(self, job_id: str, variation_index: int) -> bool:
+        """Handle one durable cancellation request, keeping provider calls outside SQL."""
+
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            if (
+                job is None
+                or job.status
+                in {
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                }
+                or job.cancel_requested_at is None
+            ):
+                session.rollback()
+                return False
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            ref = attempt_provider_ref(attempt, job) if attempt is not None else None
+            if (
+                job.status
+                in {
+                    JobStatus.QUEUED,
+                    JobStatus.INGESTING,
+                    JobStatus.STAGING,
+                }
+                or ref is None
+            ):
+                cancelled = finalize_job_cancellation(
+                    session,
+                    job.id,
+                    CancelOutcome.CANCELLED,
+                    user_facing_error="Generation cancelled.",
+                )
+                session.commit()
+                if cancelled.job_type is JobType.COVER:
+                    discard_staged_cover_source(self.settings, cancelled.id)
+                    remove_cover_source(self.settings, cancelled.id)
+                return True
+            provider = self.provider_registry.get_persisted(BackendId(str(ref.backend_id)))
+            supports_cancel = (
+                provider.capabilities.supports_pending_cancel
+                if job.status is JobStatus.CLOUD_QUEUED
+                else provider.capabilities.supports_running_cancel
+            )
+            if not supports_cancel:
+                finalize_job_cancellation(session, job.id, CancelOutcome.UNSUPPORTED)
+                session.commit()
+                return True
+
+        try:
+            outcome = CancelOutcome(await provider.cancel(ref))
+        except asyncio.CancelledError:
+            raise
+        except ProviderError as exc:
+            self._record_poll_error(job_id, ref.provider, exc)
+            return False
+        if not self._ref_is_current(job_id, variation_index, ref):
+            return True
+        with self.session_factory() as session:
+            job = get_job(session, job_id)
+            attempt = get_variation_attempt(session, job_id, variation_index)
+            if (
+                job is None
+                or attempt is None
+                or attempt_provider_ref(attempt, job) != ref
+                or job.cancel_requested_at is None
+            ):
+                session.rollback()
+                return True
+            result = finalize_job_cancellation(session, job.id, outcome)
+            session.commit()
+        if outcome is CancelOutcome.CANCELLED and result.job_type is JobType.COVER:
+            remove_cover_source(self.settings, result.id)
+        return True
+
+    @staticmethod
+    def _finalize_cancelled_provider_state(session: Any, attempt_id: int, job_id: str) -> Job:
+        return finalize_job_cancellation(
+            session,
+            job_id,
+            CancelOutcome.CANCELLED,
+            user_facing_error="The cloud provider cancelled this generation.",
+        )
+
     async def _submit_variation(self, job_id: str, variation_index: int) -> None:
         started = time.monotonic()
         if self.capacity_controller is not None:
@@ -343,6 +441,8 @@ class ControllerWorker:
                         extra={"component": "controller"},
                     )
                     return
+            if await self._handle_requested_cancellation(job_id, variation_index):
+                return
         with self.session_factory() as session:
             job = get_job(session, job_id)
             if job is None:
@@ -441,6 +541,8 @@ class ControllerWorker:
             )
             if missing or worker_schema not in provider.capabilities.accepts_worker_schema:
                 raise ValueError("inference provider does not support requested features")
+        if await self._handle_requested_cancellation(job_id, variation_index):
+            return
         provider_ref = await provider.submit(request)
         with self.session_factory() as session:
             persist_variation_provider_job_ref(
@@ -450,6 +552,7 @@ class ControllerWorker:
                 submission_nonce=nonce,
             )
             session.commit()
+        await self._handle_requested_cancellation(job_id, variation_index)
         LOGGER.info(
             "job=%s stage=submit component=controller variation=%d provider=%s elapsed_ms=%d",
             job_id,
@@ -477,6 +580,8 @@ class ControllerWorker:
         provider = self.provider_registry.get_persisted(BackendId(str(ref.backend_id)))
 
         started = time.monotonic()
+        if await self._handle_requested_cancellation(job_id, variation_index):
+            return
         try:
             status = await provider.status(ref)
         except asyncio.CancelledError:
@@ -485,6 +590,9 @@ class ControllerWorker:
             await self._handle_provider_uncertainty(
                 job_id, variation_index, ref, provider, deadline, exc
             )
+            return
+
+        if await self._handle_requested_cancellation(job_id, variation_index):
             return
 
         if not self._ref_is_current(job_id, variation_index, ref):
@@ -570,7 +678,18 @@ class ControllerWorker:
                     self._insert_managed_generation_started(session, job, utc_now())
                 session.commit()
                 return
-            if status.phase in {ProviderPhase.FAILED, ProviderPhase.CANCELLED}:
+            if status.phase is ProviderPhase.CANCELLED:
+                _ensure_terminal_evidence(
+                    session, attempt, metadata=None, unavailable_reason="worker_no_evidence"
+                )
+                cancelled_job = self._finalize_cancelled_provider_state(session, attempt.id, job.id)
+                if cancelled_job.job_type is JobType.COVER:
+                    revoke_active_transfers(session, cancelled_job.id)
+                session.commit()
+                if cancelled_job.job_type is JobType.COVER:
+                    remove_cover_source(self.settings, cancelled_job.id)
+                return
+            if status.phase is ProviderPhase.FAILED:
                 _ensure_terminal_evidence(
                     session, attempt, metadata=None, unavailable_reason="worker_no_evidence"
                 )
@@ -587,12 +706,16 @@ class ControllerWorker:
                     remove_cover_source(self.settings, failed_job.id)
                 return
 
+        if await self._handle_requested_cancellation(job_id, variation_index):
+            return
         try:
             provider_result = await provider.result(ref)
         except (ProviderError, ProviderJobNotComplete) as exc:
             await self._handle_provider_uncertainty(
                 job_id, variation_index, ref, provider, deadline, exc
             )
+            return
+        if await self._handle_requested_cancellation(job_id, variation_index):
             return
         if not self._ref_is_current(job_id, variation_index, ref):
             return
@@ -701,6 +824,7 @@ class ControllerWorker:
                     unavailable_reason="provider_managed_pricing",
                 )
                 completed_job, _, parent_completed = complete_variation_attempt(session, attempt.id)
+                publish_completed_variation_media(session, job.id, variation_index)
                 if parent_completed and completed_job.job_type is JobType.COVER:
                     revoke_active_transfers(session, completed_job.id)
                 session.commit()
@@ -741,6 +865,7 @@ class ControllerWorker:
                     unavailable_reason="timing_unavailable",
                 )
             completed_job, _, parent_completed = complete_variation_attempt(session, attempt.id)
+            publish_completed_variation_media(session, job.id, variation_index)
             if parent_completed and completed_job.job_type is JobType.COVER:
                 revoke_active_transfers(session, completed_job.id)
             session.commit()
@@ -770,12 +895,17 @@ class ControllerWorker:
             raise HomeIngestError(
                 "home_ingest_unavailable", "the home ingest service is not configured"
             )
+        if await self._handle_requested_cancellation(job_id, 1):
+            return
         prepared = await self.home_ingest_client.prepare(
             job_id=job_id,
             url=source_url,
             max_duration_seconds=self.settings.max_source_duration_seconds,
             max_source_bytes=self.settings.transfer_max_source_bytes,
         )
+        if await self._handle_requested_cancellation(job_id, 1):
+            discard_staged_cover_source(self.settings, job_id)
+            return
         if prepared.job_id != job_id:
             raise HomeIngestError(
                 "home_ingest_invalid_response", "home returned metadata for another job"
@@ -832,7 +962,11 @@ class ControllerWorker:
             jobs = list(session.scalars(select(Job).order_by(Job.created_at, Job.id)))
             terminal_cover_ids: list[str] = []
             for job in jobs:
-                if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                if job.status in {
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                }:
                     if job.job_type is JobType.COVER:
                         revoke_active_transfers(session, job.id)
                         terminal_cover_ids.append(job.id)
@@ -892,7 +1026,8 @@ class ControllerWorker:
                         job.id
                         for job in jobs
                         if job.job_type is JobType.COVER
-                        and job.status in {JobStatus.COMPLETED, JobStatus.FAILED}
+                        and job.status
+                        in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
                     ]
                 )
             )
@@ -968,7 +1103,11 @@ class ControllerWorker:
             user_facing_error=user_facing_error,
         )
         attempt = get_variation_attempt(session, job.id, job.current_variation or 1)
-        if attempt is not None and attempt.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        if attempt is not None and attempt.status not in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }:
             _ensure_terminal_evidence(
                 session,
                 attempt,
@@ -1003,7 +1142,11 @@ class ControllerWorker:
         )
         with self.session_factory() as session:
             job = get_job(session, job_id)
-            if job is None or job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            if job is None or job.status in {
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            }:
                 session.rollback()
                 return
             attempt = get_variation_attempt(session, job_id, job.current_variation or 1)
@@ -1019,6 +1162,7 @@ class ControllerWorker:
             if attempt is not None and attempt.status not in {
                 JobStatus.COMPLETED,
                 JobStatus.FAILED,
+                JobStatus.CANCELLED,
             }:
                 _ensure_terminal_evidence(
                     session,
@@ -1140,6 +1284,7 @@ class ControllerWorker:
                 completed, _, parent_completed = complete_variation_attempt(
                     session, attempt.id, note="provider_status_unavailable_after_output"
                 )
+                publish_completed_variation_media(session, job.id, variation_index)
                 remove_completed_cover = parent_completed and completed.job_type is JobType.COVER
                 if remove_completed_cover:
                     revoke_active_transfers(session, completed.id)

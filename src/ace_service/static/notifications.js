@@ -1,4 +1,6 @@
 (() => {
+  if (window.__audioventuraNotificationsBound) return;
+  window.__audioventuraNotificationsBound = true;
   const button = document.querySelector('[data-notifications-enable]');
   const status = document.querySelector('[data-notifications-status]');
   if (!button || !status) return;

@@ -62,3 +62,23 @@ def test_remote_artifact_rejects_redirects_and_wrong_content_type(tmp_path: Path
                 )
 
     asyncio.run(scenario())
+
+
+def test_remote_artifact_accepts_versioned_fal_cdn_hosts(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"content-type": "audio/mpeg"}, content=b"audio")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            receipt = await materialize_remote_artifact(
+                client,
+                "https://v3b.fal.media/file.mp3",
+                root=tmp_path,
+                target=tmp_path / "versioned.mp3",
+                native_format="mp3",
+                max_bytes=100,
+                bearer_token="token",
+            )
+        assert receipt.path.read_bytes() == b"audio"
+
+    asyncio.run(scenario())

@@ -23,6 +23,13 @@ class ArtifactReceipt:
     content_type: str
 
 
+def _is_allowed_cdn_host(hostname: str | None) -> bool:
+    if hostname is None:
+        return False
+    host = hostname.rstrip(".").lower()
+    return host in _ALLOWED_CDN_HOSTS or host.endswith(".fal.media")
+
+
 def _fsync_directory(path: Path) -> None:
     try:
         descriptor = os.open(path, os.O_RDONLY)
@@ -176,7 +183,7 @@ async def materialize_remote_artifact(
     """Stream one private Fal CDN URL with redirect/SSRF protections."""
 
     parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_CDN_HOSTS or not parsed.path:
+    if parsed.scheme != "https" or not _is_allowed_cdn_host(parsed.hostname) or not parsed.path:
         raise ValueError("artifact URL is not an allowed private CDN URL")
     if native_format not in _MIME_BY_FORMAT:
         raise ValueError("artifact format is unsupported")

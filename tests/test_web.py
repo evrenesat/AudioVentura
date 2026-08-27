@@ -21,7 +21,7 @@ from ace_service.config import ServiceSettings
 from ace_service.costs import FalPricingClient
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.migrations import migration_upgrade
-from ace_service.models import Job, JobStatus, JobType, SubmissionQuote
+from ace_service.models import Job, JobStatus, JobType, OutputFormat, SubmissionQuote
 from ace_service.providers.base import BackendOperation
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
@@ -1518,6 +1518,51 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
             assert "attachment" in download.headers["content-disposition"]
     finally:
         engine.dispose()
+
+
+def test_project_delete_route_removes_unpublished_output_file(web_app) -> None:
+    app, factory, _ = web_app
+    payload = b"legacy route output"
+    with factory() as session:
+        job = create_original_job(
+            session,
+            OriginalSongRequest(
+                description="route deletion output", output_format=OutputFormat.WAV
+            ),
+            job_id="route-delete-job",
+        )
+        job.status = JobStatus.COMPLETED
+        relative_path = f"{job.id}/variation-01.wav"
+        output_path = app.state.settings.paths.outputs / relative_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
+        create_output(
+            session,
+            job_id=job.id,
+            variation_index=1,
+            result_index=0,
+            relative_path=relative_path,
+            mime_type="audio/wav",
+            byte_size=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+        session.commit()
+        project_id = job.project_id
+        project_title = job.project.title
+
+    with TestClient(app) as client:
+        token = _csrf(client, f"/projects/{project_id}")
+        deleted = client.post(
+            f"/projects/{project_id}/delete",
+            auth=_auth(client),
+            data={"csrf_token": token, "confirm_title": project_title},
+            follow_redirects=False,
+        )
+        assert deleted.status_code == 303
+
+    assert not output_path.exists()
+    with factory() as session:
+        assert get_job(session, job.id) is None
 
 
 def test_form_validation_escaping_and_cover_rights(web_app) -> None:

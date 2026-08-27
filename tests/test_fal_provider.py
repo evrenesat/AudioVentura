@@ -9,6 +9,7 @@ import pytest
 
 from ace_service.providers.base import (
     BackendOperation,
+    CancelOutcome,
     GenerationRequest,
     InferenceMode,
     InferenceRequest,
@@ -83,6 +84,57 @@ def test_fal_queue_submit_status_and_result_are_endpoint_scoped() -> None:
         assert result.artifact.url == "https://fal.media/audio.mp3"
         assert len(calls) == 4
         await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_fal_queue_request_operations_fallback_to_generic_queue_paths() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path.startswith("/fal-ai/queue/requests/"):
+            if request.method == "GET" and request.url.path.endswith("/status"):
+                return httpx.Response(200, json={"status": "COMPLETED"})
+            if request.method == "GET":
+                return httpx.Response(200, json={"audio": {"url": "https://fal.media/a.mp3"}})
+            return httpx.Response(202)
+        return httpx.Response(405, headers={"allow": "POST"})
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        transport = FalQueueTransport("test-fal-key", http_client=client)
+        assert (await transport.status("fal-ai/elevenlabs/music", "request-1"))["status"] == (
+            "COMPLETED"
+        )
+        assert (await transport.result("fal-ai/elevenlabs/music", "request-1"))["audio"]["url"]
+        assert (
+            await transport.cancel("fal-ai/elevenlabs/music", "request-1") is CancelOutcome.TOO_LATE
+        )
+        await client.aclose()
+
+    asyncio.run(scenario())
+    assert calls == [
+        ("GET", "/fal-ai/elevenlabs/music/requests/request-1/status"),
+        ("GET", "/fal-ai/queue/requests/request-1/status"),
+        ("GET", "/fal-ai/elevenlabs/music/requests/request-1"),
+        ("GET", "/fal-ai/queue/requests/request-1"),
+        ("PUT", "/fal-ai/elevenlabs/music/requests/request-1/cancel"),
+        ("PUT", "/fal-ai/queue/requests/request-1/cancel"),
+    ]
+
+
+def test_fal_cdn_token_uses_json_post_contract() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/storage/auth/token"
+            assert json.loads(request.content) == {"storage_type": "fal-cdn-v3"}
+            return httpx.Response(200, json={"token": "cdn-token"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            transport = FalQueueTransport("test-fal-key", http_client=client)
+            assert await transport.cdn_token() == "cdn-token"
 
     asyncio.run(scenario())
 

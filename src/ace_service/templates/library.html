@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Library · AudioVentura{% endblock %}
+{% block content %}
+<section class="page-heading"><div><p class="eyebrow">Your audio</p><h1>Media library</h1><p class="lede">Every successful MP3 is ready to play, download, rename, and reuse in a playlist.</p></div></section>
+<form class="filter-bar" method="get" action="{{ urls.library }}">
+  <label class="sr-only" for="library-search">Search library</label><input id="library-search" name="q" value="{{ library_query.q }}" maxlength="200" placeholder="Search titles or projects">
+  <label class="sr-only" for="library-project">Project</label><select id="library-project" name="project"><option value="">All projects</option>{% for project in library_projects %}<option value="{{ project.project_id }}"{% if library_query.project_id == project.project_id %} selected{% endif %}>{{ project.title }}</option>{% endfor %}</select>
+  <label class="sr-only" for="library-sort">Sort</label><select id="library-sort" name="sort"><option value="recent"{% if library_query.sort == 'recent' %} selected{% endif %}>Newest</option><option value="oldest"{% if library_query.sort == 'oldest' %} selected{% endif %}>Oldest</option><option value="title"{% if library_query.sort == 'title' %} selected{% endif %}>Title</option></select>
+  <button class="button" type="submit">Filter</button>
+</form>
+<div class="section-heading"><h2>{{ media_items|length }} track{% if media_items|length != 1 %}s{% endif %}</h2><a href="{{ urls.playlists }}">Manage playlists</a></div>
+{% if media_items %}<div class="media-list">{% for item in media_items %}{% set show_manage = true %}{% set add_playlists = library_playlists %}{% include "_media_row.html" %}{% endfor %}</div>{% else %}<div class="empty"><p>No published MP3s match this view.</p><a href="{{ urls.create }}">Create an original</a></div>{% endif %}
+{% if library_page > 1 or library_has_next %}<nav class="pagination" aria-label="Library pages">{% if library_page > 1 %}<a class="button secondary" href="{{ urls.library }}?q={{ library_query.q|urlencode }}&project={{ library_query.project_id or '' }}&sort={{ library_query.sort }}&page={{ library_page - 1 }}">Previous</a>{% endif %}{% if library_has_next %}<a class="button secondary" href="{{ urls.library }}?q={{ library_query.q|urlencode }}&project={{ library_query.project_id or '' }}&sort={{ library_query.sort }}&page={{ library_page + 1 }}">Next</a>{% endif %}</nav>{% endif %}
+<script src="{{ urls.media_library_js }}" defer></script>
+{% endblock %}

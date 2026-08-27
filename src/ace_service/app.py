@@ -47,7 +47,7 @@ def _nonterminal_backend_ids(session_factory: SessionFactory) -> set[str]:
         values = session.scalars(
             select(Job.inference_backend).where(
                 Job.inference_backend.is_not(None),
-                Job.status.not_in((JobStatus.COMPLETED, JobStatus.FAILED)),
+                Job.status.not_in((JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)),
             )
         )
         return {str(value) for value in values if value}

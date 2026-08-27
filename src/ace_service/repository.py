@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import secrets
 from dataclasses import dataclass
@@ -11,9 +12,10 @@ from decimal import Decimal
 from typing import Any, Literal, cast, overload
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from ace_service.costs import (
     ESTIMATE_HISTORY_SAMPLE_LIMIT,
@@ -31,6 +33,7 @@ from ace_service.models import (
     ATTEMPT_UNAVAILABLE_REASONS,
     EVIDENCE_STATUSES,
     KEEP_WARM_SECONDS,
+    MEDIA_TITLE_MAX_LENGTH,
     NOTIFICATION_EVENT_KINDS,
     PROJECT_TITLE_MAX_LENGTH,
     QUOTE_UNAVAILABLE_REASONS,
@@ -42,11 +45,20 @@ from ace_service.models import (
     Job,
     JobStatus,
     JobType,
+    MediaDeletionState,
+    MediaFile,
+    MediaFileState,
+    MediaItem,
+    MediaItemKind,
     NotificationDelivery,
     NotificationEvent,
     Output,
     OutputFormat,
+    Playlist,
+    PlaylistEntry,
+    PlaylistKind,
     Project,
+    ProjectDeletionAudit,
     PushSubscription,
     RuntimeCalibration,
     SubmissionQuote,
@@ -56,7 +68,13 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
-from ace_service.providers.base import BackendId, DetailScope, ProviderJobRef, ProviderName
+from ace_service.providers.base import (
+    BackendId,
+    CancelOutcome,
+    DetailScope,
+    ProviderJobRef,
+    ProviderName,
+)
 from ace_service.schemas import (
     CoverRequest,
     OriginalSongRequest,
@@ -70,7 +88,7 @@ from ace_service.state import validate_job_transition, validate_variation_transi
 COVER_STAGING_CANCELLED_CODE = "cover_staging_cancelled"
 COVER_STAGING_CANCELLED_MESSAGE = "Cover preparation was cancelled before confirmation."
 RUNTIME_CALIBRATION_EVIDENCE_SOURCES = frozenset({"accepted-local-measurement-v1"})
-_TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+_TERMINAL_JOB_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 _NONTERMINAL_JOB_STATUSES = frozenset(JobStatus) - _TERMINAL_JOB_STATUSES
 _COVER_STAGING_STATUSES = frozenset({"awaiting_confirmation", "confirmed"})
 _COVER_STAGING_KEYS = frozenset({"status", "staged_at", "confirmed_at"})
@@ -1007,6 +1025,7 @@ def _v2_rollback_lifecycle_error(job: Job) -> str | None:
             JobStatus.INGESTING,
             JobStatus.COMPLETED,
             JobStatus.FAILED,
+            JobStatus.CANCELLED,
         }:
             return None
         return "cover schema-v2 request is missing staging metadata"
@@ -1029,6 +1048,7 @@ def _v2_rollback_lifecycle_error(job: Job) -> str | None:
         JobStatus.GENERATING,
         JobStatus.COMPLETED,
         JobStatus.FAILED,
+        JobStatus.CANCELLED,
     }:
         return None
     return "confirmed cover staging has an inconsistent job status"
@@ -1054,8 +1074,10 @@ def transition_job(
         job.status = status
     if status in {JobStatus.CLOUD_QUEUED, JobStatus.GENERATING} and job.started_at is None:
         job.started_at = timestamp
-    if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+    if status in _TERMINAL_JOB_STATUSES:
         job.completed_at = timestamp
+    if status is JobStatus.CANCELLED:
+        job.cancel_completed_at = timestamp
     if error_code is not None:
         job.error_code = error_code
     if user_facing_error is not None:
@@ -1164,7 +1186,7 @@ def transition_variation_attempt(
     attempt.status = status
     if status in {JobStatus.CLOUD_QUEUED, JobStatus.GENERATING} and attempt.started_at is None:
         attempt.started_at = timestamp
-    if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+    if status in _TERMINAL_JOB_STATUSES:
         attempt.completed_at = timestamp
     if error_code is not None:
         attempt.error_code = error_code
@@ -1314,7 +1336,7 @@ def recover_uncertain_variation_submissions(
             ),
         )
         job = get_job(session, attempt.job_id)
-        if job is not None and job.status not in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        if job is not None and job.status not in _TERMINAL_JOB_STATUSES:
             transition_job(
                 session,
                 job.id,
@@ -1393,7 +1415,7 @@ def set_variation_progress(
     attempt = session.get(VariationAttempt, attempt_id)
     if attempt is None:
         raise KeyError(f"unknown variation attempt: {attempt_id}")
-    if attempt.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+    if attempt.status in _TERMINAL_JOB_STATUSES:
         raise ValueError("terminal variation progress cannot be changed")
     expected_sequence = _PROGRESS_SEQUENCES.get(phase)
     if expected_sequence is None:
@@ -1727,6 +1749,681 @@ def create_output(
     session.add(output)
     session.flush()
     return output
+
+
+@dataclass(frozen=True, slots=True)
+class MediaLibraryQuery:
+    """Bounded, reusable query parameters for the online media library."""
+
+    q: str = ""
+    project_id: str | None = None
+    sort: str = "recent"
+    page: int = 1
+
+    def normalized(self) -> MediaLibraryQuery:
+        query = self.q.strip()
+        if len(query) > 200:
+            raise ValueError("library search must be at most 200 characters")
+        if self.sort not in {"recent", "oldest", "title"}:
+            raise ValueError("library sort is invalid")
+        if isinstance(self.page, bool) or not isinstance(self.page, int) or self.page < 1:
+            raise ValueError("library page must be a positive integer")
+        if self.page > 20_000:
+            raise ValueError("library page is out of bounds")
+        return MediaLibraryQuery(
+            query, str(self.project_id) if self.project_id else None, self.sort, self.page
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MediaLibraryPage:
+    """One deterministic page of active, playable media items."""
+
+    items: tuple[MediaItem, ...]
+    page: int
+    page_size: int
+    has_next: bool
+    query: MediaLibraryQuery
+
+
+def _media_query_statement(
+    query: MediaLibraryQuery,
+) -> tuple[Select[tuple[MediaItem]], MediaLibraryQuery]:
+    normalized = query.normalized()
+    statement = (
+        select(MediaItem)
+        .join(Project, Project.id == MediaItem.project_id)
+        .join(MediaFile, MediaFile.media_item_id == MediaItem.id)
+        .where(
+            MediaItem.deletion_state == MediaDeletionState.ACTIVE,
+            MediaFile.state == MediaFileState.ACTIVE,
+            MediaFile.format == OutputFormat.MP3,
+            MediaFile.is_playback == 1,
+            MediaFile.is_primary_download == 1,
+        )
+    )
+    if normalized.q:
+        needle = f"%{normalized.q.lower()}%"
+        statement = statement.where(
+            func.lower(MediaItem.title).like(needle) | func.lower(Project.title).like(needle)
+        )
+    if normalized.project_id is not None:
+        statement = statement.where(MediaItem.project_id == normalized.project_id)
+    if normalized.sort == "oldest":
+        statement = statement.order_by(MediaItem.created_at.asc(), MediaItem.id.asc())
+    elif normalized.sort == "title":
+        statement = statement.order_by(
+            func.lower(MediaItem.title).asc(), MediaItem.created_at.desc(), MediaItem.id.asc()
+        )
+    else:
+        statement = statement.order_by(MediaItem.created_at.desc(), MediaItem.id.asc())
+    return statement, normalized
+
+
+def query_media_library(
+    session: Session, query: MediaLibraryQuery | None = None
+) -> MediaLibraryPage:
+    """Return one bounded page of active MP3 playback items."""
+
+    resolved = query or MediaLibraryQuery()
+    statement, normalized = _media_query_statement(resolved)
+    rows = list(session.scalars(statement.offset((normalized.page - 1) * 50).limit(51)))
+    return MediaLibraryPage(tuple(rows[:50]), normalized.page, 50, len(rows) > 50, normalized)
+
+
+def list_media_library(
+    session: Session,
+    *,
+    q: str = "",
+    project_id: str | UUID | None = None,
+    sort: str = "recent",
+    page: int = 1,
+) -> list[MediaItem]:
+    """Compatibility list helper for callers that do not need pagination metadata."""
+
+    return list(
+        query_media_library(
+            session,
+            MediaLibraryQuery(
+                q=q, project_id=str(project_id) if project_id else None, sort=sort, page=page
+            ),
+        ).items
+    )
+
+
+def list_media_queue(
+    session: Session,
+    *,
+    q: str = "",
+    project_id: str | UUID | None = None,
+    sort: str = "recent",
+    limit: int = 500,
+) -> list[MediaItem]:
+    """Return the same active ordering as the library, capped for the player."""
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("media queue limit must be between 1 and 500")
+    statement, _ = _media_query_statement(
+        MediaLibraryQuery(q=q, project_id=str(project_id) if project_id else None, sort=sort)
+    )
+    return list(session.scalars(statement.limit(limit)))
+
+
+def get_media_item(session: Session, media_item_id: str | UUID) -> MediaItem | None:
+    return session.get(MediaItem, str(media_item_id))
+
+
+def get_media_file(session: Session, media_file_id: int) -> MediaFile | None:
+    return session.get(MediaFile, media_file_id)
+
+
+def _media_title(value: str) -> str:
+    title = value.strip()
+    if not title or len(title) > MEDIA_TITLE_MAX_LENGTH:
+        raise ValueError(f"media title must be 1..{MEDIA_TITLE_MAX_LENGTH} characters")
+    return title
+
+
+def rename_media_item(session: Session, media_item_id: str | UUID, title: str) -> MediaItem:
+    item = get_media_item(session, media_item_id)
+    if item is None:
+        raise KeyError(f"unknown media item: {media_item_id}")
+    if item.deletion_state is not MediaDeletionState.ACTIVE:
+        raise ValueError("media item is not active")
+    item.title = _media_title(title)
+    item.updated_at = utc_now()
+    session.flush()
+    return item
+
+
+def ensure_project_playlist(
+    session: Session, project_id: str | UUID, *, now: datetime | None = None
+) -> Playlist:
+    """Get or recreate the automatic playlist without backfilling old outputs."""
+
+    project = get_project(session, project_id)
+    if project is None:
+        raise KeyError(f"unknown project: {project_id}")
+    playlist = session.scalar(
+        select(Playlist).where(
+            Playlist.kind == PlaylistKind.PROJECT, Playlist.project_id == project.id
+        )
+    )
+    if playlist is None:
+        timestamp = _utc_timestamp(now)
+        playlist = Playlist(
+            id=str(uuid4()),
+            kind=PlaylistKind.PROJECT,
+            project_id=project.id,
+            title=_project_title(project.title),
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        session.add(playlist)
+        session.flush()
+    return playlist
+
+
+def create_custom_playlist(
+    session: Session,
+    title: str,
+    *,
+    playlist_id: str | UUID | None = None,
+    now: datetime | None = None,
+) -> Playlist:
+    timestamp = _utc_timestamp(now)
+    playlist = Playlist(
+        id=_id_string(playlist_id),
+        kind=PlaylistKind.CUSTOM,
+        title=_project_title(title),
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    session.add(playlist)
+    session.flush()
+    return playlist
+
+
+def get_playlist(session: Session, playlist_id: str | UUID) -> Playlist | None:
+    return session.get(Playlist, str(playlist_id))
+
+
+def list_playlists(session: Session) -> list[Playlist]:
+    return list(
+        session.scalars(
+            select(Playlist).order_by(Playlist.kind.asc(), Playlist.updated_at.desc(), Playlist.id)
+        )
+    )
+
+
+def list_playlist_entries(session: Session, playlist_id: str | UUID) -> list[PlaylistEntry]:
+    if get_playlist(session, playlist_id) is None:
+        raise KeyError(f"unknown playlist: {playlist_id}")
+    return list(
+        session.scalars(
+            select(PlaylistEntry)
+            .where(PlaylistEntry.playlist_id == str(playlist_id))
+            .order_by(PlaylistEntry.position.asc(), PlaylistEntry.id.asc())
+        )
+    )
+
+
+def rename_playlist(session: Session, playlist_id: str | UUID, title: str) -> Playlist:
+    playlist = get_playlist(session, playlist_id)
+    if playlist is None:
+        raise KeyError(f"unknown playlist: {playlist_id}")
+    playlist.title = _project_title(title)
+    playlist.updated_at = utc_now()
+    session.flush()
+    return playlist
+
+
+def delete_playlist(session: Session, playlist_id: str | UUID) -> Playlist:
+    playlist = get_playlist(session, playlist_id)
+    if playlist is None:
+        raise KeyError(f"unknown playlist: {playlist_id}")
+    session.delete(playlist)
+    session.flush()
+    return playlist
+
+
+def add_playlist_entry(
+    session: Session,
+    playlist_id: str | UUID,
+    media_item_id: str | UUID,
+    *,
+    now: datetime | None = None,
+) -> PlaylistEntry:
+    playlist = get_playlist(session, playlist_id)
+    item = get_media_item(session, media_item_id)
+    if playlist is None:
+        raise KeyError(f"unknown playlist: {playlist_id}")
+    if item is None:
+        raise KeyError(f"unknown media item: {media_item_id}")
+    if item.deletion_state is not MediaDeletionState.ACTIVE:
+        raise ValueError("media item is not active")
+    active_file = session.scalar(
+        select(MediaFile).where(
+            MediaFile.media_item_id == item.id,
+            MediaFile.format == OutputFormat.MP3,
+            MediaFile.state == MediaFileState.ACTIVE,
+            MediaFile.is_playback == 1,
+        )
+    )
+    if active_file is None:
+        raise ValueError("media item has no active playback file")
+    last_position = session.scalar(
+        select(func.max(PlaylistEntry.position)).where(PlaylistEntry.playlist_id == playlist.id)
+    )
+    entry = PlaylistEntry(
+        playlist_id=playlist.id,
+        media_item_id=item.id,
+        position=((int(last_position) if last_position is not None else 0) + 1024),
+        created_at=_utc_timestamp(now),
+    )
+    playlist.updated_at = _utc_timestamp(now)
+    session.add(entry)
+    session.flush()
+    return entry
+
+
+def remove_playlist_entry(
+    session: Session, playlist_id: str | UUID, entry_id: int
+) -> PlaylistEntry:
+    entry = session.scalar(
+        select(PlaylistEntry).where(
+            PlaylistEntry.id == entry_id, PlaylistEntry.playlist_id == str(playlist_id)
+        )
+    )
+    if entry is None:
+        raise KeyError(f"unknown playlist entry: {entry_id}")
+    playlist = get_playlist(session, playlist_id)
+    if playlist is not None:
+        playlist.updated_at = utc_now()
+    session.delete(entry)
+    session.flush()
+    return entry
+
+
+class PlaylistConflictError(ValueError):
+    """Raised when an ordered playlist submission is stale or malformed."""
+
+
+def reorder_playlist_entries(
+    session: Session,
+    playlist_id: str | UUID,
+    entry_ids: list[int] | tuple[int, ...],
+    *,
+    now: datetime | None = None,
+) -> list[PlaylistEntry]:
+    playlist = get_playlist(session, playlist_id)
+    if playlist is None:
+        raise KeyError(f"unknown playlist: {playlist_id}")
+    if len(entry_ids) > 2_000:
+        raise ValueError("playlist reorder contains too many entries")
+    if len(set(entry_ids)) != len(entry_ids):
+        raise PlaylistConflictError("playlist reorder contains duplicate entry IDs")
+    current = list_playlist_entries(session, playlist_id)
+    current_ids = [entry.id for entry in current]
+    if list(entry_ids) != current_ids and set(entry_ids) != set(current_ids):
+        raise PlaylistConflictError("playlist reorder is missing or has foreign entries")
+    if set(entry_ids) != set(current_ids) or len(entry_ids) != len(current_ids):
+        raise PlaylistConflictError("playlist reorder is stale")
+    by_id = {entry.id: entry for entry in current}
+    for temporary, entry_id in enumerate(entry_ids, start=1):
+        by_id[entry_id].position = -temporary
+    session.flush()
+    timestamp = _utc_timestamp(now)
+    for index, entry_id in enumerate(entry_ids, start=1):
+        by_id[entry_id].position = index * 1024
+    playlist.updated_at = timestamp
+    session.flush()
+    return [by_id[entry_id] for entry_id in entry_ids]
+
+
+def publish_completed_variation_media(
+    session: Session, job_id: str | UUID, variation_index: int
+) -> list[MediaItem]:
+    """Publish one completed variation's verified MP3 outputs exactly once."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if variation_index < 1 or variation_index > job.variation_count:
+        raise ValueError("variation index is outside the job variation count")
+    attempt = get_variation_attempt(session, job.id, variation_index)
+    if attempt is None or attempt.status is not JobStatus.COMPLETED:
+        return []
+    outputs = list(
+        session.scalars(
+            select(Output)
+            .where(
+                Output.job_id == job.id,
+                Output.variation_index == variation_index,
+                Output.mime_type == "audio/mpeg",
+                Output.relative_path.like("%.mp3"),
+            )
+            .order_by(Output.result_index.asc(), Output.id.asc())
+        )
+    )
+    if not outputs:
+        return []
+    published: list[MediaItem] = []
+    playlist: Playlist | None = None
+    timestamp = utc_now()
+    for output in outputs:
+        if output.byte_size <= 0:
+            raise ValueError("cannot publish an empty output")
+        normalized_path = normalize_relative_path(output.relative_path)
+        if not normalized_path.lower().endswith(".mp3"):
+            raise ValueError("MP3 publication requires an MP3 path")
+        validate_sha256(output.sha256)
+        existing = session.scalar(
+            select(MediaItem).where(MediaItem.generated_output_id == output.id)
+        )
+        if existing is not None:
+            continue
+        title = f"{job.project.title} · Variation {variation_index}"
+        if output.result_index > 0:
+            title += f" · Result {output.result_index + 1}"
+        item = MediaItem(
+            id=str(uuid4()),
+            project_id=job.project_id,
+            generated_output_id=output.id,
+            kind=MediaItemKind.GENERATED,
+            title=_media_title(title),
+            duration_seconds=_output_duration_seconds(output),
+            deletion_state=MediaDeletionState.ACTIVE,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        session.add(item)
+        session.flush()
+        session.add(
+            MediaFile(
+                media_item_id=item.id,
+                storage_namespace="outputs",
+                format=OutputFormat.MP3,
+                relative_path=normalized_path,
+                mime_type="audio/mpeg",
+                byte_size=output.byte_size,
+                sha256=validate_sha256(output.sha256),
+                is_playback=1,
+                is_primary_download=1,
+                state=MediaFileState.ACTIVE,
+                created_at=timestamp,
+            )
+        )
+        session.flush()
+        if playlist is None:
+            playlist = ensure_project_playlist(session, job.project_id, now=timestamp)
+        add_playlist_entry(session, playlist.id, item.id, now=timestamp)
+        published.append(item)
+    if published:
+        assert playlist is not None
+        playlist.updated_at = timestamp
+        job.project.updated_at = timestamp
+        session.flush()
+    return published
+
+
+def mark_media_item_deletion_pending(
+    session: Session, media_item_id: str | UUID, *, now: datetime | None = None
+) -> MediaItem:
+    item = get_media_item(session, media_item_id)
+    if item is None:
+        raise KeyError(f"unknown media item: {media_item_id}")
+    if item.deletion_state is MediaDeletionState.DELETED:
+        raise ValueError("media item is already deleted")
+    timestamp = _utc_timestamp(now)
+    item.deletion_state = MediaDeletionState.PENDING
+    item.deletion_requested_at = item.deletion_requested_at or timestamp
+    item.updated_at = timestamp
+    session.flush()
+    return item
+
+
+def mark_media_item_deleted(
+    session: Session,
+    media_item_id: str | UUID,
+    *,
+    quarantine_paths: dict[int, str] | None = None,
+    now: datetime | None = None,
+) -> MediaItem:
+    item = get_media_item(session, media_item_id)
+    if item is None:
+        raise KeyError(f"unknown media item: {media_item_id}")
+    timestamp = _utc_timestamp(now)
+    for media_file in item.files:
+        if quarantine_paths and media_file.id in quarantine_paths:
+            media_file.quarantine_relative_path = normalize_relative_path(
+                quarantine_paths[media_file.id]
+            )
+        media_file.state = MediaFileState.QUARANTINED
+        media_file.deleted_at = timestamp
+    session.execute(delete(PlaylistEntry).where(PlaylistEntry.media_item_id == item.id))
+    item.deletion_state = MediaDeletionState.DELETED
+    item.deleted_at = timestamp
+    item.updated_at = timestamp
+    session.flush()
+    return item
+
+
+def list_media_items_pending_deletion(session: Session) -> list[MediaItem]:
+    return list(
+        session.scalars(
+            select(MediaItem).where(
+                MediaItem.deletion_state.in_(
+                    (MediaDeletionState.PENDING, MediaDeletionState.DELETED)
+                )
+            )
+        )
+    )
+
+
+def _output_duration_seconds(output: Output) -> float | None:
+    metadata = output.generation_metadata_json
+    candidates: list[Any] = []
+    if isinstance(metadata, dict):
+        candidates.extend(
+            metadata.get(key)
+            for key in (
+                "duration_seconds",
+                "returned_duration_seconds",
+                "artifact_duration_seconds",
+            )
+        )
+        output_metadata = metadata.get("output")
+        if isinstance(output_metadata, dict):
+            candidates.append(output_metadata.get("duration_seconds"))
+    for value in candidates:
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and float(value) > 0
+        ):
+            return float(value)
+    return None
+
+
+def request_job_cancellation(
+    session: Session, job_id: str | UUID, *, now: datetime | None = None
+) -> Job:
+    """Persist cancellation intent; the controller worker owns provider calls."""
+
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    if job.status in _TERMINAL_JOB_STATUSES:
+        raise ValueError("job is already terminal")
+    if job.cancel_outcome in {CancelOutcome.TOO_LATE.value, CancelOutcome.UNSUPPORTED.value}:
+        raise ValueError("cancellation is no longer available for this job")
+    job.cancel_requested_at = job.cancel_requested_at or _utc_timestamp(now)
+    job.updated_at = _utc_timestamp(now)
+    session.flush()
+    return job
+
+
+def finalize_job_cancellation(
+    session: Session,
+    job_id: str | UUID,
+    outcome: CancelOutcome | str,
+    *,
+    now: datetime | None = None,
+    user_facing_error: str | None = None,
+) -> Job:
+    """Apply one worker-owned cancellation outcome after provider re-read."""
+
+    resolved = CancelOutcome(outcome)
+    job = get_job(session, job_id)
+    if job is None:
+        raise KeyError(f"unknown job: {job_id}")
+    timestamp = _utc_timestamp(now)
+    job.cancel_outcome = resolved.value
+    job.cancel_completed_at = timestamp
+    if resolved is CancelOutcome.CANCELLED:
+        attempt = get_variation_attempt(session, job.id, job.current_variation or 1)
+        if attempt is not None and attempt.status not in _TERMINAL_JOB_STATUSES:
+            transition_variation_attempt(
+                session,
+                attempt.id,
+                JobStatus.CANCELLED,
+                now=timestamp,
+                error_code="cancelled",
+                user_facing_error=user_facing_error or "Generation cancelled.",
+            )
+        if job.status not in _TERMINAL_JOB_STATUSES:
+            transition_job(
+                session,
+                job.id,
+                JobStatus.CANCELLED,
+                now=timestamp,
+                error_code="cancelled",
+                user_facing_error=user_facing_error or "Generation cancelled.",
+            )
+        revoke_active_transfers(session, job.id, now=timestamp)
+    else:
+        job.updated_at = timestamp
+    session.flush()
+    return job
+
+
+def project_is_deletable(session: Session, project_id: str | UUID) -> bool:
+    project = get_project(session, project_id)
+    if project is None:
+        raise KeyError(f"unknown project: {project_id}")
+    return all(job.status in _TERMINAL_JOB_STATUSES for job in project.jobs)
+
+
+def create_project_deletion_audit(
+    session: Session,
+    project_id: str | UUID,
+    *,
+    cost_summary_json: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> ProjectDeletionAudit:
+    """Persist bounded deletion evidence with no user content or provider bodies."""
+
+    project = get_project(session, project_id)
+    if project is None:
+        raise KeyError(f"unknown project: {project_id}")
+    if not project_is_deletable(session, project.id):
+        raise ValueError("project has nonterminal jobs")
+    existing = session.scalar(
+        select(ProjectDeletionAudit).where(ProjectDeletionAudit.project_id == project.id)
+    )
+    if existing is not None:
+        return existing
+    jobs = list(session.scalars(select(Job).where(Job.project_id == project.id).order_by(Job.id)))
+    items = list(
+        session.scalars(
+            select(MediaItem).where(MediaItem.project_id == project.id).order_by(MediaItem.id)
+        )
+    )
+    provider_summary = [
+        {
+            "job_id": job.id,
+            "provider": job.inference_provider,
+            "backend": job.inference_backend,
+            "status": job.status.value,
+            "created_at": job.created_at.isoformat(),
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+        for job in jobs
+    ]
+    cost_summary = _redacted_cost_summary(cost_summary_json)
+    for value, label in ((provider_summary, "provider summary"), (cost_summary, "cost summary")):
+        if value is not None and len(json.dumps(value, separators=(",", ":"))) > 64 * 1024:
+            raise ValueError(f"{label} is too large")
+    audit = ProjectDeletionAudit(
+        id=str(uuid4()),
+        project_id=project.id,
+        job_count=len(jobs),
+        media_item_count=len(items),
+        provider_summary_json=provider_summary,
+        cost_summary_json=cost_summary,
+        project_created_at=project.created_at,
+        deleted_at=_utc_timestamp(now),
+    )
+    session.add(audit)
+    session.flush()
+    return audit
+
+
+_AUDIT_COST_KEYS = frozenset(
+    {
+        "quoted_amount_micro_usd",
+        "quoted_range_low_micro_usd",
+        "quoted_range_high_micro_usd",
+        "estimated_compute_micro_usd",
+        "actual_compute_micro_usd",
+        "cost_micro_usd",
+        "total_micro_usd",
+        "execution_ms",
+        "hourly_rate_micro_usd",
+        "calibration_version",
+        "evidence_count",
+        "variation_count",
+    }
+)
+
+
+def _redacted_cost_summary(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only bounded numeric quote/evidence totals in a deletion audit."""
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("cost summary must be an object")
+    result: dict[str, Any] = {}
+    for key, raw in value.items():
+        if key not in _AUDIT_COST_KEYS:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError("cost summary values must be numeric")
+        if isinstance(raw, float) and not math.isfinite(raw):
+            raise ValueError("cost summary values must be finite")
+        result[key] = raw
+    return result
+
+
+def delete_project_record(session: Session, project_id: str | UUID) -> Project:
+    project = get_project(session, project_id)
+    if project is None:
+        raise KeyError(f"unknown project: {project_id}")
+    if not project_is_deletable(session, project.id):
+        raise ValueError("project has nonterminal jobs")
+    media_ids = [item.id for item in project.media_items]
+    if media_ids:
+        session.execute(delete(PlaylistEntry).where(PlaylistEntry.media_item_id.in_(media_ids)))
+        session.execute(delete(MediaItem).where(MediaItem.id.in_(media_ids)))
+        session.expire(project, ["media_items"])
+        session.flush()
+    session.delete(project)
+    session.flush()
+    return project
 
 
 def get_output(session: Session, output_id: int) -> Output | None:
@@ -2868,7 +3565,7 @@ def sum_terminal_attempt_estimates(
         raise ValueError("interval_end must not precede interval_start")
     attempts = session.scalars(
         select(VariationAttempt).where(
-            VariationAttempt.status.in_([JobStatus.COMPLETED, JobStatus.FAILED]),
+            VariationAttempt.status.in_(list(_TERMINAL_JOB_STATUSES)),
             VariationAttempt.completed_at >= start,
             VariationAttempt.completed_at < end,
         )

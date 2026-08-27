@@ -24,6 +24,7 @@ dev = [
   "lameenc==1.8.4",
   "mypy>=1.13,<2",
   "pytest>=8.3,<9",
+  "pytest-playwright>=0.7,<1",
   "ruff>=0.8,<1",
   "soundfile>=0.13.1,<1",
 ]

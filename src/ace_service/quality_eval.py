@@ -756,6 +756,9 @@ class DurableControllerSubmitter:
             if status == "failed":
                 self._reconcile(campaign_id, job_id, sample, "failed", evidence)
                 return
+            if status == "cancelled":
+                self._reconcile(campaign_id, job_id, sample, "cancelled", evidence)
+                return
             if status == "staging" and not confirmed_cover:
                 confirmed_cover = self._confirm_cover(job_id)
                 continue
@@ -782,7 +785,7 @@ class DurableControllerSubmitter:
             job = get_job(session, job_id)
             if job is None:
                 raise CampaignGateError("durable controller job disappeared")
-            if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
                 attempt = get_variation_attempt(session, job_id, 1)
                 evidence: dict[str, Any] = {
                     "output_path": None,

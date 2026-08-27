@@ -119,6 +119,10 @@ class FalQueueTransport:
         endpoint = _safe_endpoint_id(endpoint_id)
         return f"https://queue.fal.run/{endpoint}{suffix}"
 
+    @staticmethod
+    def _generic_request_url(request_id: str, suffix: str = "") -> str:
+        return f"https://queue.fal.run/fal-ai/queue/requests/{request_id}{suffix}"
+
     async def _request(
         self,
         method: str,
@@ -183,10 +187,39 @@ class FalQueueTransport:
             )
         return _safe_request_id(body.get("request_id", body.get("requestId", body.get("id"))))
 
-    async def status(self, endpoint_id: str, request_id: str) -> Mapping[str, Any]:
+    async def _request_for_request(
+        self,
+        method: str,
+        endpoint_id: str,
+        request_id: str,
+        suffix: str,
+        operation: str,
+        *,
+        expected: frozenset[int] = frozenset({200}),
+    ) -> tuple[int, Any]:
+        """Use endpoint-scoped queue URLs, with a safe generic-path fallback."""
+
         request = _safe_request_id(request_id)
-        _status, body = await self._request(
-            "GET", self._url(endpoint_id, f"/requests/{request}/status"), "status"
+        try:
+            return await self._request(
+                method,
+                self._url(endpoint_id, f"/requests/{request}{suffix}"),
+                operation,
+                expected=expected,
+            )
+        except ProviderError as exc:
+            if exc.status_code != 405:
+                raise
+            return await self._request(
+                method,
+                self._generic_request_url(request, suffix),
+                operation,
+                expected=expected,
+            )
+
+    async def status(self, endpoint_id: str, request_id: str) -> Mapping[str, Any]:
+        _status, body = await self._request_for_request(
+            "GET", endpoint_id, request_id, "/status", "status"
         )
         if not isinstance(body, Mapping) or not isinstance(body.get("status"), str):
             raise ProviderError(
@@ -195,9 +228,8 @@ class FalQueueTransport:
         return dict(body)
 
     async def result(self, endpoint_id: str, request_id: str) -> Mapping[str, Any]:
-        request = _safe_request_id(request_id)
-        _status, body = await self._request(
-            "GET", self._url(endpoint_id, f"/requests/{request}"), "result"
+        _status, body = await self._request_for_request(
+            "GET", endpoint_id, request_id, "", "result"
         )
         if not isinstance(body, Mapping):
             raise ProviderError(
@@ -206,11 +238,12 @@ class FalQueueTransport:
         return dict(body)
 
     async def cancel(self, endpoint_id: str, request_id: str) -> CancelOutcome:
-        request = _safe_request_id(request_id)
         try:
-            status, _body = await self._request(
+            status, _body = await self._request_for_request(
                 "PUT",
-                self._url(endpoint_id, f"/requests/{request}/cancel"),
+                endpoint_id,
+                request_id,
+                "/cancel",
                 "cancel",
                 expected=frozenset({200, 202}),
             )
@@ -259,9 +292,9 @@ class FalQueueTransport:
 
     async def cdn_token(self) -> str:
         try:
-            response = await self._client.get(
+            response = await self._client.post(
                 "https://rest.fal.ai/storage/auth/token",
-                params={"storage_type": "fal-cdn-v3"},
+                json={"storage_type": "fal-cdn-v3"},
                 headers={"Authorization": f"Key {self.api_key}", "Accept": "application/json"},
                 follow_redirects=False,
             )
