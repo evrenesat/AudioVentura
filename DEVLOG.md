@@ -20,13 +20,11 @@
   Local probes rendered corpus indices 0, 1, and 10854 as valid MP3 without
   leaving WAV files. Beta deployment sources and paired rollback are in the
   evreniops repository; production has not been deployed or approved.
-- Final beta deployment uses product revision
-  `edf554458dadaf805a6729a32346a77bb20c6101` and deployment revision
-  `a1ce2025ee76b594978c733c60c23756356dd196`. The beta URL is
-  `https://player.evren.io/beta/`; verified health, MP3 mock activation,
-  beta-only SFTP write/remove, production-tree escape rejection, and cleanup.
-  The paired p100 rollback snapshot is
-  `/opt/audioventura-midi-mock/rollback/20260827T172121Z`.
+- The beta URL is `https://player.evren.io/beta/`; verified health, MP3 mock
+  activation, beta-only SFTP write/remove, production-tree escape rejection,
+  and cleanup. The paired p100 rollback snapshot is
+  `/opt/audioventura-midi-mock/rollback/20260827T172121Z`; the exact product
+  and deployment revisions are recorded in the release handoff.
 
 ## 2026-08-27 (media library, playlists, and persistent player foundation)
 
