@@ -74,6 +74,12 @@ The controller submits to `https://queue.fal.run/<reviewed-endpoint-id>` with
 bounded JSON headers. Audio bytes never appear in the request. Cover source
 audio is provided only through a short-lived controller transfer URL.
 
+Request status, result, and cancellation use the endpoint-scoped queue URLs
+advertised by Fal. If a live queue deployment rejects those request URLs with
+HTTP 405, the transport uses Fal's generic `/fal-ai/queue/requests/<id>` path
+for the same operation. It never follows an arbitrary provider URL from a
+response, and the persisted request ID remains the recovery boundary.
+
 When Fal reports success, the controller parses only the catalog-declared
 result path, requires an HTTPS URL on an allowed Fal CDN hostname, exchanges
 `FAL_KEY` for a short-lived CDN token, and streams the response to the private
