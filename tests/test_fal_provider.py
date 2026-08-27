@@ -124,6 +124,21 @@ def test_fal_queue_request_operations_fallback_to_generic_queue_paths() -> None:
     ]
 
 
+def test_fal_cdn_token_uses_json_post_contract() -> None:
+    async def scenario() -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/storage/auth/token"
+            assert json.loads(request.content) == {"storage_type": "fal-cdn-v3"}
+            return httpx.Response(200, json={"token": "cdn-token"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            transport = FalQueueTransport("test-fal-key", http_client=client)
+            assert await transport.cdn_token() == "cdn-token"
+
+    asyncio.run(scenario())
+
+
 def test_requested_fal_original_backends_map_current_duration_and_seed_contracts() -> None:
     catalog = load_catalog()
     generation = GenerationRequest(

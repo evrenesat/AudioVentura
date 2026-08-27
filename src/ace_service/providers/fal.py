@@ -292,9 +292,9 @@ class FalQueueTransport:
 
     async def cdn_token(self) -> str:
         try:
-            response = await self._client.get(
+            response = await self._client.post(
                 "https://rest.fal.ai/storage/auth/token",
-                params={"storage_type": "fal-cdn-v3"},
+                json={"storage_type": "fal-cdn-v3"},
                 headers={"Authorization": f"Key {self.api_key}", "Accept": "application/json"},
                 follow_redirects=False,
             )
