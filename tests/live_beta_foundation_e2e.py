@@ -72,11 +72,6 @@ def _submit_original(client: httpx.Client, budget: PaidBudget, args: argparse.Na
         data={
             "csrf_token": _csrf(form.text),
             "description": args.description,
-            "lyrics": "",
-            "instrumental": "true",
-            "prompt_mode": "original",
-            "vocal_language": "en",
-            "duration_mode": "auto",
             "variation_count": "1",
             "output_format": "mp3",
             "seed": str(args.seed),
