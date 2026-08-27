@@ -424,7 +424,12 @@ class ControllerWorker:
             with self.session_factory() as session:
                 queued_job = get_job(session, job_id)
                 queued_backend = job_backend(queued_job) if queued_job is not None else None
-            if queued_backend is not None:
+            capacity_manager = (
+                self.capacity_registry.for_backend(queued_backend)
+                if queued_backend is not None and self.capacity_registry is not None
+                else None
+            )
+            if queued_backend is not None and capacity_manager is not None:
                 try:
                     await self.capacity_controller.ensure_retained(queued_backend)
                 except CapacityError as exc:
@@ -744,7 +749,13 @@ class ControllerWorker:
             )
             if expected_schema_version == WORKER_SCHEMA_VERSION:
                 assert metadata is not None
-                _validate_completion_metadata(metadata, job, attempt, output)
+                _validate_completion_metadata(
+                    metadata,
+                    job,
+                    attempt,
+                    output,
+                    enforce_requested_duration=provider.capabilities.enforces_requested_duration,
+                )
             set_variation_provider_result(
                 session,
                 attempt.id,
@@ -1210,6 +1221,8 @@ class ControllerWorker:
                     return self.settings.salad_poll_interval_seconds
                 if provider is ProviderName.FAL:
                     return self.settings.fal_poll_interval_seconds
+                if provider is ProviderName.MOCK:
+                    return self.settings.mock_poll_interval_seconds
         return self.settings.runpod_poll_interval_seconds
 
     def _record_poll_error(self, job_id: str, provider: ProviderName, exc: Exception) -> None:
@@ -1258,7 +1271,12 @@ class ControllerWorker:
             attempt = get_variation_attempt(session, job_id, variation_index)
             output = self._validated_output(session, job, variation_index)
             metadata = (
-                _validated_v2_completion_metadata(attempt, job, output)
+                _validated_v2_completion_metadata(
+                    attempt,
+                    job,
+                    output,
+                    enforce_requested_duration=provider.capabilities.enforces_requested_duration,
+                )
                 if attempt is not None
                 and job is not None
                 and _stored_schema_version(job) == WORKER_SCHEMA_VERSION
@@ -1386,17 +1404,32 @@ class ControllerWorker:
             features.update({RequestFeature.SOURCE_AUDIO, RequestFeature.COVER_STRENGTH})
         fields = {
             "bpm": RequestFeature.BPM,
+            "key_scale": RequestFeature.KEY,
             "key": RequestFeature.KEY,
             "time_signature": RequestFeature.TIME_SIGNATURE,
             "language": RequestFeature.LANGUAGE,
+            "vocal_language": RequestFeature.LANGUAGE,
             "instrumental": RequestFeature.INSTRUMENTAL,
             "prompt_mode": RequestFeature.PROMPT_MODE,
             "duration": RequestFeature.CUSTOM_DURATION,
             "duration_seconds": RequestFeature.CUSTOM_DURATION,
+            "negative_prompt": RequestFeature.NEGATIVE_PROMPT,
+            "guidance_scale": RequestFeature.GUIDANCE_SCALE,
+            "inference_steps": RequestFeature.INFERENCE_STEPS,
+            "prompt_expansion": RequestFeature.PROMPT_EXPANSION,
+            "source_style": RequestFeature.SOURCE_STYLE,
         }
+        generation = payload.get("generation")
+        values: Mapping[str, Any] = (
+            {**payload, **generation} if isinstance(generation, Mapping) else payload
+        )
         for key, feature in fields.items():
-            if payload.get(key) is not None:
+            if values.get(key) not in (None, ""):
                 features.add(feature)
+        if values.get("start_seconds") is not None or values.get("end_seconds") is not None:
+            features.add(RequestFeature.INPAINT_REGION)
+        if values.get("before_seconds") is not None or values.get("after_seconds") is not None:
+            features.add(RequestFeature.OUTPAINT_EXTENSION)
         return frozenset(features)
 
     @staticmethod
@@ -1856,7 +1889,11 @@ def _stored_schema_version(job: Job) -> int | None:
 
 
 def _validated_v2_completion_metadata(
-    attempt: VariationAttempt, job: Job, output: Output | None
+    attempt: VariationAttempt,
+    job: Job,
+    output: Output | None,
+    *,
+    enforce_requested_duration: bool = True,
 ) -> dict[str, Any] | None:
     """Return persisted v2 completion evidence only when it still validates."""
 
@@ -1867,7 +1904,13 @@ def _validated_v2_completion_metadata(
         metadata = validate_worker_result_metadata(
             raw_metadata, expected_schema_version=WORKER_SCHEMA_VERSION
         )
-        _validate_completion_metadata(metadata, job, attempt, output)
+        _validate_completion_metadata(
+            metadata,
+            job,
+            attempt,
+            output,
+            enforce_requested_duration=enforce_requested_duration,
+        )
     except ValueError:
         return None
     return metadata
@@ -1878,6 +1921,8 @@ def _validate_completion_metadata(
     job: Job,
     attempt: VariationAttempt,
     output_record: Output | None = None,
+    *,
+    enforce_requested_duration: bool = True,
 ) -> None:
     if metadata.get("job_id") != job.id:
         raise ValueError("worker completion job identity does not match the active job")
@@ -1958,6 +2003,8 @@ def _validate_completion_metadata(
         model_bundle.get("manifest_sha256"), str
     ) or not _MODEL_MANIFEST_SHA256_RE.fullmatch(model_bundle["manifest_sha256"]):
         raise ValueError("worker completion model bundle manifest digest is malformed")
+    if not enforce_requested_duration:
+        return
     actual = output.get("duration_seconds")
     target = output.get("target_duration_seconds")
     if target is None:

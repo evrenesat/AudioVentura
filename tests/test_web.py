@@ -22,9 +22,10 @@ from ace_service.costs import FalPricingClient
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
 from ace_service.migrations import migration_upgrade
 from ace_service.models import Job, JobStatus, JobType, OutputFormat, SubmissionQuote
-from ace_service.providers.base import BackendOperation
+from ace_service.providers.base import BackendOperation, ProviderName
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
+from ace_service.providers.mock import MockProvider
 from ace_service.providers.registry import ProviderRegistry
 from ace_service.repository import (
     EvidenceConflictError,
@@ -76,6 +77,112 @@ def test_builtin_backend_choices_expose_only_relevant_form_fields(web_app) -> No
         "duration",
         "seed",
     }
+
+
+def test_mock_backend_accepts_all_built_in_form_fields_and_is_mp3_only(settings) -> None:
+    values = settings.model_dump()
+    values.update(
+        inference_provider="mock",
+        inference_enabled_backends="mock/midi-sequential",
+        default_original_backend="mock/midi-sequential",
+        default_cover_backend="mock/midi-sequential",
+        mock_base_url="http://127.0.0.1:8201",
+        mock_token="test-mock-token",
+    )
+    mock_settings = ServiceSettings(**values)
+    engine = create_database_engine(mock_settings)
+    initialize_database(engine)
+    factory = create_session_factory(engine)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"status": "ok"})),
+        base_url="http://mock.ts.net",
+    )
+    provider = MockProvider("http://mock.ts.net", "test-mock-token", http_client=client)
+    app = create_app(
+        mock_settings,
+        session_factory=factory,
+        provider_registry=ProviderRegistry([provider], default=ProviderName.MOCK),
+        home_ingest_client=FakeHome(),
+        worker=FakeWorker(),
+    )
+    try:
+        original = web_routes._backend_choices(app, BackendOperation.TEXT_TO_MUSIC)
+        cover = web_routes._backend_choices(app, BackendOperation.AUDIO_TRANSFORM)
+        assert [choice["label"] for choice in original] == ["Mock · Sequential MIDI → MP3"]
+        assert [choice["label"] for choice in cover] == ["Mock · Sequential MIDI → MP3"]
+        assert all(choice["native_formats"] == ["mp3"] for choice in (*original, *cover))
+        expected_fields = {
+            "prompt",
+            "lyrics",
+            "instrumental",
+            "prompt_mode",
+            "vocal_language",
+            "duration",
+            "bpm",
+            "key_scale",
+            "time_signature",
+            "seed",
+            "source_style",
+            "source_lyrics",
+            "audio_cover_strength",
+            "cover_noise_strength",
+            "strength",
+            "start_seconds",
+            "end_seconds",
+            "before_seconds",
+            "after_seconds",
+        }
+        assert set(original[0]["fields"]) == expected_fields
+        assert set(cover[0]["fields"]) == expected_fields
+
+        original_fields = {
+            "backend": "mock/midi-sequential",
+            "description": "all original controls",
+            "lyrics": "lyrics",
+            "instrumental": "false",
+            "vocal_language": "en",
+            "prompt_mode": "enhance",
+            "duration_mode": "custom",
+            "duration_seconds": "30",
+            "bpm": "120",
+            "key_scale": "D minor",
+            "time_signature": "4",
+            "seed": "7",
+            "variation_count": "2",
+            "output_format": "mp3",
+        }
+        selected, _snapshot = web_routes._select_backend(
+            app, original_fields, BackendOperation.TEXT_TO_MUSIC
+        )
+        assert selected is provider
+
+        cover_fields = {
+            "backend": "mock/midi-sequential",
+            "target_style": "bright synthwave",
+            "remix_guidance": "keep the chorus wide",
+            "lyrics": "new lyrics",
+            "source_style": "acoustic",
+            "source_lyrics": "old lyrics",
+            "audio_cover_strength": "0.5",
+            "cover_noise_strength": "0.2",
+            "strength": "0.5",
+            "start_seconds": "0",
+            "end_seconds": "10",
+            "before_seconds": "1",
+            "after_seconds": "1",
+            "duration_mode": "custom",
+            "duration_seconds": "30",
+            "seed": "8",
+            "variation_count": "2",
+            "output_format": "mp3",
+        }
+        selected, _snapshot = web_routes._select_backend(
+            app, cover_fields, BackendOperation.AUDIO_TRANSFORM
+        )
+        assert selected is provider
+    finally:
+        asyncio.run(client.aclose())
+        engine.dispose()
 
 
 class FakeRunpod:

@@ -14,6 +14,7 @@ class ProviderName(StrEnum):
     RUNPOD = "runpod"
     SALAD = "salad"
     FAL = "fal"
+    MOCK = "mock"
 
 
 class BackendId(str):
@@ -119,6 +120,7 @@ class ProviderCapabilities:
     result_delivery: ResultDeliveryMode | str = ResultDeliveryMode.WORKER_UPLOAD
     native_formats: frozenset[str] = frozenset({"mp3", "flac", "wav"})
     adapter: str | None = None
+    enforces_requested_duration: bool = True
 
     def __post_init__(self) -> None:
         backend_id = self.backend_id
@@ -187,6 +189,7 @@ class ProviderJobRef:
             builtins = {
                 ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
                 ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+                ProviderName.MOCK: "mock/midi-sequential",
             }
             object.__setattr__(
                 self,

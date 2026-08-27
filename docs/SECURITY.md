@@ -22,11 +22,19 @@ routes. The final path segment is a bearer credential.
 Home Ingest binds to loopback port 8100 by default. It requires a bearer token
 and should be reachable only over the private tailnet.
 
+The p100 home host also carries isolated beta Home Ingest on `:8101` and the
+sequential MIDI mock on `:8201`; production counterparts are `:8100` and
+`:8200`. These are private Tailscale-bound services, not public proxy routes.
+Beta Home Ingest uses a separate service user, state root, bearer token, and
+restricted SFTP account. Beta and production mock instances use separate
+users, state roots, tokens, SQLite cursors, and systemd units.
+
 The isolated beta uses separate loopback services on 8010 (controller) and
 8011 (transfer), with `/beta/` private UI routing and `/beta-transfer/` signed
 transfer routing. Its environment, database, media/trash root, and rollback
 snapshots are separate from production. Beta has no capacity-management or
-Web Push credentials, and its Home Ingest target is a closed local endpoint.
+Web Push credentials, and its Home Ingest target is the separate beta p100
+service.
 The beta proxy must not widen the production transfer allow-list or forward
 beta controller paths to port 8000.
 
@@ -39,6 +47,7 @@ secret store, never in Git. This includes:
 
 - controller username and password;
 - Home Ingest bearer token;
+- beta Home Ingest and MIDI mock bearer tokens;
 - SFTP private key;
 - Runpod and Salad API keys;
 - private registry credentials;
@@ -107,6 +116,15 @@ tools. Its SFTP account must be key-only, have no shell, and be restricted to
 the incoming directory. GPU workers must not receive YouTube cookies or home
 credentials.
 
+The sequential MIDI mock is not a source-ingest service. It may receive a
+bounded source capability description for schema coverage, but it must never
+follow a source URL, receive source bytes, or log prompts, lyrics, capability
+URLs, or raw provider bodies. Its corpus archive and soundfont are read-only;
+only its private per-instance state and temporary render directories are
+writable. The mock binds to its private p100 address, requires bearer auth,
+accepts only worker schema 2 and MP3 results, and serializes rendering to one
+job at a time.
+
 ## Provider submissions
 
 Before provider submission, the controller commits a unique nonce. A returned
@@ -171,7 +189,8 @@ Before deployment or public source publication:
 2. confirm `.env`, databases, audio, fixtures, keys, and logs are untracked;
 3. verify root and beta proxy routing, transfer access-log suppression, and
    separate 8000/8001 versus 8010/8011 upstreams;
-4. verify private-service binds and authentication;
+4. verify private p100 binds on 8100/8200 and 8101/8201, separate service
+   identities, authentication, corpus permissions, and beta SFTP confinement;
 5. verify worker images contain no credentials;
 6. verify the configured image and model revisions are immutable;
 7. run the full tests and static checks;

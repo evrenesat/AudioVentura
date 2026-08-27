@@ -30,6 +30,7 @@ from ace_service.notifications import NotificationDispatcher
 from ace_service.providers.base import BackendOperation, ProviderName
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
+from ace_service.providers.mock import MockProvider
 from ace_service.providers.registry import BackendRegistry
 from ace_service.providers.runpod import RunpodProvider
 from ace_service.providers.salad import SaladProvider
@@ -212,6 +213,20 @@ def create_app(
                     providers.append(FalProvider(descriptor, transport))
                 elif backend_id in selectable:
                     selectable.remove(backend_id)
+        if "mock/midi-sequential" in configured:
+            # Persisted nonterminal mock jobs must remain recoverable even if
+            # the backend was removed from the selectable list after restart.
+            resolved_settings.validate_mock_runtime()
+            providers.append(
+                MockProvider(
+                    resolved_settings.mock_base_url,
+                    resolved_settings.mock_token,
+                    connect_timeout=resolved_settings.mock_connect_timeout_seconds,
+                    read_timeout=resolved_settings.mock_read_timeout_seconds,
+                    write_timeout=resolved_settings.mock_write_timeout_seconds,
+                    pool_timeout=resolved_settings.mock_pool_timeout_seconds,
+                )
+            )
         configured_provider_names = {provider.capabilities.name for provider in providers}
         legacy_default: ProviderName | None = ProviderName(resolved_settings.inference_provider)
         if legacy_default not in configured_provider_names:

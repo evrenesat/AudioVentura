@@ -189,6 +189,39 @@ _BUILTIN_GENERATION_FIELDS: dict[str, dict[str, dict[str, Any]]] = {
         "seed": {"type": "integer", "required": False, "minimum": 0},
     },
 }
+_MOCK_GENERATION_FIELDS: dict[str, dict[str, Any]] = {
+    # The mock advertises every field owned by the built-in forms. It accepts
+    # these values for integration coverage and deliberately ignores them.
+    "prompt": {"type": "string", "required": False},
+    "lyrics": {"type": "string", "required": False},
+    "instrumental": {"type": "boolean", "required": False},
+    "prompt_mode": {"type": "string", "required": False},
+    "vocal_language": {"type": "string", "required": False},
+    "duration": {"type": "number", "required": False, "minimum": 10, "maximum": 600},
+    "bpm": {"type": "integer", "required": False, "minimum": 30, "maximum": 300},
+    "key_scale": {"type": "string", "required": False},
+    "time_signature": {"type": "integer", "required": False, "minimum": 2, "maximum": 6},
+    "seed": {"type": "integer", "required": False, "minimum": 0},
+    "source_style": {"type": "string", "required": False},
+    "source_lyrics": {"type": "string", "required": False},
+    "audio_cover_strength": {
+        "type": "number",
+        "required": False,
+        "minimum": 0,
+        "maximum": 1,
+    },
+    "cover_noise_strength": {
+        "type": "number",
+        "required": False,
+        "minimum": 0,
+        "maximum": 1,
+    },
+    "strength": {"type": "number", "required": False, "minimum": 0, "maximum": 1},
+    "start_seconds": {"type": "number", "required": False, "minimum": 0, "maximum": 600},
+    "end_seconds": {"type": "number", "required": False, "minimum": 0, "maximum": 600},
+    "before_seconds": {"type": "number", "required": False, "minimum": 0, "maximum": 600},
+    "after_seconds": {"type": "number", "required": False, "minimum": 0, "maximum": 600},
+}
 _FORMAT_MIME = {
     OutputFormat.MP3: "audio/mpeg",
     OutputFormat.FLAC: "audio/flac",
@@ -355,7 +388,7 @@ def _form_estimate(
     transaction never depend on it.
     """
 
-    if str(form.get("backend", "")).startswith("fal/"):
+    if str(form.get("backend", "")).startswith(("fal/", "mock/")):
         return None
     try:
         raw = form.get("variation_count", "1")
@@ -516,6 +549,7 @@ def _backend_choices(
             label = {
                 "runpod/ace-step-v15-xl-turbo": "Runpod · ACE-Step 1.5 XL Turbo",
                 "salad/ace-step-v15-xl-turbo": "Salad · ACE-Step 1.5 XL Turbo",
+                "mock/midi-sequential": "Mock · Sequential MIDI → MP3",
             }.get(backend_id, backend_id)
             actual_operation = (
                 capabilities.operation.value
@@ -530,7 +564,11 @@ def _backend_choices(
                 "operation": actual_operation,
                 "media_kind": media_kind,
                 "native_formats": sorted(capabilities.native_formats),
-                "fields": _BUILTIN_GENERATION_FIELDS[actual_operation],
+                "fields": (
+                    dict(_MOCK_GENERATION_FIELDS)
+                    if backend_id == "mock/midi-sequential"
+                    else _BUILTIN_GENERATION_FIELDS[actual_operation]
+                ),
                 "result_delivery": capabilities.result_delivery.value,
                 "catalog_revision": "builtin-v1",
             }
@@ -616,6 +654,10 @@ def _backend_form_context(
         "selected_backend_is_fal": bool(
             selected_choice is not None and selected_choice["provider"] == "fal.ai"
         ),
+        "selected_backend_is_mock": bool(
+            selected_choice is not None and selected_choice["provider"] == ProviderName.MOCK.value
+        ),
+        "selected_native_formats": list(native_formats),
         "selected_output_format": _preferred_output_format(native_formats),
     }
 
@@ -2487,7 +2529,10 @@ def _attempt_view(attempt: VariationAttempt) -> dict[str, Any]:
         "lm_model": worker.get("lm_model"),
         "requested_seed": output.get("requested_seed"),
         "effective_seed": output.get("effective_seed", output.get("seed")),
+        "output_bytes": output.get("bytes"),
+        "output_sha256": output.get("sha256"),
         "duration_seconds": output.get("duration_seconds"),
+        "corpus_index": output.get("corpus_index"),
         "target_duration_seconds": output.get("target_duration_seconds"),
         "duration_tolerance_seconds": output.get("duration_tolerance_seconds"),
     }
@@ -2722,6 +2767,7 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
         "controller_database": {"ok": False, "message": "unavailable"},
         "runpod_api": {"ok": False, "message": "unavailable"},
         "inference_provider": {"ok": False, "message": "unavailable"},
+        "mock_backend": {"ok": True, "message": "disabled"},
         "home_ingest": {"ok": False, "message": "unavailable"},
         "public_transfer": {"ok": False, "message": "unavailable"},
         "capacity_management": {"ok": True, "message": "disabled"},
@@ -2812,25 +2858,36 @@ async def _readiness(app: FastAPI, *, only: set[str] | None = None) -> dict[str,
 
     await _refresh_fal_health(app)
     active_provider = app.state.provider_registry.get(app.state.provider_registry.default)
+    mock_provider = next(
+        (
+            provider
+            for provider in app.state.provider_registry.providers
+            if provider.capabilities.name is ProviderName.MOCK
+        ),
+        None,
+    )
     await asyncio.gather(
         probe("inference_provider", active_provider, "health"),
         probe("runpod_api", app.state.runpod_client, "health")
         if app.state.runpod_client is not None
         else asyncio.sleep(0),
         probe("home_ingest", app.state.home_ingest_client, "health"),
+        probe("mock_backend", mock_provider, "health")
+        if mock_provider is not None
+        else asyncio.sleep(0),
     )
     if app.state.provider_registry.default.value == "runpod":
         components["runpod_api"] = dict(components["inference_provider"])
-    required_ok = all(
-        components[key]["ok"]
-        for key in (
-            "controller_database",
-            "inference_provider",
-            "public_transfer",
-            "capacity_management",
-            "web_push",
-        )
-    )
+    required_keys = [
+        "controller_database",
+        "inference_provider",
+        "public_transfer",
+        "capacity_management",
+        "web_push",
+    ]
+    if app.state.provider_registry.default is ProviderName.MOCK:
+        required_keys.append("mock_backend")
+    required_ok = all(components[key]["ok"] for key in required_keys)
     return {
         "status": "ok" if required_ok and components["home_ingest"]["ok"] else "degraded",
         "components": components,

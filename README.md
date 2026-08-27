@@ -10,6 +10,7 @@ and hardware requirements:
 - the controller owns the private UI, SQLite state, and job orchestration;
 - the transfer service moves audio through short-lived signed URLs;
 - Home Ingest downloads and prepares YouTube audio on the home network;
+- the private sequential MIDI mock renders deterministic corpus entries on p100;
 - Runpod or SaladCloud runs the GPU worker; reviewed fal.ai Model APIs run as
   controller-pulled managed backends.
 
@@ -28,6 +29,9 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   The Original form lists reviewed text-to-music backends; Cover / Remix lists
   compatible audio transform, inpaint, and outpaint backends. See [the Fal
   runbook](docs/FAL.md) before enabling paid endpoints.
+- `mock/midi-sequential` is an opt-in, MP3-only integration backend. It ignores
+  creative parameters, consumes one MIDI cursor entry per variation, and never
+  replaces a real-provider default or acts as fallback.
 - Completed MP3 variations are published into the authenticated media library
   only after output verification. Library tracks can be renamed, deleted into
   a recoverable trash state, and placed in ordered custom playlists or
@@ -52,6 +56,7 @@ src/ace_service/       controller, transfer service, persistence, providers,
                        media library, templates, and player assets
 runpod_worker/         shared ACE-Step runtime and Runpod entry point
 home_ingest/           private YouTube/media preparation service
+midi_mock_backend/     private deterministic MIDI-to-MP3 test service
 deploy/salad/          Salad worker wrapper, image, and infrastructure tool
 docs/                  operator and provider runbooks
 plans/                 completed and active implementation plans
@@ -76,6 +81,7 @@ records, and plans are supporting evidence. They are not setup instructions.
 - SQLite on durable local storage
 - `yt-dlp`, `ffmpeg`, and `ffprobe` on the Home Ingest host only
 - a compatible NVIDIA GPU provider for ACE-Step inference
+- FluidSynth, the GM soundfont, and `lameenc` only on the optional mock host
 
 Install the controller environment from the repository root:
 
@@ -102,6 +108,10 @@ Important groups are:
   public hostname;
 - `ACE_TRANSFER_*`: public signed-transfer origin, limits, and token lifetime;
 - `ACE_HOME_INGEST_*`: private Home Ingest endpoint and bearer token;
+- `MOCK_BASE_URL`, `MOCK_TOKEN`, `MOCK_POLL_INTERVAL_SECONDS`, and
+  `MOCK_*_TIMEOUT_SECONDS`: private mock endpoint credentials and bounded
+  controller timeouts; enabling `mock/midi-sequential` requires a non-placeholder
+  token and a private URL;
 - `INFERENCE_ENABLED_BACKENDS` and `DEFAULT_*_BACKEND`: exact backend IDs and
   mode-specific defaults for new jobs;
 - `FAL_KEY` and `FAL_*`: optional reviewed fal.ai catalog, queue, CDN, and
@@ -162,11 +172,20 @@ cd home_ingest
 uv run python -m ace_home_ingest
 ```
 
+Run the optional mock service from its own directory after staging its
+immutable corpus archive and manifest:
+
+```text
+cd midi_mock_backend
+uv run python -m ace_midi_mock serve
+```
+
 Default binds are:
 
 - controller: `127.0.0.1:8000`;
 - transfer service: `127.0.0.1:8001`;
 - Home Ingest: `127.0.0.1:8100`.
+- mock service: `127.0.0.1:8200` by default; beta deployment uses p100 `:8201`.
 
 Do not expose these ports directly. The controller belongs behind the private
 tailnet. The public proxy may forward only the signed transfer paths described
@@ -207,8 +226,9 @@ uv run pytest -q tests/e2e --browser chromium --browser firefox
 The browser suite uses a disposable loopback server and fake providers. It
 checks the `/beta` root-path contract, library and playlist flows, one global
 player across soft navigation, mobile target sizes, deletion, and
-cancellation. The optional live beta acceptance script is separate and
-requires an explicit `--allow-paid` flag; see [Operations](docs/OPERATIONS.md).
+cancellation. The non-paid live mock acceptance script is separate and requires
+protected credentials plus a caller-approved YouTube URL; see
+[Operations](docs/OPERATIONS.md).
 
 ## Verification
 
@@ -221,6 +241,13 @@ uv run ruff format --check .
 uv run mypy src runpod_worker
 
 cd home_ingest
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+
+cd ../midi_mock_backend
+uv sync --frozen
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
