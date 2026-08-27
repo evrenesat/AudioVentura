@@ -182,6 +182,15 @@ root, and then marks it deleted. Startup cleanup reconciles pending/deleted
 rows and purges only after the repository state permits it; the UI renders a
 deleted-output tombstone rather than a stale playback link.
 
+Project deletion records its redacted audit before file work begins. It runs
+the same media-item deletion state machine, then path-verifies every project
+`Output` that has no `MediaItem` (including legacy MP3 and FLAC/WAV outputs).
+Those files move to deterministic project-scoped trash while their output rows
+remain durable; the project row is deleted only after all media items and
+outputs are accounted for. A retry recognizes an already-completed move, and
+startup cleanup uses the audit to finish a deletion or purge trash left after
+the project commit. No output is promoted into the library for deletion.
+
 The browser shell keeps one `<audio>` element in the persistent layout. Its
 queue is filled from safe same-origin media metadata, not provider responses,
 and its state is held in browser storage across soft navigation and reload.

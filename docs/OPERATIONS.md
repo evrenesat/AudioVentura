@@ -223,6 +223,15 @@ disposable v9-to-v10 rehearsal and confirm both the pre-upgrade status and the
 post-upgrade `exact_expected` status. Keep the backup and the database on the
 same recovery record.
 
+Project deletion uses the committed audit as its recovery marker. It first
+reconciles library media through the normal tombstone transition, then moves
+unpublished legacy or FLAC/WAV outputs into
+`trash/project-outputs/<project-id>/` after path, MIME, size, and SHA-256
+verification. Output rows remain until the project transaction commits. A
+retry or startup cleanup recognizes deterministic moves and purges the
+project-scoped trash after commit. Do not manually remove an active library
+file or bypass the repository deletion transition.
+
 For the media tree, verify `outputs/`, `library/`, and `trash/` are all below
 the configured data root. A pending media deletion may be reconciled by
 cleanup; purge is allowed only after the database state and trash path agree.

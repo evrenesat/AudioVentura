@@ -13,20 +13,26 @@ from sqlalchemy import select
 from ace_service.config import ServiceSettings
 from ace_service.db import SessionFactory
 from ace_service.models import (
+    Job,
     MediaDeletionState,
     MediaFile,
     MediaFileState,
     MediaItem,
+    Output,
     OutputFormat,
+    ProjectDeletionAudit,
 )
 from ace_service.repository import (
+    delete_project_record,
     get_media_file,
     get_media_item,
+    get_project,
     list_media_items_pending_deletion,
     mark_media_item_deleted,
     mark_media_item_deletion_pending,
+    project_is_deletable,
 )
-from ace_service.schemas import normalize_relative_path
+from ace_service.schemas import normalize_relative_path, validate_sha256
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +42,7 @@ _MIME_TYPES = {
     ".wav": "audio/wav",
 }
 _FORMATS = {OutputFormat.MP3.value, OutputFormat.FLAC.value, OutputFormat.WAV.value}
+_PROJECT_OUTPUT_TRASH_ROOT = "project-outputs"
 
 
 class MediaLibraryError(RuntimeError):
@@ -180,6 +187,100 @@ def _move_to_trash(settings: ServiceSettings, media_item: MediaItem, media_file:
     return relative
 
 
+def _output_extension(output: Output) -> str:
+    """Validate an output's physical format metadata and return its extension."""
+
+    try:
+        normalized_path = normalize_relative_path(output.relative_path)
+        expected_sha256 = validate_sha256(output.sha256)
+    except (TypeError, ValueError) as exc:
+        raise MediaLibraryError("output metadata is invalid") from exc
+    suffix = Path(normalized_path).suffix.lower()
+    if suffix not in _MIME_TYPES or output.mime_type != _MIME_TYPES[suffix]:
+        raise MediaLibraryError("output extension and MIME type do not agree")
+    if (
+        isinstance(output.byte_size, bool)
+        or not isinstance(output.byte_size, int)
+        or output.byte_size <= 0
+        or output.byte_size > 2**63 - 1
+    ):
+        raise MediaLibraryError("output byte size is invalid")
+    if expected_sha256 != output.sha256.lower():
+        raise MediaLibraryError("output hash is not canonical")
+    return suffix[1:]
+
+
+def _verified_output_path(settings: ServiceSettings, output: Output) -> Path:
+    """Resolve one output below ``outputs`` without following symlinks."""
+
+    try:
+        normalized_path = normalize_relative_path(output.relative_path)
+    except ValueError as exc:
+        raise MediaLibraryError("output path is invalid") from exc
+    _output_extension(output)
+    return _relative_candidate(settings.paths.outputs, normalized_path)
+
+
+def _verify_output_file(path: Path, output: Output) -> None:
+    """Verify the file at a previously path-validated output location."""
+
+    if path.is_symlink() or not path.is_file():
+        raise MediaLibraryError("output file is missing or is not a regular file")
+    try:
+        file_stat = path.stat()
+    except OSError as exc:
+        raise MediaLibraryError("output file could not be inspected") from exc
+    if file_stat.st_size != output.byte_size:
+        raise MediaLibraryError("output size does not match its durable metadata")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise MediaLibraryError("output file could not be read") from exc
+    if digest.hexdigest().lower() != output.sha256.lower():
+        raise MediaLibraryError("output hash does not match its durable metadata")
+
+
+def _project_output_trash_relative_path(project_id: str, output: Output) -> str:
+    extension = _output_extension(output)
+    project_part = _safe_identifier(str(project_id))
+    output_part = _safe_identifier(str(output.id))
+    return f"{_PROJECT_OUTPUT_TRASH_ROOT}/{project_part}/{output_part}.{extension}"
+
+
+def _move_output_to_trash(settings: ServiceSettings, project_id: str, output: Output) -> bool:
+    """Move one un-published output to deterministic, retryable project trash."""
+
+    source = _verified_output_path(settings, output)
+    relative = _project_output_trash_relative_path(project_id, output)
+    destination = _trash_path(settings, relative)
+    if destination.exists() or destination.is_symlink():
+        if source.exists() or source.is_symlink():
+            raise MediaLibraryError("deterministic output trash destination already exists")
+        _verify_output_file(destination, output)
+        try:
+            destination.chmod(0o600)
+        except OSError as exc:
+            raise MediaLibraryError("output trash file permissions could not be secured") from exc
+        return True
+    if not source.exists():
+        return False
+    _verify_output_file(source, output)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    destination.parent.chmod(0o700)
+    try:
+        os.rename(source, destination)
+    except OSError as exc:
+        raise MediaLibraryError("output file could not be moved to trash") from exc
+    try:
+        destination.chmod(0o600)
+    except OSError as exc:
+        raise MediaLibraryError("output trash file permissions could not be secured") from exc
+    return True
+
+
 class MediaLibraryService:
     """Coordinate database tombstones with deterministic same-filesystem moves."""
 
@@ -283,6 +384,140 @@ class MediaLibraryService:
                 media_dir.rmdir()
         except OSError:
             return
+
+    def reconcile_project_output_files(self, project_id: str) -> int:
+        """Quarantine every project output not already owned by a media item.
+
+        Output rows intentionally remain durable until the project transaction
+        deletes them.  The project-scoped deterministic trash path makes a
+        crash between the filesystem move and that transaction retryable.
+        """
+
+        with self.session_factory() as session:
+            published_output_ids = {
+                output_id
+                for output_id in session.scalars(
+                    select(MediaItem.generated_output_id).where(
+                        MediaItem.project_id == str(project_id),
+                        MediaItem.generated_output_id.is_not(None),
+                    )
+                )
+                if output_id is not None
+            }
+            outputs = list(
+                session.scalars(
+                    select(Output)
+                    .join(Job, Output.job_id == Job.id)
+                    .where(Job.project_id == str(project_id))
+                    .order_by(Output.id.asc())
+                )
+            )
+            moved = 0
+            for output in outputs:
+                if output.id in published_output_ids:
+                    continue
+                if _move_output_to_trash(self.settings, str(project_id), output):
+                    moved += 1
+            return moved
+
+    def purge_project_output_trash(self, project_id: str) -> int:
+        """Purge only the deterministic trash owned by one deleted project."""
+
+        relative = f"{_PROJECT_OUTPUT_TRASH_ROOT}/{_safe_identifier(str(project_id))}"
+        directory = _trash_path(self.settings, relative)
+        if not directory.exists():
+            return 0
+        if directory.is_symlink() or not directory.is_dir():
+            raise MediaLibraryError("project output trash is not a directory")
+        purged = 0
+        for path in list(directory.iterdir()):
+            if path.is_symlink() or not path.is_file():
+                raise MediaLibraryError("project output trash contains an unsafe entry")
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise MediaLibraryError("project output trash could not be purged") from exc
+            purged += 1
+        try:
+            directory.rmdir()
+            parent = directory.parent
+            if parent.is_dir() and not parent.is_symlink() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError as exc:
+            raise MediaLibraryError("project output trash directory could not be removed") from exc
+        return purged
+
+    def _remove_empty_output_dirs(self, job_ids: list[str]) -> None:
+        for job_id in job_ids:
+            try:
+                candidate = _relative_candidate(
+                    self.settings.paths.outputs, _safe_identifier(str(job_id))
+                )
+                if (
+                    candidate.is_dir()
+                    and not candidate.is_symlink()
+                    and not any(candidate.iterdir())
+                ):
+                    candidate.rmdir()
+            except (MediaLibraryError, OSError):
+                continue
+
+    def reconcile_project_deletion(self, project_id: str) -> bool:
+        """Converge a confirmed project deletion, including un-published outputs."""
+
+        project_key = str(project_id)
+        with self.session_factory() as session:
+            audit = session.scalar(
+                select(ProjectDeletionAudit).where(ProjectDeletionAudit.project_id == project_key)
+            )
+            if audit is None:
+                raise KeyError(f"unknown project deletion audit: {project_key}")
+            project = get_project(session, project_key)
+            if project is None:
+                self.purge_project_output_trash(project_key)
+                return True
+            if not project_is_deletable(session, project_key):
+                raise ValueError("project has nonterminal jobs")
+            item_ids = [item.id for item in project.media_items]
+            job_ids = [job.id for job in project.jobs]
+
+        for item_id in item_ids:
+            with self.session_factory() as session:
+                item = get_media_item(session, item_id)
+                if item is None:
+                    continue
+                if item.deletion_state is MediaDeletionState.ACTIVE:
+                    mark_media_item_deletion_pending(session, item.id)
+                    session.commit()
+            self.reconcile_item_deletion(item_id)
+
+        self.reconcile_project_output_files(project_key)
+        with self.session_factory() as session:
+            project = get_project(session, project_key)
+            if project is not None:
+                remaining = list(
+                    session.scalars(
+                        select(MediaItem).where(
+                            MediaItem.project_id == project_key,
+                            MediaItem.deletion_state != MediaDeletionState.DELETED,
+                        )
+                    )
+                )
+                if remaining:
+                    raise MediaLibraryError("project media deletion is incomplete")
+                job_ids = [job.id for job in project.jobs]
+                delete_project_record(session, project_key)
+                session.commit()
+
+        try:
+            self.purge_project_output_trash(project_key)
+        except MediaLibraryError:
+            LOGGER.warning(
+                "project output trash purge deferred stage=project_delete",
+                extra={"component": "controller"},
+            )
+        self._remove_empty_output_dirs(job_ids)
+        return True
 
     def reconcile_pending_deletions(self) -> int:
         with self.session_factory() as session:

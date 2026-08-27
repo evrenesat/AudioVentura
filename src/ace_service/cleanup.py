@@ -19,6 +19,7 @@ from ace_service.models import (
     JobType,
     NotificationDelivery,
     NotificationEvent,
+    ProjectDeletionAudit,
     PushSubscription,
     TransferCapability,
     TransferStatus,
@@ -45,6 +46,7 @@ class CleanupReport:
     deleted_notification_events: int = 0
     deleted_notification_subscriptions: int = 0
     reconciled_media_items: int = 0
+    reconciled_project_deletions: int = 0
 
 
 def cleanup_controller(
@@ -59,16 +61,27 @@ def cleanup_controller(
     stale_cutoff = current_time - timedelta(seconds=settings.cleanup_stale_after_seconds)
     retention_cutoff = current_time - timedelta(seconds=settings.transfer_record_retention_seconds)
     stale_part_files = _remove_stale_part_files(settings.paths.root, stale_cutoff)
+    media_service = MediaLibraryService(settings, session_factory)
     reconciled_media_items = 0
     try:
-        reconciled_media_items = MediaLibraryService(
-            settings, session_factory
-        ).reconcile_pending_deletions()
+        reconciled_media_items = media_service.reconcile_pending_deletions()
     except MediaLibraryError:
         LOGGER.warning(
             "media deletion reconciliation deferred stage=cleanup",
             extra={"component": "controller"},
         )
+    reconciled_project_deletions = 0
+    with session_factory() as session:
+        project_deletion_ids = list(session.scalars(select(ProjectDeletionAudit.project_id)))
+    for project_id in project_deletion_ids:
+        try:
+            if media_service.reconcile_project_deletion(project_id):
+                reconciled_project_deletions += 1
+        except (MediaLibraryError, ValueError):
+            LOGGER.warning(
+                "project deletion reconciliation deferred stage=cleanup",
+                extra={"component": "controller"},
+            )
     revoked = 0
     expired = 0
     deleted = 0
@@ -164,17 +177,19 @@ def cleanup_controller(
         deleted_notification_events=deleted_notification_events,
         deleted_notification_subscriptions=deleted_notification_subscriptions,
         reconciled_media_items=reconciled_media_items,
+        reconciled_project_deletions=reconciled_project_deletions,
     )
     LOGGER.info(
         "cleanup complete stage=cleanup stale_part_files=%d expired_capabilities=%d "
         "revoked_capabilities=%d deleted_capability_records=%d removed_cover_sources=%d "
-        "expired_cover_staging=%d",
+        "expired_cover_staging=%d reconciled_project_deletions=%d",
         report.stale_part_files,
         report.expired_capabilities,
         report.revoked_capabilities,
         report.deleted_capability_records,
         report.removed_cover_sources,
         report.expired_cover_staging,
+        report.reconciled_project_deletions,
         extra={"component": "controller"},
     )
     return report

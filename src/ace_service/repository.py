@@ -2084,15 +2084,16 @@ def reorder_playlist_entries(
 def publish_completed_variation_media(
     session: Session, job_id: str | UUID, variation_index: int
 ) -> list[MediaItem]:
-    """Publish verified MP3 outputs once and append only newly-created tracks."""
+    """Publish one completed variation's verified MP3 outputs exactly once."""
 
     job = get_job(session, job_id)
     if job is None:
         raise KeyError(f"unknown job: {job_id}")
-    if job.status is not JobStatus.COMPLETED:
-        return []
     if variation_index < 1 or variation_index > job.variation_count:
         raise ValueError("variation index is outside the job variation count")
+    attempt = get_variation_attempt(session, job.id, variation_index)
+    if attempt is None or attempt.status is not JobStatus.COMPLETED:
+        return []
     outputs = list(
         session.scalars(
             select(Output)

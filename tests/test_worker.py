@@ -649,6 +649,13 @@ def test_four_variations_are_serialized_and_each_gets_one_runpod_job(settings) -
             job = get_job(session, "job-four")
             assert job is not None
             assert job.status is JobStatus.COMPLETED
+            assert len(job.outputs) == 4
+            assert len(job.project.media_items) == 4
+            assert len(job.project.playlists) == 1
+            assert len(job.project.playlists[0].entries) == 4
+            assert {item.generated_output_id for item in job.project.media_items} == {
+                output.id for output in job.outputs
+            }
             attempts = [get_variation_attempt(session, job.id, index) for index in range(1, 5)]
             assert all(attempt is not None for attempt in attempts)
             assert [attempt.runpod_job_id for attempt in attempts if attempt is not None] == [

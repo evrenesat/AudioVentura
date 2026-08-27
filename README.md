@@ -37,7 +37,8 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   It intentionally has no source-upload or offline-cache feature.
 - Queued and in-flight jobs can be cancelled when the persisted provider state
   permits it. Project deletion is available only after every job is terminal;
-  it records a bounded audit summary before removing the project tree.
+  it records a bounded audit summary before path-verifying and removing the
+  project tree, including legacy and lossless output files.
 - The quality-evaluation CLI is intentionally quarantined until ordinary
   original and cover generation are stable.
 - Managed Salad and RunPod capacity use durable database leases. Browser

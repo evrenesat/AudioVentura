@@ -35,12 +35,15 @@ from ace_service.providers.base import (
 )
 from ace_service.providers.registry import BackendRegistry
 from ace_service.repository import (
+    complete_variation_attempt,
     create_original_job,
     create_output,
     finalize_job_cancellation,
     get_job,
+    prepare_variation_submission,
     publish_completed_variation_media,
     transition_job,
+    transition_variation_attempt,
 )
 from ace_service.schemas import OriginalSongRequest
 
@@ -214,7 +217,8 @@ def _seed_track(
             OriginalSongRequest(description=description),
             job_id=job_id,
         )
-        job.status = JobStatus.COMPLETED
+        _, attempt, _ = prepare_variation_submission(session, job.id, 1)
+        transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
         create_output(
             session,
             job_id=job.id,
@@ -225,6 +229,7 @@ def _seed_track(
             byte_size=len(payload),
             sha256=hashlib.sha256(payload).hexdigest(),
         )
+        complete_variation_attempt(session, attempt.id)
         session.commit()
         published = publish_completed_variation_media(session, job.id, 1)
         session.commit()

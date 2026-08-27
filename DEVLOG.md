@@ -25,6 +25,13 @@
   (10); the broad product/worker run passed 593 tests and failed only the 96
   tests gated by the expired private quality fixture.
 
+Review follow-up corrected two material gaps in this foundation: each
+variation now publishes after its own completed attempt, and project deletion
+now path-verifies and quarantines un-published legacy or lossless output files
+before deleting the project row. Deterministic project trash plus the deletion
+audit makes partial moves retryable and startup-convergent; no paid generation
+was used for the correction.
+
 ## 2026-08-26 (fal.ai ACE-Step and MiniMax Music 3)
 
 - Enabled the reviewed ACE-Step and MiniMax Music 3 Original contracts with

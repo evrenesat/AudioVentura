@@ -91,14 +91,12 @@ from ace_service.repository import (
     create_project_deletion_audit,
     create_submission_quote,
     delete_playlist,
-    delete_project_record,
     finalize_cover_job_duration,
     get_job,
     get_keep_warm_seconds,
     get_latest_gpu_rates,
     get_matching_runtime_calibration,
     get_media_file,
-    get_media_item,
     get_output,
     get_playlist,
     get_project,
@@ -109,7 +107,6 @@ from ace_service.repository import (
     list_playlists,
     list_project_jobs,
     list_projects,
-    mark_media_item_deletion_pending,
     project_is_deletable,
     query_media_library,
     recent_completed_attempt_execution_ms,
@@ -1616,37 +1613,16 @@ def register_web_routes(app: FastAPI) -> None:
                 raise HTTPException(status_code=409, detail="project has active jobs")
             if fields.get("confirm_title", "") != project.title:
                 raise HTTPException(status_code=422, detail="type the current project title")
-            item_ids = [item.id for item in project.media_items]
             create_project_deletion_audit(session, project.id)
             session.commit()
         service = MediaLibraryService(app.state.settings, app.state.session_factory)
         try:
-            for item_id in item_ids:
-                with app.state.session_factory() as session:
-                    item = get_media_item(session, item_id)
-                    if item is None or item.deletion_state is MediaDeletionState.DELETED:
-                        continue
-                    mark_media_item_deletion_pending(session, item.id)
-                    session.commit()
-                service.reconcile_item_deletion(item_id)
+            service.reconcile_project_deletion(project_id)
         except (MediaLibraryError, ValueError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="project audio deletion is pending; retry after cleanup converges",
             ) from exc
-        with app.state.session_factory() as session:
-            remaining = list(
-                session.scalars(
-                    select(MediaItem).where(
-                        MediaItem.project_id == project_id,
-                        MediaItem.deletion_state != MediaDeletionState.DELETED,
-                    )
-                )
-            )
-            if remaining:
-                raise HTTPException(status_code=503, detail="project media deletion is incomplete")
-            delete_project_record(session, project_id)
-            session.commit()
         _remove_empty_project_dirs(app.state.settings, project_id)
         return RedirectResponse(
             _route_path(request, "projects"), status_code=status.HTTP_303_SEE_OTHER

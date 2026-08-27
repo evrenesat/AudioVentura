@@ -8,11 +8,14 @@ from ace_service.media_library import MediaLibraryError, MediaLibraryService, ve
 from ace_service.models import JobStatus, MediaDeletionState, MediaFileState, OutputFormat
 from ace_service.repository import (
     MediaLibraryQuery,
+    complete_variation_attempt,
     create_original_job,
     create_output,
     get_media_item,
+    prepare_variation_submission,
     publish_completed_variation_media,
     query_media_library,
+    transition_variation_attempt,
 )
 from ace_service.schemas import OriginalSongRequest
 
@@ -23,7 +26,8 @@ def _publish_track(session, settings, *, job_id: str, title: str = "A song"):
         OriginalSongRequest(description=f"ambient composition {job_id.replace('second', 'beta')}"),
         job_id=job_id,
     )
-    job.status = JobStatus.COMPLETED
+    _, attempt, _ = prepare_variation_submission(session, job.id, 1)
+    transition_variation_attempt(session, attempt.id, JobStatus.GENERATING)
     payload = f"valid mp3 for {job_id}".encode()
     relative_path = f"{job.id}/variation-01.mp3"
     path = settings.paths.outputs / relative_path
@@ -39,6 +43,7 @@ def _publish_track(session, settings, *, job_id: str, title: str = "A song"):
         byte_size=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
     )
+    complete_variation_attempt(session, attempt.id)
     session.commit()
     published = publish_completed_variation_media(session, job.id, 1)
     session.commit()
