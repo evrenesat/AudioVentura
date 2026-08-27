@@ -105,7 +105,9 @@ from the repository.
 Important groups are:
 
 - `ACE_SERVICE_*`: controller bind address, data root, authentication, and
-  public hostname;
+  public hostname. `ACE_SERVICE_INCOMING_DIRECTORY_MODE` defaults to `0700`;
+  the isolated beta controller sets it to `0770` for its restricted SFTP
+  group while keeping the data root and all other directories private;
 - `ACE_TRANSFER_*`: public signed-transfer origin, limits, and token lifetime;
 - `ACE_HOME_INGEST_*`: private Home Ingest endpoint and bearer token;
 - `MOCK_BASE_URL`, `MOCK_TOKEN`, `MOCK_POLL_INTERVAL_SECONDS`, and

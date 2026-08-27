@@ -28,6 +28,25 @@ def test_settings_resolve_and_create_private_layout(tmp_path: Path) -> None:
     assert all(path.is_dir() for path in paths.all_directories)
     assert paths.database.parent == settings.data_root
     assert (paths.root.stat().st_mode & 0o777) == 0o700
+    assert (paths.incoming.stat().st_mode & 0o777) == 0o700
+
+
+def test_incoming_directory_mode_can_allow_the_restricted_sftp_group(tmp_path: Path) -> None:
+    settings = ServiceSettings(**_settings_kwargs(tmp_path), incoming_directory_mode="0770")
+
+    paths = settings.ensure_data_layout()
+
+    assert settings.incoming_directory_mode == "0770"
+    assert (paths.root.stat().st_mode & 0o777) == 0o700
+    assert (paths.incoming.stat().st_mode & 0o777) == 0o770
+
+
+@pytest.mark.parametrize("mode", ("0777", "0702", "700", "not-octal"))
+def test_incoming_directory_mode_rejects_world_access_or_invalid_octal(
+    mode: str, tmp_path: Path
+) -> None:
+    with pytest.raises(ValidationError, match="INCOMING_DIRECTORY_MODE"):
+        ServiceSettings(**_settings_kwargs(tmp_path), incoming_directory_mode=mode)
 
 
 @pytest.mark.parametrize(

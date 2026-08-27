@@ -128,6 +128,11 @@ ACE_HOME_INGEST_TOKEN
 INFERENCE_PROVIDER
 ```
 
+Keep `ACE_SERVICE_INCOMING_DIRECTORY_MODE=0700` for normal deployments. The
+isolated beta controller sets it to `0770` so its restricted SFTP group can
+deliver into `incoming/`; the controller data root and all other directories
+remain private.
+
 For Runpod, also set `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID`. For Salad, set
 `SALAD_API_KEY`, `SALAD_ORGANIZATION`, `SALAD_PROJECT`, and the tracked queue
 and container-group names. Keep credentials for any provider that still owns a

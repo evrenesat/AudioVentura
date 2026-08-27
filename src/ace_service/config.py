@@ -115,6 +115,12 @@ class ServiceSettings(BaseSettings):
         default=Path("/srv/ace-service/data"),
         validation_alias=AliasChoices("ACE_SERVICE_DATA_ROOT", "data_root"),
     )
+    incoming_directory_mode: str = Field(
+        default="0700",
+        validation_alias=AliasChoices(
+            "ACE_SERVICE_INCOMING_DIRECTORY_MODE", "incoming_directory_mode"
+        ),
+    )
     host: str = Field(
         default="127.0.0.1", validation_alias=AliasChoices("ACE_SERVICE_HOST", "host")
     )
@@ -623,6 +629,22 @@ class ServiceSettings(BaseSettings):
             raise ValueError("service root path must be empty or a normalized absolute path prefix")
         return value
 
+    @field_validator("incoming_directory_mode")
+    @classmethod
+    def validate_incoming_directory_mode(cls, value: str) -> str:
+        normalized = value.strip()
+        if (
+            len(normalized) != 4
+            or normalized[0] != "0"
+            or any(character not in "01234567" for character in normalized)
+            or int(normalized, 8) & 0o007
+        ):
+            raise ValueError(
+                "ACE_SERVICE_INCOMING_DIRECTORY_MODE must be a four-digit octal mode "
+                "without world access"
+            )
+        return normalized
+
     @field_validator("runpod_worker_runtime_identity")
     @classmethod
     def validate_runpod_worker_runtime_identity(cls, value: str | None) -> str | None:
@@ -891,9 +913,10 @@ class ServiceSettings(BaseSettings):
 
         paths = self.paths
         for directory in paths.all_directories:
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            mode = int(self.incoming_directory_mode, 8) if directory == paths.incoming else 0o700
+            directory.mkdir(parents=True, exist_ok=True, mode=mode)
             try:
-                directory.chmod(0o700)
+                directory.chmod(mode)
             except (NotImplementedError, PermissionError):
                 pass
         return paths
