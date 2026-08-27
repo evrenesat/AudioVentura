@@ -1,5 +1,30 @@
 # Development Log
 
+## 2026-08-27 (media library, playlists, and persistent player foundation)
+
+- Advanced the controller schema to v10 with generated media items/files,
+  automatic project playlists, editable custom playlists, crash-recoverable
+  deletion, bounded project-deletion audits, and durable cancellation outcomes.
+  Existing experimental outputs remain readable through legacy history and are
+  deliberately not backfilled into the new library.
+- Published only verified MP3 completions at the worker completion seam. Added
+  authenticated library/playlist/queue/media routes and one persistent online
+  player that survives root-path-aware soft navigation and reload. Source
+  uploads, retained source tracks, MP3 derivatives, service workers, and
+  offline caching remain deferred.
+- Added Chromium and Playwright Firefox browser coverage for library and
+  playlist editing, duplicate entries, player controls, mobile layout,
+  deletion, cancellation, and `/beta` root-path routing. Browser collection is
+  ordered after asyncio-based tests because the official sync Playwright
+  fixture owns a dispatcher loop for the session.
+- Added an isolated beta deployment contract in evreniops: controller 8010,
+  transfer 8011, `/beta` and `/beta-transfer`, separate data/config/rollback
+  state, no capacity or Web Push management, and closed beta Home Ingest.
+- Evidence so far: v9-to-v10 disposable rehearsal reached
+  `exact_expected`; focused controller tests passed (166), browser E2E passed
+  (10); the broad product/worker run passed 593 tests and failed only the 96
+  tests gated by the expired private quality fixture.
+
 ## 2026-08-26 (fal.ai ACE-Step and MiniMax Music 3)
 
 - Enabled the reviewed ACE-Step and MiniMax Music 3 Original contracts with

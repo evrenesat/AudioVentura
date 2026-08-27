@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}ACE Service{% endblock %}</title>
+    <title>{% block title %}AudioVentura{% endblock %}</title>
     <meta name="csrf-token" content="{{ csrf_token }}">
     <meta name="notifications-config" content="{{ urls.notifications_config }}">
     <meta name="notifications-subscriptions" content="{{ urls.notifications_subscriptions }}">
@@ -13,20 +13,24 @@
   <body>
     <header class="site-header">
       <a class="brand" href="{{ urls.dashboard }}">AudioVentura</a>
-      <nav aria-label="Main navigation">
-        <a href="{{ urls.create }}">Original</a>
-        <a href="{{ urls.cover }}">Cover</a>
-        <a href="{{ urls.projects }}">Projects</a>
-        <a href="{{ urls.jobs }}">History</a>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <a data-app-nav href="{{ urls.dashboard }}">Home</a>
+        <a data-app-nav href="{{ urls.create }}">Create</a>
+        <a data-app-nav href="{{ urls.library }}">Library</a>
+        <a data-app-nav href="{{ urls.playlists }}">Playlists</a>
+        <a data-app-nav href="{{ urls.projects }}">Projects</a>
       </nav>
       <div class="notification-control">
         <button class="button secondary" type="button" data-notifications-enable>Enable notifications</button>
         <span class="hint" data-notifications-status>Unavailable</span>
       </div>
     </header>
-    <main class="container">
+    <main id="app-main" class="container">
       {% block content %}{% endblock %}
     </main>
+    {% include "_player.html" %}
     <script src="{{ urls.notifications_js }}" defer></script>
+    <script src="{{ urls.player_js }}" defer></script>
+    <script src="{{ urls.app_shell_js }}" defer></script>
   </body>
 </html>

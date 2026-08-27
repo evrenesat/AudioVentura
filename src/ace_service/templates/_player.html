@@ -1,0 +1,29 @@
+{% from "_icons.html" import icon %}
+<aside class="persistent-player" data-persistent-player aria-label="Audio player">
+  <audio id="global-audio" preload="metadata"></audio>
+  <div class="player-inner">
+    <div class="player-now-playing">
+      <span class="eyebrow">Now playing</span>
+      <strong data-player-title>Nothing selected</strong>
+      <span class="muted" data-player-project></span>
+    </div>
+    <div class="player-controls" role="group" aria-label="Playback controls">
+      <button class="icon-button" type="button" data-player-control="previous" aria-label="Previous track" title="Previous">{{ icon("previous") }}</button>
+      <button class="icon-button primary-control" type="button" data-player-control="play" aria-label="Play" title="Play">{{ icon("play") }}</button>
+      <button class="icon-button" type="button" data-player-control="next" aria-label="Next track" title="Next">{{ icon("next") }}</button>
+      <button class="icon-button" type="button" data-player-control="shuffle" aria-label="Toggle shuffle" title="Shuffle" aria-pressed="false">{{ icon("shuffle") }}</button>
+      <button class="icon-button" type="button" data-player-control="repeat" aria-label="Repeat mode: off" title="Repeat mode: off" aria-pressed="false">{{ icon("repeat") }}</button>
+      <label class="player-rate">Speed
+        <select data-player-control="rate" aria-label="Playback speed">
+          <option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+        </select>
+      </label>
+    </div>
+    <div class="player-progress">
+      <span data-player-current>0:00</span>
+      <input type="range" min="0" max="0" step="0.1" value="0" data-player-control="seek" aria-label="Seek through track">
+      <span data-player-duration>0:00</span>
+    </div>
+    <p class="player-announcement" aria-live="polite" data-player-announcement></p>
+  </div>
+</aside>

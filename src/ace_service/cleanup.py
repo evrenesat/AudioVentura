@@ -12,6 +12,7 @@ from sqlalchemy import select
 from ace_service.config import ServiceSettings
 from ace_service.cover import remove_cover_source
 from ace_service.db import SessionFactory
+from ace_service.media_library import MediaLibraryError, MediaLibraryService
 from ace_service.models import (
     Job,
     JobStatus,
@@ -25,7 +26,7 @@ from ace_service.models import (
 from ace_service.repository import revoke_active_transfers, transition_job
 
 LOGGER = logging.getLogger(__name__)
-_TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
+_TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 _RETAINABLE_TRANSFER_STATUSES = frozenset(
     {TransferStatus.CONSUMED, TransferStatus.EXPIRED, TransferStatus.REVOKED}
 )
@@ -43,6 +44,7 @@ class CleanupReport:
     expired_cover_staging: int = 0
     deleted_notification_events: int = 0
     deleted_notification_subscriptions: int = 0
+    reconciled_media_items: int = 0
 
 
 def cleanup_controller(
@@ -57,6 +59,16 @@ def cleanup_controller(
     stale_cutoff = current_time - timedelta(seconds=settings.cleanup_stale_after_seconds)
     retention_cutoff = current_time - timedelta(seconds=settings.transfer_record_retention_seconds)
     stale_part_files = _remove_stale_part_files(settings.paths.root, stale_cutoff)
+    reconciled_media_items = 0
+    try:
+        reconciled_media_items = MediaLibraryService(
+            settings, session_factory
+        ).reconcile_pending_deletions()
+    except MediaLibraryError:
+        LOGGER.warning(
+            "media deletion reconciliation deferred stage=cleanup",
+            extra={"component": "controller"},
+        )
     revoked = 0
     expired = 0
     deleted = 0
@@ -151,6 +163,7 @@ def cleanup_controller(
         expired_cover_staging=expired_staging,
         deleted_notification_events=deleted_notification_events,
         deleted_notification_subscriptions=deleted_notification_subscriptions,
+        reconciled_media_items=reconciled_media_items,
     )
     LOGGER.info(
         "cleanup complete stage=cleanup stale_part_files=%d expired_capabilities=%d "

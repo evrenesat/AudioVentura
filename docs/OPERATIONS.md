@@ -17,6 +17,49 @@ The normal deployment uses:
 Application code and deployment configuration are separate. Do not store
 secrets, database files, generated audio, or logs in the checkout.
 
+## Isolated beta
+
+The media-library/player foundation is deployed first to the isolated beta
+surface managed in the evreniops repository. Beta uses a separate release
+link, systemd units, environment file, data root, database, media/trash tree,
+and rollback snapshot:
+
+| Surface | Beta | Production |
+| --- | --- | --- |
+| Controller | `127.0.0.1:8010`, `https://player.evren.io/beta/` | `127.0.0.1:8000` |
+| Transfer | `127.0.0.1:8011`, `/beta-transfer/transfer/v1/{source\|output}/<token>` | `127.0.0.1:8001` |
+| Data | `/srv/ace-service-beta/data` | `/srv/ace-service/data` |
+| Config | `/etc/audioventura/beta.env` | `/etc/audioventura/controller.env` |
+
+Run the beta playbook from the managed evreniops checkout only after the
+product commit is pinned in that playbook. It snapshots the beta database and
+runtime definitions once per deploy, runs the explicit migration, activates
+the immutable release atomically, and reloads nginx only after configuration
+validation. It never stops or rewrites the production services. Beta enables
+only the reviewed bounded Fal smoke path, disables capacity fingerprints and
+Web Push, and points Home Ingest to a closed local port so source ingestion
+fails safely.
+
+```text
+cd /root/code/evreniops/infra/ansible
+./ops deploy-audioventura-beta -e audioventura_beta_mode=deploy
+./ops deploy-audioventura-beta -e audioventura_beta_mode=verify
+```
+
+If beta activation fails, the playbook restores its recorded snapshot. For an
+operator-selected rollback, use the exact snapshot path printed by the deploy
+and keep production untouched:
+
+```text
+./ops deploy-audioventura-beta -e audioventura_beta_mode=rollback \
+  -e audioventura_beta_rollback_snapshot=/opt/audioventura/beta-rollback/<UTC-snapshot>
+```
+
+The beta URL, deployed product revision, deployment-repository revision, and
+verification result belong in the handoff record. Never call the beta result
+production approval; production requires a separate explicit approval after
+manual beta testing.
+
 ## Controller installation
 
 Create the data root with private ownership and install the locked environment:
@@ -172,6 +215,20 @@ uv run python -m ace_service migrate-upgrade \
 The upgrade uses a sidecar lock and durable attempt marker. If it reports an
 incomplete or failed migration, do not retry it. Restore the verified backup.
 
+Schema v10 adds the media library, playlist entries, project-deletion audit,
+and durable cancellation state. Existing generated outputs remain outside the
+library until a new verified completion is published; this avoids an
+unreviewed historical media backfill. Before deploying a v10 revision, run a
+disposable v9-to-v10 rehearsal and confirm both the pre-upgrade status and the
+post-upgrade `exact_expected` status. Keep the backup and the database on the
+same recovery record.
+
+For the media tree, verify `outputs/`, `library/`, and `trash/` are all below
+the configured data root. A pending media deletion may be reconciled by
+cleanup; purge is allowed only after the database state and trash path agree.
+Do not manually remove an active library file or bypass the repository
+deletion transition.
+
 Before rolling a schema-2 deployment back to a schema-1 controller, run:
 
 ```text
@@ -207,9 +264,12 @@ Controller cleanup runs at startup and on a configured interval. It may:
 - expire or revoke transfer capabilities;
 - prune old capability records;
 - remove non-retained terminal cover sources.
+- reconcile pending/deleted library items and purge only their deterministic
+  trash paths after the delayed deletion policy permits it.
 
-It never removes completed outputs. Generated audio currently requires manual
-operator retention decisions.
+It never removes active completed outputs. A deleted library item remains
+represented as a tombstone in job/project history, while its media file is
+removed only through the private trash reconciliation path.
 
 Logs rotate under the data root with private permissions and UTC timestamps.
 They contain bounded job, phase, error-code, timing, and byte-count metadata.
@@ -256,6 +316,22 @@ For covers, also verify Home Ingest, source size/hash validation, signed source
 download, and source cleanup. Keep source URLs and capability URLs out of the
 record.
 
+For the media-library/player beta, use the disposable browser gate before the
+protected live smoke:
+
+```text
+uv run playwright install --with-deps chromium firefox
+uv run pytest -q tests/e2e --browser chromium --browser firefox
+```
+
+Then run the protected beta foundation smoke with an explicit paid-work
+allowance and a maximum of one submission. It must verify the beta URL,
+authenticated playback/download and range behavior, library publication,
+playlist queue JSON, byte/hash evidence, and the post-job budget state. Keep
+the smoke result free of credentials, capability tokens, provider response
+bodies, prompts, and lyrics. A resume-only invocation may recheck an existing
+job without submitting another paid job.
+
 The optional paid browser smoke in `tests/live_paid_ui_e2e.py` is excluded from
 normal test discovery. It requires protected credentials and an explicit
 `--allow-paid` flag. Do not run it as a routine test.
@@ -273,6 +349,7 @@ From the repository root:
 
 ```text
 uv run pytest -q tests runpod_worker/tests
+uv run pytest -q tests/e2e --browser chromium --browser firefox
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src runpod_worker

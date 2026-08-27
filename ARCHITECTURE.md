@@ -64,7 +64,10 @@ The controller:
 - prepares provider-neutral inference requests;
 - polls the provider that owns each persisted attempt;
 - verifies worker metadata against the uploaded output;
-- exposes completed audio only through authenticated media routes.
+- publishes verified MP3 variations into the media library;
+- exposes completed audio only through authenticated media routes;
+- serves the library, playlist, player, and cancellation views without
+  exposing provider payloads or audio bytes in JSON.
 
 One process-level lock protects a data root from two controller workers. One
 in-process queue serializes jobs and variations. This is a personal service,
@@ -136,15 +139,54 @@ created by a completed variation.
 The main job states are:
 
 ```text
-original: queued -> cloud_queued -> generating -> completed | failed
+original: queued -> cloud_queued -> generating -> completed | failed | cancelled
 
 cover:    queued -> ingesting -> staging
-                -> cloud_queued -> generating -> completed | failed
+                -> cloud_queued -> generating -> completed | failed | cancelled
 ```
 
 One to four variations run sequentially. A supplied seed advances
 deterministically for later variations. Status shown in the UI is evidence,
 not a control signal.
+
+Cancellation is a persisted request, not a browser-side assumption. The
+controller records the request before the worker examines it, then records one
+of the bounded outcomes `cancelled`, `too_late`, `unsupported`, or `failed`.
+The worker checks before submission and at external-await boundaries; provider
+cancellation is attempted only by the worker that owns the persisted provider
+reference. A too-late result leaves the job running, while a confirmed
+cancellation is terminal and never enters the publication seam.
+
+## Media library and playlists
+
+`MediaItem` is the user-facing identity of a generated track and
+`MediaFile` is its verified playable representation. A media item belongs to
+one project and one generated output, while a playlist entry belongs to one
+playlist and references a media item. The project relationship uses database
+cascade semantics; the repository removes dependent entries and library rows
+before deleting a project so SQLite checks cannot expose a half-deleted
+generated-output reference.
+
+Only a completed variation with a verified, positive-size MP3 output is
+published. Publication is idempotent by generated-output identity and creates
+the generated auto-playlist entry in the same repository operation. Existing
+outputs are not backfilled merely because schema v10 is installed. Custom
+playlists preserve explicit positions, reject duplicate entries, and use a
+two-phase reorder when moving an item across positions.
+
+Library playback and download resolve a database media-file ID, verify the
+active file is below the configured library root, reject symlink components,
+and recheck extension, MIME type, size, and SHA-256 before streaming. Deletion
+first marks the item pending, atomically moves its file below the private trash
+root, and then marks it deleted. Startup cleanup reconciles pending/deleted
+rows and purges only after the repository state permits it; the UI renders a
+deleted-output tombstone rather than a stale playback link.
+
+The browser shell keeps one `<audio>` element in the persistent layout. Its
+queue is filled from safe same-origin media metadata, not provider responses,
+and its state is held in browser storage across soft navigation and reload.
+There is deliberately no source upload through the library, no audio bytes in
+queue JSON, and no offline media cache.
 
 ## Provider boundary
 
@@ -281,14 +323,21 @@ prompts, lyrics, and keys never enter durable logs or the browser.
 ## Persistence and migrations
 
 SQLite is the source of truth for projects, jobs, attempts, outputs,
-capabilities, and retained historical cost records. Files and database state
-must live on the same durable deployment data root and be backed up together.
+capabilities, media items/files, playlists, deletion audits, and retained
+historical cost records. Files and database state must live on the same
+durable deployment data root and be backed up together.
 
 Schema changes use explicit ordered migrations. Application startup refuses
 an existing database that is not at the exact expected schema. It never
 silently upgrades production data. A migration failure leaves a durable
 incomplete marker; recovery is by restoring the verified pre-upgrade backup,
 not retrying the partial upgrade.
+
+Schema v10 adds the library, playlist, project-deletion, and cancellation
+columns/tables without changing existing output rows into library rows. The
+migration validates generated-item and cancellation invariants with SQLite
+constraints/triggers; publication remains an application-level seam because
+it requires verified output evidence and an idempotent generated-output key.
 
 The quality campaign uses a separate private database and fixture. Its CLI and
 ordinary-submission maintenance gate are currently quarantined. The campaign
@@ -302,9 +351,13 @@ recovery, and evaluation contracts are still tested.
 - Secrets stay in deployment configuration and are redacted from logs.
 - Capability-bearing paths are not written to application or proxy access
   logs.
-- Paths are resolved below configured roots and symlink traversal fails closed.
-- Cleanup may remove expired capabilities, stale partial files, and temporary
-  cover sources. It never removes completed outputs.
+- Paths are resolved below configured roots and symlink traversal fails closed;
+  library playback applies the same checks to its database-selected file.
+- Library deletion is a state machine (`active -> pending -> deleted`) with a
+  private, mode-restricted trash location and delayed purge reconciliation.
+- Cleanup may remove expired capabilities, stale partial files, temporary
+  cover sources, and eligible library-trash files. It never silently removes
+  an active completed output.
 - A malformed provider response, missing evidence, unknown state, or stale
   migration is an error. The system does not infer success or safe teardown.
 

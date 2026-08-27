@@ -224,6 +224,11 @@ class TestUpgrade:
             "notification_events",
             "push_subscriptions",
             "notification_deliveries",
+            "media_items",
+            "media_files",
+            "playlists",
+            "playlist_entries",
+            "project_deletion_audits",
         }
         assert _tables(legacy_database_path) == expected_tables
         assert {

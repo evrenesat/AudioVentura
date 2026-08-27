@@ -6,6 +6,8 @@
   const select = document.querySelector("#variation_count");
   const textNode = document.querySelector("#estimate-request-text");
   if (!select || !textNode) return;
+  if (select.dataset.estimateSelectorBound === "true") return;
+  select.dataset.estimateSelectorBound = "true";
   const update = () => {
     const option = select.options[select.selectedIndex];
     const text = option ? option.getAttribute("data-request-text") : null;

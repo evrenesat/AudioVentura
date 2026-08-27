@@ -3,6 +3,8 @@
 
   const select = document.querySelector("#backend");
   if (!select) return;
+  if (select.dataset.backendSelectorBound === "true") return;
+  select.dataset.backendSelectorBound = "true";
 
   let choices = [];
   try {

@@ -12,25 +12,29 @@ from typing import TextIO
 from ace_service.models import JobStatus
 
 ALLOWED_JOB_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
-    JobStatus.QUEUED: frozenset({JobStatus.INGESTING, JobStatus.CLOUD_QUEUED, JobStatus.FAILED}),
-    JobStatus.INGESTING: frozenset({JobStatus.STAGING, JobStatus.FAILED}),
-    JobStatus.STAGING: frozenset({JobStatus.CLOUD_QUEUED, JobStatus.FAILED}),
-    JobStatus.CLOUD_QUEUED: frozenset(
-        {JobStatus.GENERATING, JobStatus.COMPLETED, JobStatus.FAILED}
+    JobStatus.QUEUED: frozenset(
+        {JobStatus.INGESTING, JobStatus.CLOUD_QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),
-    JobStatus.GENERATING: frozenset({JobStatus.COMPLETED, JobStatus.FAILED}),
+    JobStatus.INGESTING: frozenset({JobStatus.STAGING, JobStatus.FAILED, JobStatus.CANCELLED}),
+    JobStatus.STAGING: frozenset({JobStatus.CLOUD_QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}),
+    JobStatus.CLOUD_QUEUED: frozenset(
+        {JobStatus.GENERATING, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+    ),
+    JobStatus.GENERATING: frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}),
     JobStatus.COMPLETED: frozenset(),
     JobStatus.FAILED: frozenset(),
+    JobStatus.CANCELLED: frozenset(),
 }
 
 ALLOWED_VARIATION_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
-    JobStatus.QUEUED: frozenset({JobStatus.CLOUD_QUEUED, JobStatus.FAILED}),
+    JobStatus.QUEUED: frozenset({JobStatus.CLOUD_QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}),
     JobStatus.CLOUD_QUEUED: frozenset(
-        {JobStatus.GENERATING, JobStatus.COMPLETED, JobStatus.FAILED}
+        {JobStatus.GENERATING, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),
-    JobStatus.GENERATING: frozenset({JobStatus.COMPLETED, JobStatus.FAILED}),
+    JobStatus.GENERATING: frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}),
     JobStatus.COMPLETED: frozenset(),
     JobStatus.FAILED: frozenset(),
+    JobStatus.CANCELLED: frozenset(),
 }
 
 

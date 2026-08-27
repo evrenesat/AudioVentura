@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -582,6 +582,105 @@ def _cp9_ddl(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _cp10_ddl(connection: sqlite3.Connection) -> None:
+    """Add the media-library, playlist, deletion-audit, and cancel state tables."""
+
+    job_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+    for name, declaration in {
+        "cancel_requested_at": "DATETIME",
+        "cancel_completed_at": "DATETIME",
+        "cancel_outcome": "VARCHAR(16)",
+    }.items():
+        if name not in job_columns:
+            connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS media_items ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "project_id VARCHAR(36) NOT NULL REFERENCES projects(id) ON DELETE CASCADE, "
+        "generated_output_id INTEGER UNIQUE REFERENCES outputs(id) ON DELETE SET NULL, "
+        "kind VARCHAR(16) NOT NULL DEFAULT 'generated', "
+        "title VARCHAR(300) NOT NULL, "
+        "duration_seconds REAL, "
+        "deletion_state VARCHAR(16) NOT NULL DEFAULT 'active', "
+        "deletion_requested_at DATETIME, deleted_at DATETIME, "
+        "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+        "CHECK (kind IN ('generated', 'source')), "
+        "CHECK (kind = 'source' OR generated_output_id IS NOT NULL), "
+        "CHECK (deletion_state IN ('active', 'pending', 'deleted')), "
+        "CHECK (duration_seconds IS NULL OR (duration_seconds > 0 AND "
+        "duration_seconds = duration_seconds)))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS media_files ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "media_item_id VARCHAR(36) NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "storage_namespace VARCHAR(16) NOT NULL DEFAULT 'outputs', "
+        "format VARCHAR(8) NOT NULL, relative_path VARCHAR(1024) NOT NULL, "
+        "mime_type VARCHAR(128) NOT NULL, byte_size INTEGER NOT NULL, "
+        "sha256 VARCHAR(64) NOT NULL, is_playback INTEGER NOT NULL DEFAULT 0, "
+        "is_primary_download INTEGER NOT NULL DEFAULT 0, "
+        "state VARCHAR(16) NOT NULL DEFAULT 'active', "
+        "quarantine_relative_path VARCHAR(1024), deleted_at DATETIME, purged_at DATETIME, "
+        "created_at DATETIME NOT NULL, UNIQUE (media_item_id, format), "
+        "CHECK (storage_namespace IN ('outputs', 'library')), "
+        "CHECK (format IN ('mp3', 'flac', 'wav')), "
+        "CHECK (state IN ('active', 'quarantined', 'purged')), "
+        "CHECK (byte_size > 0), CHECK (is_playback IN (0, 1)), "
+        "CHECK (is_primary_download IN (0, 1)))"
+    )
+    connection.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_jobs_cancel_outcome_insert "
+        "BEFORE INSERT ON jobs FOR EACH ROW WHEN NEW.cancel_outcome IS NOT NULL "
+        "AND NEW.cancel_outcome NOT IN ('cancelled', 'too_late', 'unsupported') "
+        "BEGIN SELECT RAISE(ABORT, 'invalid cancellation outcome'); END"
+    )
+    connection.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_jobs_cancel_outcome_update "
+        "BEFORE UPDATE OF cancel_outcome ON jobs FOR EACH ROW WHEN NEW.cancel_outcome IS NOT NULL "
+        "AND NEW.cancel_outcome NOT IN ('cancelled', 'too_late', 'unsupported') "
+        "BEGIN SELECT RAISE(ABORT, 'invalid cancellation outcome'); END"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS playlists ("
+        "id VARCHAR(36) PRIMARY KEY, kind VARCHAR(16) NOT NULL, "
+        "project_id VARCHAR(36) REFERENCES projects(id) ON DELETE CASCADE, "
+        "title VARCHAR(160) NOT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+        "UNIQUE (project_id), CHECK (kind IN ('project', 'custom')), "
+        "CHECK ((kind = 'project' AND project_id IS NOT NULL) OR "
+        "(kind = 'custom' AND project_id IS NULL)))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS playlist_entries ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "playlist_id VARCHAR(36) NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, "
+        "media_item_id VARCHAR(36) NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "position INTEGER NOT NULL, created_at DATETIME NOT NULL, "
+        "UNIQUE (playlist_id, position))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS project_deletion_audits ("
+        "id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL UNIQUE, "
+        "job_count INTEGER NOT NULL, media_item_count INTEGER NOT NULL, "
+        "provider_summary_json JSON NOT NULL, cost_summary_json JSON, "
+        "project_created_at DATETIME NOT NULL, deleted_at DATETIME NOT NULL)"
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_media_items_project_id ON media_items (project_id)",
+        "CREATE INDEX IF NOT EXISTS ix_media_items_generated_output_id "
+        "ON media_items (generated_output_id)",
+        "CREATE INDEX IF NOT EXISTS ix_media_files_media_item_id ON media_files (media_item_id)",
+        "CREATE INDEX IF NOT EXISTS ix_playlists_project_id ON playlists (project_id)",
+        "CREATE INDEX IF NOT EXISTS ix_playlist_entries_playlist_id "
+        "ON playlist_entries (playlist_id)",
+        "CREATE INDEX IF NOT EXISTS ix_playlist_entries_media_item_id "
+        "ON playlist_entries (media_item_id)",
+        "CREATE INDEX IF NOT EXISTS ix_project_deletion_audits_project_id "
+        "ON project_deletion_audits (project_id)",
+    ):
+        connection.execute(statement)
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
@@ -599,6 +698,11 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
         "notification_events",
         "push_subscriptions",
         "notification_deliveries",
+        "media_items",
+        "media_files",
+        "playlists",
+        "playlist_entries",
+        "project_deletion_audits",
     }
     tables = {
         str(row[0])
@@ -648,6 +752,9 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
                 "backend_snapshot_json",
                 "current_provider_job_id",
                 "provider_result_json",
+                "cancel_requested_at",
+                "cancel_completed_at",
+                "cancel_outcome",
             },
             "variation_attempts": {
                 "inference_provider",
@@ -656,6 +763,54 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
                 "provider_result_json",
             },
             "outputs": {"inference_provider", "inference_backend", "provider_job_id"},
+            "media_items": {
+                "id",
+                "project_id",
+                "generated_output_id",
+                "kind",
+                "title",
+                "duration_seconds",
+                "deletion_state",
+                "deletion_requested_at",
+                "deleted_at",
+                "created_at",
+                "updated_at",
+            },
+            "media_files": {
+                "id",
+                "media_item_id",
+                "storage_namespace",
+                "format",
+                "relative_path",
+                "mime_type",
+                "byte_size",
+                "sha256",
+                "is_playback",
+                "is_primary_download",
+                "state",
+                "quarantine_relative_path",
+                "deleted_at",
+                "purged_at",
+                "created_at",
+            },
+            "playlists": {"id", "kind", "project_id", "title", "created_at", "updated_at"},
+            "playlist_entries": {
+                "id",
+                "playlist_id",
+                "media_item_id",
+                "position",
+                "created_at",
+            },
+            "project_deletion_audits": {
+                "id",
+                "project_id",
+                "job_count",
+                "media_item_count",
+                "provider_summary_json",
+                "cost_summary_json",
+                "project_created_at",
+                "deleted_at",
+            },
         }
     )
     for table_name, required in required_table_columns.items():
@@ -778,6 +933,19 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     } - existing_columns
     if missing_columns:
         raise MigrationError(f"migrated schema is missing columns: {sorted(missing_columns)}")
+    invalid_media = connection.execute(
+        "SELECT COUNT(*) FROM media_items WHERE trim(title) = '' "
+        "OR length(title) > 300 OR kind NOT IN ('generated', 'source') "
+        "OR deletion_state NOT IN ('active', 'pending', 'deleted')"
+    ).fetchone()
+    if invalid_media is None or int(invalid_media[0]) != 0:
+        raise MigrationError("migrated schema contains invalid media items")
+    invalid_cancel = connection.execute(
+        "SELECT COUNT(*) FROM jobs WHERE cancel_outcome IS NOT NULL "
+        "AND cancel_outcome NOT IN ('cancelled', 'too_late', 'unsupported')"
+    ).fetchone()
+    if invalid_cancel is None or int(invalid_cancel[0]) != 0:
+        raise MigrationError("migrated schema contains invalid cancellation outcomes")
 
 
 def _create_schema_version_table(connection: sqlite3.Connection) -> None:
@@ -854,7 +1022,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -899,6 +1067,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             _cp7_ddl(connection)
             _cp8_ddl(connection)
             _cp9_ddl(connection)
+            _cp10_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

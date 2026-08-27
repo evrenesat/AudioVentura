@@ -22,6 +22,14 @@ routes. The final path segment is a bearer credential.
 Home Ingest binds to loopback port 8100 by default. It requires a bearer token
 and should be reachable only over the private tailnet.
 
+The isolated beta uses separate loopback services on 8010 (controller) and
+8011 (transfer), with `/beta/` private UI routing and `/beta-transfer/` signed
+transfer routing. Its environment, database, media/trash root, and rollback
+snapshots are separate from production. Beta has no capacity-management or
+Web Push credentials, and its Home Ingest target is a closed local endpoint.
+The beta proxy must not widen the production transfer allow-list or forward
+beta controller paths to port 8000.
+
 Do not publish any of these ports directly.
 
 ## Credentials
@@ -73,8 +81,26 @@ as relative paths and resolved below their expected root. Traversal, symlink
 components, unsupported types, size mismatch, and SHA-256 mismatch fail
 closed.
 
-Authenticated playback accepts a database output ID, not an arbitrary path,
-and revalidates the file before streaming it.
+Authenticated playback and download accept a database media-file ID, not an
+arbitrary path, and revalidate the active file before streaming it. The
+verifier permits only the configured library root, regular non-symlink MP3
+files, the recorded MIME type, positive size, and exact SHA-256. The generic
+media routes expose no filesystem path and return byte ranges only after this
+verification.
+
+Library deletion uses `active -> pending -> deleted`: the file is moved to a
+deterministic private trash path with restrictive directory/file modes, then
+the database state is reconciled. Cleanup may purge only a deleted item whose
+trash path is still contained and whose delayed deletion policy has elapsed.
+Project deletion requires all jobs to be terminal, records a bounded audit
+summary with allow-listed numeric cost fields and safe provider names, then
+removes dependent media/playlists/files without leaving a live capability.
+
+The player queue contains only safe IDs, titles, project labels, duration, and
+same-origin route URLs. It never returns audio bytes, prompts, lyrics,
+provider payloads, transfer capabilities, or source paths. The library has no
+source-upload endpoint and the browser stores playback preferences/position,
+not an offline audio cache.
 
 Home Ingest is the only component allowed to contact YouTube or run media
 tools. Its SFTP account must be key-only, have no shell, and be restricted to
@@ -111,9 +137,10 @@ capability URLs, prompts, lyrics, and token-shaped fields. Do not log raw
 requests or provider responses.
 
 Cleanup removes expired capabilities, stale partial files, old Home Ingest
-temporary directories, and non-retained terminal cover sources. It does not
-remove completed outputs. Backups therefore contain private user media and
-must receive the same access controls as the live data root.
+temporary directories, non-retained terminal cover sources, and eligible
+library-trash files. It does not remove active completed outputs. Backups
+therefore contain private user media and must receive the same access controls
+as the live data root.
 
 ## Web Push and capacity safety
 
@@ -142,7 +169,8 @@ Before deployment or public source publication:
 
 1. scan the complete Git history, not only the current tree;
 2. confirm `.env`, databases, audio, fixtures, keys, and logs are untracked;
-3. verify proxy routing and access-log suppression;
+3. verify root and beta proxy routing, transfer access-log suppression, and
+   separate 8000/8001 versus 8010/8011 upstreams;
 4. verify private-service binds and authentication;
 5. verify worker images contain no credentials;
 6. verify the configured image and model revisions are immutable;

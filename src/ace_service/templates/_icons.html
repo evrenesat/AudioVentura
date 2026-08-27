@@ -1,0 +1,12 @@
+{% macro icon(name) -%}
+<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+  {% if name == "play" %}<path d="M8 5v14l11-7z" fill="currentColor"/>
+  {% elif name == "previous" %}<path d="M6 5h2v14H6zm4 7 9-7v14z" fill="currentColor"/>
+  {% elif name == "next" %}<path d="M16 5h2v14h-2zM5 5l9 7-9 7z" fill="currentColor"/>
+  {% elif name == "shuffle" %}<path d="M4 7h3c3 0 4 10 7 10h6m-3-3 3 3-3 3M4 17h3c1.2 0 2-1 2.5-2M14 7c.5-1 1.3-2 2-2h4m-3-3 3 3-3 3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+  {% elif name == "repeat" %}<path d="M17 2l3 3-3 3M4 5h16M7 22l-3-3 3-3M20 19H4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+  {% elif name == "up" %}<path d="m6 14 6-6 6 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+  {% elif name == "down" %}<path d="m6 10 6 6 6-6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
+  {% endif %}
+</svg>
+{%- endmacro %}
