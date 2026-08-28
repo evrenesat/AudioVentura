@@ -49,7 +49,7 @@ from ace_service.repository import (
 )
 from ace_service.runpod_client import RunpodError, RunpodHealth, RunpodState, RunpodStatusResult
 from ace_service.schemas import CoverRequest, OriginalSongRequest
-from ace_service.worker import ControllerWorker
+from ace_service.worker import ControllerWorker, _validate_completion_metadata
 
 
 def _run(awaitable):
@@ -321,6 +321,38 @@ def _completion_evidence(
             },
         },
     }
+
+
+def test_mock_duration_mismatch_skips_only_mock_duration_policy(session) -> None:
+    output_bytes = b"mock-output"
+    job = create_original_job(
+        session,
+        OriginalSongRequest(description="mock timing policy"),
+        job_id="job-mock-duration-policy",
+    )
+    _, attempt, nonce = prepare_variation_submission(session, job.id, 1)
+    metadata = _completion_evidence(
+        job_id=job.id,
+        submission_nonce=nonce,
+        variation_index=1,
+        output_bytes=output_bytes,
+    )
+    metadata["output"].update(
+        {
+            "duration_seconds": 1.0,
+            "target_duration_seconds": 30.0,
+            "duration_tolerance_seconds": 2.0,
+            "duration_within_tolerance": False,
+        }
+    )
+    with pytest.raises(ValueError, match="outside the accepted tolerance"):
+        _validate_completion_metadata(metadata, job, attempt)
+    _validate_completion_metadata(
+        metadata,
+        job,
+        attempt,
+        enforce_requested_duration=False,
+    )
 
 
 def test_variation_progress_is_bounded_monotonic_and_terminal_result_replaces_it(

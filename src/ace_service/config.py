@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +115,12 @@ class ServiceSettings(BaseSettings):
         default=Path("/srv/ace-service/data"),
         validation_alias=AliasChoices("ACE_SERVICE_DATA_ROOT", "data_root"),
     )
+    incoming_directory_mode: str = Field(
+        default="0700",
+        validation_alias=AliasChoices(
+            "ACE_SERVICE_INCOMING_DIRECTORY_MODE", "incoming_directory_mode"
+        ),
+    )
     host: str = Field(
         default="127.0.0.1", validation_alias=AliasChoices("ACE_SERVICE_HOST", "host")
     )
@@ -184,6 +191,43 @@ class ServiceSettings(BaseSettings):
     inference_provider: str = Field(
         default="runpod",
         validation_alias=AliasChoices("INFERENCE_PROVIDER", "inference_provider"),
+    )
+    mock_base_url: str = Field(
+        default="http://127.0.0.1:8200",
+        validation_alias=AliasChoices("MOCK_BASE_URL", "mock_base_url"),
+        min_length=1,
+    )
+    mock_token: str = Field(
+        default="change-me",
+        validation_alias=AliasChoices("MOCK_TOKEN", "mock_token"),
+        min_length=1,
+    )
+    mock_poll_interval_seconds: float = Field(
+        default=2,
+        validation_alias=AliasChoices("MOCK_POLL_INTERVAL_SECONDS", "mock_poll_interval_seconds"),
+        gt=0,
+    )
+    mock_connect_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "MOCK_CONNECT_TIMEOUT_SECONDS", "mock_connect_timeout_seconds"
+        ),
+        gt=0,
+    )
+    mock_read_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("MOCK_READ_TIMEOUT_SECONDS", "mock_read_timeout_seconds"),
+        gt=0,
+    )
+    mock_write_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices("MOCK_WRITE_TIMEOUT_SECONDS", "mock_write_timeout_seconds"),
+        gt=0,
+    )
+    mock_pool_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices("MOCK_POOL_TIMEOUT_SECONDS", "mock_pool_timeout_seconds"),
+        gt=0,
     )
     inference_enabled_backends: str = Field(
         default="runpod/ace-step-v15-xl-turbo,salad/ace-step-v15-xl-turbo",
@@ -497,8 +541,8 @@ class ServiceSettings(BaseSettings):
     @classmethod
     def validate_inference_provider(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"runpod", "salad"}:
-            raise ValueError("inference provider must be runpod or salad")
+        if normalized not in {"runpod", "salad", "mock"}:
+            raise ValueError("inference provider must be runpod, salad, or mock")
         return normalized
 
     @field_validator("inference_enabled_backends")
@@ -585,6 +629,22 @@ class ServiceSettings(BaseSettings):
             raise ValueError("service root path must be empty or a normalized absolute path prefix")
         return value
 
+    @field_validator("incoming_directory_mode")
+    @classmethod
+    def validate_incoming_directory_mode(cls, value: str) -> str:
+        normalized = value.strip()
+        if (
+            len(normalized) != 4
+            or normalized[0] != "0"
+            or any(character not in "01234567" for character in normalized)
+            or int(normalized, 8) & 0o007
+        ):
+            raise ValueError(
+                "ACE_SERVICE_INCOMING_DIRECTORY_MODE must be a four-digit octal mode "
+                "without world access"
+            )
+        return normalized
+
     @field_validator("runpod_worker_runtime_identity")
     @classmethod
     def validate_runpod_worker_runtime_identity(cls, value: str | None) -> str | None:
@@ -638,6 +698,31 @@ class ServiceSettings(BaseSettings):
             raise ValueError("home ingest base URL must include an http(s) scheme and host")
         return value.rstrip("/")
 
+    @field_validator("mock_base_url")
+    @classmethod
+    def validate_mock_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("mock base URL must be a private HTTP(S) endpoint")
+        hostname = parsed.hostname.rstrip(".").lower()
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            if not (hostname == "localhost" or hostname.endswith(".ts.net")):
+                raise ValueError("mock base URL must resolve to a private p100 endpoint") from None
+        else:
+            if address.is_global:
+                raise ValueError("mock base URL must resolve to a private p100 endpoint")
+        return value.rstrip("/")
+
     @model_validator(mode="after")
     def validate_runtime_values(self) -> ServiceSettings:
         for field_name in _CREDENTIAL_FIELDS:
@@ -654,18 +739,22 @@ class ServiceSettings(BaseSettings):
         )
         if (
             not explicit_backend_selection
-            and self.inference_provider in {"runpod", "salad"}
+            and self.inference_provider in {"runpod", "salad", "mock"}
             and self.inference_enabled_backends
             == "runpod/ace-step-v15-xl-turbo,salad/ace-step-v15-xl-turbo"
             and self.default_original_backend == "runpod/ace-step-v15-xl-turbo"
             and self.default_cover_backend == "salad/ace-step-v15-xl-turbo"
         ):
-            enabled = (f"{self.inference_provider}/ace-step-v15-xl-turbo",)
+            enabled = (
+                ("mock/midi-sequential",)
+                if self.inference_provider == "mock"
+                else (f"{self.inference_provider}/ace-step-v15-xl-turbo",)
+            )
             self.inference_enabled_backends = enabled[0]
             self.default_original_backend = enabled[0]
             self.default_cover_backend = enabled[0]
         elif (
-            self.inference_provider in {"runpod", "salad"}
+            self.inference_provider in {"runpod", "salad", "mock"}
             and len(enabled) == 1
             and enabled[0].split("/", 1)[0] != self.inference_provider
             and enabled[0]
@@ -676,7 +765,11 @@ class ServiceSettings(BaseSettings):
             and self.default_original_backend == enabled[0]
             and self.default_cover_backend == enabled[0]
         ):
-            enabled = (f"{self.inference_provider}/ace-step-v15-xl-turbo",)
+            enabled = (
+                ("mock/midi-sequential",)
+                if self.inference_provider == "mock"
+                else (f"{self.inference_provider}/ace-step-v15-xl-turbo",)
+            )
             self.inference_enabled_backends = enabled[0]
             self.default_original_backend = enabled[0]
             self.default_cover_backend = enabled[0]
@@ -696,6 +789,9 @@ class ServiceSettings(BaseSettings):
                 self.salad_project
             ):
                 raise ValueError("Salad organization and project must be DNS-compatible")
+
+        if any(item.startswith("mock/") for item in enabled):
+            self.validate_mock_runtime()
 
         if any(item.startswith("fal/") for item in enabled):
             if self.fal_key is None or self.fal_key.lower() in _PLACEHOLDERS:
@@ -769,6 +865,16 @@ class ServiceSettings(BaseSettings):
             self.evaluation_campaign_database = campaign_database
         return self
 
+    def validate_mock_runtime(self) -> None:
+        """Require private mock credentials when a persisted job needs recovery."""
+
+        if (
+            self.mock_token.strip().lower() in _PLACEHOLDERS
+            or self.mock_token.strip().lower().endswith(".example.invalid")
+        ):
+            raise ValueError("mock_token is required when a mock backend is enabled")
+        self.mock_base_url = self.validate_mock_base_url(self.mock_base_url)
+
     @property
     def paths(self) -> DataPaths:
         return DataPaths(self.data_root)
@@ -807,9 +913,10 @@ class ServiceSettings(BaseSettings):
 
         paths = self.paths
         for directory in paths.all_directories:
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            mode = int(self.incoming_directory_mode, 8) if directory == paths.incoming else 0o700
+            directory.mkdir(parents=True, exist_ok=True, mode=mode)
             try:
-                directory.chmod(0o700)
+                directory.chmod(mode)
             except (NotImplementedError, PermissionError):
                 pass
         return paths

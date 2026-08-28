@@ -368,6 +368,7 @@ def job_backend(job: Job) -> BackendId:
     builtins = {
         ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
         ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+        ProviderName.MOCK: "mock/midi-sequential",
     }
     return BackendId(builtins.get(job_provider(job), f"{job_provider(job).value}/default"))
 
@@ -691,17 +692,23 @@ def create_job(
             or {
                 ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
                 ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+                ProviderName.MOCK: "mock/midi-sequential",
             }.get(provider, f"{provider.value}/default")
         )
     )
     expected_builtin = {
         ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
         ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
+        ProviderName.MOCK: "mock/midi-sequential",
     }.get(provider)
     if expected_builtin is not None and str(backend) != expected_builtin:
         raise ValueError("built-in provider and backend do not match")
     if provider is ProviderName.FAL and not str(backend).startswith("fal/"):
         raise ValueError("Fal provider and backend do not match")
+    if provider is ProviderName.MOCK and str(backend) != "mock/midi-sequential":
+        raise ValueError("mock provider and backend do not match")
+    if provider is ProviderName.MOCK and output_format is not OutputFormat.MP3:
+        raise ValueError("the sequential MIDI backend only supports MP3")
     snapshot = backend_snapshot_json or {
         "backend_id": str(backend),
         "provider": provider.value,

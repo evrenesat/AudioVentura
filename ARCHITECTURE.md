@@ -36,12 +36,27 @@ Private browser
                         +-----------------------------+
 ```
 
+The beta and production Home Ingest and sequential mock instances run on the
+private p100 home host, outside the Hetzner controller process:
+
+```text
+Hetzner controller :8010/:8000
+        | private HTTPS + restricted SFTP
+        v
+p100 home host
+  Home Ingest :8101 (beta) / :8100 (production)
+  MIDI mock   :8201 (beta) / :8200 (production)
+```
+
 The boundaries are deliberate:
 
 - The controller is the durable control plane. It does not execute media
   tools or load inference models.
 - Home Ingest is the only process allowed to contact YouTube or execute
   `yt-dlp`, `ffmpeg`, and `ffprobe`.
+- The sequential MIDI mock is a separate private backend. It receives bounded
+  job metadata and source capability metadata, but never downloads or uses a
+  source recording.
 - The transfer app is the only public application surface. It has no UI or
   general API routes.
 - GPU workers receive generation metadata and short-lived transfer URLs. They
@@ -102,6 +117,22 @@ incoming/<job-id>/source.mp3.part
 The controller validates and atomically finalizes that file before issuing a
 provider source capability. A continuation from an existing generated output
 reuses the verified local file and does not contact YouTube again.
+
+### Sequential MIDI mock
+
+`midi_mock_backend/` is a standalone, opt-in provider backend. Its only
+external input is the controller's schema-v2 job metadata and output-upload
+capability. It claims one cursor index in the reviewed immutable MIDI corpus
+inside the same SQLite transaction as the durable job row, so a submission
+nonce is idempotent and a failed render still consumes its index.
+
+The worker extracts one MIDI member into a private directory, invokes the
+pinned FluidSynth binary with an explicit argument vector, and encodes the
+stereo 44.1 kHz PCM stream with in-process LAME at 192 kbps. It enforces a
+600-second render ceiling, one render at a time, bounded output bytes, process
+groups, cancellation, and cleanup. It returns only bounded job/result metadata;
+the corpus archive, source URLs, prompts, lyrics, and output bytes do not cross
+the provider API.
 
 ### GPU worker
 
@@ -218,6 +249,7 @@ cancellation behavior. The current providers are:
   enriched.
 - `FalProvider`, which adapts one reviewed catalog descriptor and uses
   controller-pulled CDN artifacts rather than the worker upload contract.
+- `MockProvider`, which adapts the private `mock/midi-sequential` backend.
 
 Deployment management is not part of this interface. Queue creation, GPU
 selection, autoscaling, image credentials, and container-group changes remain
@@ -230,6 +262,11 @@ finite product fields to endpoint-specific JSON and is never replaced by live
 discovery data at runtime. New jobs persist the selected backend and descriptor
 snapshot before enqueue; variations remain sequential and never fall back to
 another backend.
+
+The mock backend advertises every built-in request feature and both modes while
+remaining MP3-only. Its deterministic corpus timing is intentionally exempt
+from the normal requested-duration completion check; real providers retain the
+existing duration policy.
 
 ### Managed capacity and notifications
 

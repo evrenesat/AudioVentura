@@ -1,5 +1,44 @@
 # Development Log
 
+## 2026-08-28 (continuation form defaults)
+
+- Normalized absent optional continuation values to blank HTML form values so
+  the literal string `None` cannot be submitted as a numeric default. Added a
+  regression test covering an auto-duration original continuation.
+
+## 2026-08-27 (beta provider parity regression)
+
+- Added exact rendered Original/Cover selector inventory coverage for the ten
+  deployment-owned real backends plus the beta-only sequential MIDI mock. The
+  tests assert optgroup order, labels, uniqueness, and the RunPod/Salad
+  production-aligned defaults without submitting a generation.
+
+## 2026-08-27 (sequential MIDI mock integration backend)
+
+- Added the opt-in `mock/midi-sequential` backend and standalone
+  `midi_mock_backend/` service. It accepts schema-v2 prompt-to-audio and
+  audio-to-audio requests, claims one deterministic MIDI corpus member per
+  nonce, renders privately with FluidSynth 2.3.4 and in-process lameenc 1.8.4,
+  and uploads bounded MP3 metadata through the existing capability seam.
+- Integrated the persisted backend ID, all built-in form features, MP3-only
+  output policy, mock-specific duration policy, health/readiness checks, and a
+  non-paid beta live harness. Real-provider defaults, capacity handling, and
+  fallback behavior remain unchanged.
+- Staged outside Git and verified the reviewed corpus archive
+  `41549405bcaeed4783e366f61236db4203c9b5d846fd8e0fee59bcf2658a23b`, its
+  canonical manifest
+  `916a7c9dbc1081efc27ff2fb59af1aeccef6052b1859e98585d9d9814f087c92`, and
+  General MIDI soundfont SHA
+  `74594e8f4250680adf590507a306655a299935343583256f3b722c48a1bc1cb0`.
+  Local probes rendered corpus indices 0, 1, and 10854 as valid MP3 without
+  leaving WAV files. Beta deployment sources and paired rollback are in the
+  evreniops repository; production has not been deployed or approved.
+- The beta URL is `https://player.evren.io/beta/`; verified health, MP3 mock
+  activation, beta-only SFTP write/remove, production-tree escape rejection,
+  and cleanup. The paired p100 rollback snapshot is
+  `/opt/audioventura-midi-mock/rollback/20260827T172121Z`; the exact product
+  and deployment revisions are recorded in the release handoff.
+
 ## 2026-08-27 (media library, playlists, and persistent player foundation)
 
 - Advanced the controller schema to v10 with generated media items/files,

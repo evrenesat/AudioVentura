@@ -11,6 +11,7 @@ The normal deployment uses:
 - one Hetzner service account for the controller and transfer processes;
 - one durable private data root, normally `/srv/ace-service/data`;
 - one private Home Ingest service on the home network;
+- one private sequential MIDI mock service on the home network when enabled;
 - one or more explicitly enabled inference backends for new jobs;
 - a private proxy for the UI and a public HTTPS proxy for signed transfers.
 
@@ -28,6 +29,8 @@ and rollback snapshot:
 | --- | --- | --- |
 | Controller | `127.0.0.1:8010`, `https://player.evren.io/beta/` | `127.0.0.1:8000` |
 | Transfer | `127.0.0.1:8011`, `/beta-transfer/transfer/v1/{source\|output}/<token>` | `127.0.0.1:8001` |
+| Home Ingest | p100 `:8101`, beta-only restricted SFTP | p100 `:8100` |
+| MIDI mock | p100 `:8201`, opt-in | p100 `:8200`, opt-in |
 | Data | `/srv/ace-service-beta/data` | `/srv/ace-service/data` |
 | Config | `/etc/audioventura/beta.env` | `/etc/audioventura/controller.env` |
 
@@ -37,8 +40,8 @@ runtime definitions once per deploy, runs the explicit migration, activates
 the immutable release atomically, and reloads nginx only after configuration
 validation. It never stops or rewrites the production services. Beta enables
 only the reviewed bounded Fal smoke path, disables capacity fingerprints and
-Web Push, and points Home Ingest to a closed local port so source ingestion
-fails safely.
+Web Push, and uses separate p100 Home Ingest and SFTP identities. The
+sequential MIDI mock is opt-in and does not become a default.
 
 ```text
 cd /root/code/evreniops/infra/ansible
@@ -59,6 +62,49 @@ The beta URL, deployed product revision, deployment-repository revision, and
 verification result belong in the handoff record. Never call the beta result
 production approval; production requires a separate explicit approval after
 manual beta testing.
+
+## Private home services and MIDI mock
+
+The companion evreniops playbook deploys the isolated beta Home Ingest,
+restricted beta SFTP account, and opt-in sequential MIDI mock as a paired
+snapshot. It stages the exact corpus archive and canonical manifest outside
+Git, validates the pinned FluidSynth and General MIDI soundfont packages, and
+keeps beta and production state roots, credentials, cursors, and service users
+separate.
+
+```text
+cd /root/code/evreniops/infra/ansible
+./ops deploy-audioventura-home-services \
+  -e audioventura_home_target=beta \
+  -e audioventura_home_mode=deploy \
+  -e audioventura_product_commit=<product-commit>
+./ops deploy-audioventura-home-services \
+  -e audioventura_home_target=beta \
+  -e audioventura_home_mode=verify \
+  -e audioventura_product_commit=<product-commit>
+```
+
+The beta controller talks to Home Ingest on p100 `:8101` through its private
+tailnet address and uploads source material over the beta-only chrooted SFTP
+account. The mock listens on p100 `:8201`, requires its own bearer token, and
+accepts only the exact `mock/midi-sequential` backend. It receives source
+metadata for contract coverage but never follows a source URL. A service
+rollback restores the paired mock cursor/state, Home Ingest state, controller
+overlay, and beta SFTP mapping from one explicit snapshot:
+
+```text
+./ops deploy-audioventura-home-services \
+  -e audioventura_home_target=beta \
+  -e audioventura_home_mode=rollback \
+  -e audioventura_home_rollback_snapshot=/opt/audioventura-midi-mock/rollback/<UTC-snapshot>
+```
+
+The p100 snapshot path is the operator-facing input; the playbook derives the
+matching Hetzner beta `home-services` snapshot from the same UTC identity.
+
+Keep the corpus and generated state on the service hosts. Do not add the ZIP,
+manifest, generated MP3s, SQLite state, or environment files to either Git
+repository.
 
 ## Controller installation
 
@@ -81,6 +127,11 @@ ACE_HOME_INGEST_BASE_URL
 ACE_HOME_INGEST_TOKEN
 INFERENCE_PROVIDER
 ```
+
+Keep `ACE_SERVICE_INCOMING_DIRECTORY_MODE=0700` for normal deployments. The
+isolated beta controller sets it to `0770` so its restricted SFTP group can
+deliver into `incoming/`; the controller data root and all other directories
+remain private.
 
 For Runpod, also set `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID`. For Salad, set
 `SALAD_API_KEY`, `SALAD_ORGANIZATION`, `SALAD_PROJECT`, and the tracked queue
@@ -163,10 +214,12 @@ off by default and must remain time-bounded if enabled.
 1. Mount the durable data volume and verify its ownership and free space.
 2. Start the transfer app and public proxy.
 3. Start Home Ingest and check its authenticated `/healthz`.
-4. Start the controller. It checks the schema, takes the data-root lock,
+4. When the mock is enabled, start the matching p100 mock unit and check its
+   authenticated `/healthz`; it must report the reviewed corpus identity.
+5. Start the controller. It checks the schema, takes the data-root lock,
    recovers durable jobs, and runs cleanup before accepting new work.
-5. Check controller `/healthz` and authenticated `/readyz`.
-6. Inspect the configured provider without submitting paid work.
+6. Check controller `/healthz` and authenticated `/readyz`.
+7. Inspect the configured provider without submitting paid work.
 
 Only one controller worker may own a data root.
 
@@ -176,6 +229,13 @@ Only one controller worker may own a data root.
 IDs. `DEFAULT_ORIGINAL_BACKEND` and `DEFAULT_COVER_BACKEND` must be enabled and
 mode-compatible. The selected backend is copied onto a new job before enqueue.
 Do not change provider or backend fields on existing jobs.
+
+To use the deterministic backend, explicitly include
+`mock/midi-sequential`, set both defaults as desired, and provide the private
+mock URL and token. It is MP3-only, supports both built-in form modes and
+features, consumes one corpus cursor index per accepted nonce, and does not
+use Home Ingest source bytes. It is never an implicit fallback for a real
+provider and is not enabled by the normal defaults.
 
 When changing the default:
 
@@ -308,6 +368,28 @@ For a job that appears stuck:
 Provider status shown as “deployment status (inferred)” describes worker
 infrastructure, not an authoritative assignment to the job.
 
+## Non-paid mock smoke test
+
+When the beta mock is explicitly enabled, run the checked-in live harness with
+an operator-approved YouTube URL to cover both the normal Home Ingest route and
+the direct mock route. The harness verifies cursor order, repeated polling,
+MP3 headers, range/full download hashes, requested form fields, and bounded
+metadata without printing credentials, prompts, lyrics, or capability URLs:
+
+```text
+ACE_SERVICE_USERNAME=<protected-value> \
+ACE_SERVICE_PASSWORD=<protected-value> \
+MOCK_TOKEN=<protected-value> \
+uv run python tests/live_beta_mock_e2e.py \
+  --base-url https://player.evren.io/beta \
+  --mock-base-url http://100.103.69.9:8201 \
+  --youtube-url <operator-approved-url> \
+  --expected-revision <product-commit>
+```
+
+Do not use this harness against production. A real-provider acceptance remains
+separate and requires its own explicit spend approval.
+
 ## Live acceptance
 
 Local tests do not prove deployment behavior. After controller, worker image,
@@ -364,6 +446,16 @@ uv run ruff format --check .
 uv run mypy src runpod_worker
 
 cd home_ingest
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src
+```
+
+For the standalone mock, also run from `midi_mock_backend/`:
+
+```text
+uv sync --frozen
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .

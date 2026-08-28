@@ -84,9 +84,10 @@
   const refreshPricing = () => {
     const choice = selectedChoice();
     const isFal = choice && choice.provider === "fal.ai";
+    const isMock = choice && choice.provider === "mock";
     window.clearTimeout(pricingTimer);
     pricingTimer = null;
-    if (gpuEstimate) gpuEstimate.hidden = Boolean(isFal);
+    if (gpuEstimate) gpuEstimate.hidden = Boolean(isFal || isMock);
     if (!pricingNote) return;
     if (!isFal) {
       if (pricingController) pricingController.abort();

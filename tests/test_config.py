@@ -28,6 +28,25 @@ def test_settings_resolve_and_create_private_layout(tmp_path: Path) -> None:
     assert all(path.is_dir() for path in paths.all_directories)
     assert paths.database.parent == settings.data_root
     assert (paths.root.stat().st_mode & 0o777) == 0o700
+    assert (paths.incoming.stat().st_mode & 0o777) == 0o700
+
+
+def test_incoming_directory_mode_can_allow_the_restricted_sftp_group(tmp_path: Path) -> None:
+    settings = ServiceSettings(**_settings_kwargs(tmp_path), incoming_directory_mode="0770")
+
+    paths = settings.ensure_data_layout()
+
+    assert settings.incoming_directory_mode == "0770"
+    assert (paths.root.stat().st_mode & 0o777) == 0o700
+    assert (paths.incoming.stat().st_mode & 0o777) == 0o770
+
+
+@pytest.mark.parametrize("mode", ("0777", "0702", "700", "not-octal"))
+def test_incoming_directory_mode_rejects_world_access_or_invalid_octal(
+    mode: str, tmp_path: Path
+) -> None:
+    with pytest.raises(ValidationError, match="INCOMING_DIRECTORY_MODE"):
+        ServiceSettings(**_settings_kwargs(tmp_path), incoming_directory_mode=mode)
 
 
 @pytest.mark.parametrize(
@@ -153,3 +172,26 @@ def test_generic_timeout_accepts_runpod_environment_alias(
     monkeypatch.setenv("RUNPOD_JOB_TIMEOUT_SECONDS", "321")
     settings = ServiceSettings(**_settings_kwargs(tmp_path))
     assert settings.inference_job_timeout_seconds == 321
+
+
+def test_mock_backend_requires_private_non_placeholder_configuration(tmp_path: Path) -> None:
+    kwargs = _settings_kwargs(tmp_path)
+    kwargs.update(
+        inference_enabled_backends="runpod/ace-step-v15-xl-turbo,mock/midi-sequential",
+        default_original_backend="runpod/ace-step-v15-xl-turbo",
+        default_cover_backend="runpod/ace-step-v15-xl-turbo",
+        mock_base_url="http://100.103.69.9:8201",
+        mock_token="beta-mock-token",
+    )
+    settings = ServiceSettings(**kwargs)
+    assert "mock/midi-sequential" in settings.enabled_backend_ids
+
+    with pytest.raises(ValidationError, match="mock_token"):
+        ServiceSettings(**{**kwargs, "mock_token": "change-me"})
+    with pytest.raises(ValidationError, match="private p100"):
+        ServiceSettings(**{**kwargs, "mock_base_url": "https://8.8.8.8:8201"})
+
+
+def test_mock_configuration_is_not_required_when_backend_is_disabled(tmp_path: Path) -> None:
+    settings = ServiceSettings(**_settings_kwargs(tmp_path), mock_token="change-me")
+    assert "mock/midi-sequential" not in settings.enabled_backend_ids
