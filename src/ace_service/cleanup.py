@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,9 @@ from ace_service.cover import remove_cover_source
 from ace_service.db import SessionFactory
 from ace_service.media_library import MediaLibraryError, MediaLibraryService
 from ace_service.models import (
+    AssetTransferCapability,
+    AssetTransferPurpose,
+    AssetTransferStatus,
     Job,
     JobStatus,
     JobType,
@@ -21,15 +25,25 @@ from ace_service.models import (
     NotificationEvent,
     ProjectDeletionAudit,
     PushSubscription,
+    SourceAsset,
+    SourceAssetStatus,
     TransferCapability,
     TransferStatus,
 )
-from ace_service.repository import revoke_active_transfers, transition_job
+from ace_service.repository import (
+    mark_source_uploaded,
+    revoke_active_transfers,
+    revoke_asset_transfers,
+    transition_job,
+)
 
 LOGGER = logging.getLogger(__name__)
 _TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 _RETAINABLE_TRANSFER_STATUSES = frozenset(
     {TransferStatus.CONSUMED, TransferStatus.EXPIRED, TransferStatus.REVOKED}
+)
+_RETAINABLE_ASSET_TRANSFER_STATUSES = frozenset(
+    {AssetTransferStatus.CONSUMED, AssetTransferStatus.EXPIRED, AssetTransferStatus.REVOKED}
 )
 
 
@@ -47,6 +61,11 @@ class CleanupReport:
     deleted_notification_subscriptions: int = 0
     reconciled_media_items: int = 0
     reconciled_project_deletions: int = 0
+    expired_asset_capabilities: int = 0
+    revoked_asset_capabilities: int = 0
+    deleted_asset_capability_records: int = 0
+    reconciled_source_uploads: int = 0
+    expired_source_uploads: int = 0
 
 
 def cleanup_controller(
@@ -89,8 +108,48 @@ def cleanup_controller(
     expired_staging = 0
     deleted_notification_events = 0
     deleted_notification_subscriptions = 0
+    expired_asset_capabilities = 0
+    revoked_asset_capabilities = 0
+    deleted_asset_capability_records = 0
+    reconciled_source_uploads = 0
+    expired_source_uploads = 0
+    source_raw_cleanup_ids: list[str] = []
 
     with session_factory() as session:
+        source_assets = list(session.scalars(select(SourceAsset)))
+        for asset in source_assets:
+            if asset.status is SourceAssetStatus.AWAITING_UPLOAD:
+                consumed_upload = session.scalar(
+                    select(AssetTransferCapability)
+                    .where(
+                        AssetTransferCapability.source_asset_id == asset.id,
+                        AssetTransferCapability.purpose
+                        == AssetTransferPurpose.BROWSER_SOURCE_UPLOAD,
+                        AssetTransferCapability.status == AssetTransferStatus.CONSUMED,
+                    )
+                    .order_by(AssetTransferCapability.created_at.desc())
+                )
+                if consumed_upload is not None and _source_upload_matches(
+                    settings, asset, consumed_upload
+                ):
+                    mark_source_uploaded(
+                        session,
+                        asset.id,
+                        raw_relative_path=consumed_upload.expected_relative_path,
+                        raw_byte_size=consumed_upload.received_byte_size or 0,
+                        raw_sha256=consumed_upload.received_sha256 or "",
+                    )
+                    reconciled_source_uploads += 1
+                elif asset.created_at <= stale_cutoff:
+                    asset.status = SourceAssetStatus.CANCELLED
+                    asset.error_code = "upload_expired"
+                    asset.user_facing_error = "The upload expired before it was completed."
+                    asset.next_attempt_at = None
+                    asset.updated_at = current_time
+                    revoke_asset_transfers(session, source_asset_id=asset.id, now=current_time)
+                    source_raw_cleanup_ids.append(asset.id)
+                    expired_source_uploads += 1
+
         jobs = list(session.scalars(select(Job)))
         for job in jobs:
             if (
@@ -127,6 +186,26 @@ def cleanup_controller(
             ):
                 session.delete(capability)
                 deleted += 1
+        asset_capabilities = list(session.scalars(select(AssetTransferCapability)))
+        for asset_capability in asset_capabilities:
+            if (
+                asset_capability.status is AssetTransferStatus.ISSUED
+                and asset_capability.expires_at <= current_time
+            ):
+                asset_capability.status = AssetTransferStatus.EXPIRED
+                expired_asset_capabilities += 1
+            if asset_capability.status is AssetTransferStatus.ISSUED and _asset_owner_is_terminal(
+                asset_capability
+            ):
+                asset_capability.status = AssetTransferStatus.REVOKED
+                asset_capability.consumed_at = current_time
+                revoked_asset_capabilities += 1
+            if (
+                asset_capability.status in _RETAINABLE_ASSET_TRANSFER_STATUSES
+                and _asset_capability_timestamp(asset_capability) <= retention_cutoff
+            ):
+                session.delete(asset_capability)
+                deleted_asset_capability_records += 1
         notification_cutoff = current_time - timedelta(days=30)
         events = list(
             session.scalars(
@@ -167,6 +246,12 @@ def cleanup_controller(
         if before and not _source_exists(settings, job_id):
             removed_sources += 1
 
+    if source_raw_cleanup_ids:
+        from ace_service.source_assets import purge_source_raw
+
+        for source_asset_id in source_raw_cleanup_ids:
+            purge_source_raw(settings, source_asset_id)
+
     report = CleanupReport(
         stale_part_files=stale_part_files,
         expired_capabilities=expired,
@@ -178,11 +263,19 @@ def cleanup_controller(
         deleted_notification_subscriptions=deleted_notification_subscriptions,
         reconciled_media_items=reconciled_media_items,
         reconciled_project_deletions=reconciled_project_deletions,
+        expired_asset_capabilities=expired_asset_capabilities,
+        revoked_asset_capabilities=revoked_asset_capabilities,
+        deleted_asset_capability_records=deleted_asset_capability_records,
+        reconciled_source_uploads=reconciled_source_uploads,
+        expired_source_uploads=expired_source_uploads,
     )
     LOGGER.info(
         "cleanup complete stage=cleanup stale_part_files=%d expired_capabilities=%d "
         "revoked_capabilities=%d deleted_capability_records=%d removed_cover_sources=%d "
-        "expired_cover_staging=%d reconciled_project_deletions=%d",
+        "expired_cover_staging=%d reconciled_project_deletions=%d "
+        "expired_asset_capabilities=%d revoked_asset_capabilities=%d "
+        "deleted_asset_capability_records=%d reconciled_source_uploads=%d "
+        "expired_source_uploads=%d",
         report.stale_part_files,
         report.expired_capabilities,
         report.revoked_capabilities,
@@ -190,9 +283,60 @@ def cleanup_controller(
         report.removed_cover_sources,
         report.expired_cover_staging,
         report.reconciled_project_deletions,
+        report.expired_asset_capabilities,
+        report.revoked_asset_capabilities,
+        report.deleted_asset_capability_records,
+        report.reconciled_source_uploads,
+        report.expired_source_uploads,
         extra={"component": "controller"},
     )
     return report
+
+
+def _source_upload_matches(
+    settings: ServiceSettings,
+    asset: SourceAsset,
+    capability: AssetTransferCapability,
+) -> bool:
+    if (
+        capability.received_byte_size is None
+        or capability.received_sha256 is None
+        or capability.expected_relative_path != f"{asset.id}/source.bin"
+        or capability.received_byte_size != capability.expected_byte_size
+        or capability.received_sha256 != capability.expected_sha256
+    ):
+        return False
+    path = settings.paths.source_upload_final(asset.id)
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        if path.stat().st_size != capability.received_byte_size:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest() == capability.received_sha256
+    except OSError:
+        return False
+
+
+def _asset_owner_is_terminal(capability: AssetTransferCapability) -> bool:
+    if capability.source_asset is not None:
+        return capability.source_asset.status in {
+            SourceAssetStatus.READY,
+            SourceAssetStatus.FAILED,
+            SourceAssetStatus.CANCELLED,
+        }
+    if capability.job is not None:
+        return capability.job.status in _TERMINAL_STATUSES
+    if capability.derivative_task is not None:
+        return capability.derivative_task.status in {"ready", "failed"}
+    return True
+
+
+def _asset_capability_timestamp(capability: AssetTransferCapability) -> datetime:
+    return capability.consumed_at or capability.expires_at
 
 
 def _remove_stale_part_files(root: Path, cutoff: datetime) -> int:
@@ -226,6 +370,8 @@ def _source_exists(settings: ServiceSettings, job_id: str) -> bool:
 
 
 def _cover_is_confirmed(job: Job) -> bool:
+    if job.source_media_item_id is not None:
+        return True
     normalized = job.normalized_request_json
     if not isinstance(normalized, dict) or normalized.get("schema_version") != 2:
         return True

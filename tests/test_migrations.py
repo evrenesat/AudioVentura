@@ -229,6 +229,9 @@ class TestUpgrade:
             "playlists",
             "playlist_entries",
             "project_deletion_audits",
+            "source_assets",
+            "media_derivative_tasks",
+            "asset_transfer_capabilities",
         }
         assert _tables(legacy_database_path) == expected_tables
         assert {

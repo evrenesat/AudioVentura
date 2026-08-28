@@ -64,6 +64,17 @@ class PreparedSource:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedMedia:
+    """A verified local canonical MP3 ready for a signed transfer upload."""
+
+    title: str
+    duration_seconds: float
+    path: Path
+    byte_size: int
+    sha256: str
+
+
 YTDLPFactory = Callable[[dict[str, Any]], Any]
 
 
@@ -155,7 +166,7 @@ def _duration(value: Any) -> float:
 
 
 def _metadata_from_info(
-    info: Any, target: YouTubeTarget, max_duration_seconds: int
+    info: Any, target: YouTubeTarget, max_duration_seconds: int | None
 ) -> VideoMetadata:
     if not isinstance(info, Mapping) or info.get("_type") in {"playlist", "multi_video"}:
         raise IngestError("youtube_metadata_failed", "YouTube did not return one video")
@@ -171,7 +182,7 @@ def _metadata_from_info(
     if canonical.video_id != target.video_id:
         raise IngestError("youtube_metadata_failed", "YouTube returned an unexpected canonical URL")
     duration_seconds = _duration(info.get("duration"))
-    if duration_seconds > max_duration_seconds:
+    if max_duration_seconds is not None and duration_seconds > max_duration_seconds:
         raise IngestError("youtube_duration_exceeded", "the YouTube video is longer than allowed")
     return VideoMetadata(
         video_id=video_id,
@@ -231,7 +242,7 @@ def download_youtube(
     url: str,
     job_directory: Path,
     *,
-    max_duration_seconds: int,
+    max_duration_seconds: int | None,
     max_source_bytes: int,
     youtube_dl_factory: YTDLPFactory | None = None,
 ) -> tuple[VideoMetadata, Path]:
@@ -305,6 +316,7 @@ def download_youtube(
 async def _run_media_command(
     arguments: tuple[str, ...], *, error_code: str, timeout_seconds: int
 ) -> tuple[bytes, bytes]:
+    process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
             *arguments,
@@ -313,8 +325,9 @@ async def _run_media_command(
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
     except TimeoutError as exc:
-        process.kill()
-        await process.wait()
+        if process is not None:
+            process.kill()
+            await process.wait()
         LOGGER.warning(
             "stage=media error_code=%s exception_class=%s",
             error_code,
@@ -322,6 +335,11 @@ async def _run_media_command(
             extra={"component": "home_ingest"},
         )
         raise IngestError(error_code, "the media command exceeded its time limit") from exc
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
     except OSError as exc:
         LOGGER.warning(
             "stage=media error_code=%s exception_class=%s",
@@ -352,12 +370,17 @@ def _safe_local_file(path: Path, *, root: Path) -> Path:
 
 
 async def probe_audio(
-    path: Path, *, root: Path, max_duration_seconds: int, timeout_seconds: int
+    path: Path,
+    *,
+    root: Path,
+    max_duration_seconds: int | None,
+    timeout_seconds: int,
+    secure_input: bool = False,
 ) -> AudioProbe:
     """Use ffprobe to require finite duration and at least one audio stream."""
 
     safe_path = _safe_local_file(path, root=root)
-    arguments = (
+    arguments_list = [
         "ffprobe",
         "-v",
         "error",
@@ -365,8 +388,11 @@ async def probe_audio(
         "format=duration:stream=codec_type",
         "-of",
         "json",
-        str(safe_path),
-    )
+    ]
+    if secure_input:
+        arguments_list.extend(("-protocol_whitelist", "file,pipe,fd"))
+    arguments_list.append(str(safe_path))
+    arguments = tuple(arguments_list)
     stdout, _ = await _run_media_command(
         arguments, error_code="ffprobe_failed", timeout_seconds=timeout_seconds
     )
@@ -380,7 +406,7 @@ async def probe_audio(
         isinstance(stream, Mapping) and stream.get("codec_type") == "audio" for stream in streams
     ):
         raise IngestError("ffprobe_failed", "the source does not contain an audio stream")
-    if duration > max_duration_seconds:
+    if max_duration_seconds is not None and duration > max_duration_seconds:
         raise IngestError("youtube_duration_exceeded", "the source audio is longer than allowed")
     return AudioProbe(duration)
 
@@ -391,6 +417,7 @@ async def normalize_audio(
     *,
     root: Path,
     timeout_seconds: int,
+    secure_input: bool = False,
 ) -> None:
     """Normalize one controlled input to the v1 canonical MP3 format."""
 
@@ -400,28 +427,35 @@ async def normalize_audio(
     if output.is_symlink() or not output.resolve().parent.is_relative_to(resolved_root):
         raise IngestError("ffmpeg_failed", "the canonical output escaped its temp directory")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    arguments = (
+    arguments_list = [
         "ffmpeg",
         "-nostdin",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-y",
-        "-i",
-        str(safe_input),
-        "-vn",
-        "-ac",
-        "2",
-        "-ar",
-        "48000",
-        "-c:a",
-        "libmp3lame",
-        "-b:a",
-        "192k",
-        "-f",
-        "mp3",
-        str(output),
+    ]
+    if secure_input:
+        arguments_list.extend(("-protocol_whitelist", "file,pipe,fd"))
+    arguments_list.extend(("-y", "-i", str(safe_input)))
+    if secure_input:
+        arguments_list.extend(("-map", "0:a:0"))
+    arguments_list.extend(
+        (
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+        )
     )
+    if secure_input:
+        arguments_list.extend(("-map_metadata", "-1"))
+    arguments_list.extend(("-f", "mp3", str(output)))
+    arguments = tuple(arguments_list)
     await _run_media_command(arguments, error_code="ffmpeg_failed", timeout_seconds=timeout_seconds)
     if output.is_symlink() or not output.is_file():
         raise IngestError("ffmpeg_failed", "ffmpeg did not produce a canonical source")
@@ -450,10 +484,11 @@ async def prepare_source(
     url: str,
     job_directory: Path,
     *,
-    max_duration_seconds: int,
+    max_duration_seconds: int | None,
     max_source_bytes: int,
     command_timeout_seconds: int,
     youtube_dl_factory: YTDLPFactory | None = None,
+    secure_input: bool = False,
 ) -> PreparedSource:
     """Download, probe, normalize, verify, and checksum one cover source."""
 
@@ -471,6 +506,7 @@ async def prepare_source(
             root=job_directory,
             max_duration_seconds=max_duration_seconds,
             timeout_seconds=command_timeout_seconds,
+            secure_input=secure_input,
         )
         part_path = job_directory / "source.mp3.part"
         final_path = job_directory / "source.mp3"
@@ -479,6 +515,7 @@ async def prepare_source(
             part_path,
             root=job_directory,
             timeout_seconds=command_timeout_seconds,
+            secure_input=secure_input,
         )
         os.replace(part_path, final_path)
         canonical_probe = await probe_audio(
@@ -486,6 +523,7 @@ async def prepare_source(
             root=job_directory,
             max_duration_seconds=max_duration_seconds,
             timeout_seconds=command_timeout_seconds,
+            secure_input=secure_input,
         )
         if abs(canonical_probe.duration_seconds - metadata.duration_seconds) > _duration_tolerance(
             metadata.duration_seconds
@@ -506,6 +544,153 @@ async def prepare_source(
         raise IngestError(
             "prepared_source_invalid", "the prepared source could not be finalized"
         ) from exc
+
+
+def _safe_work_path(path: Path, root: Path, *, label: str) -> Path:
+    candidate = Path(path)
+    resolved_root = root.resolve()
+    if candidate.is_symlink() or not candidate.resolve().parent.is_relative_to(resolved_root):
+        raise IngestError("prepared_source_invalid", f"the {label} path is unsafe")
+    candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    candidate.parent.chmod(0o700)
+    return candidate
+
+
+async def prepare_local_source(
+    input_path: Path,
+    work_directory: Path,
+    *,
+    title: str,
+    max_canonical_bytes: int,
+    command_timeout_seconds: int,
+) -> PreparedMedia:
+    """Probe any local audio-containing media and make the canonical MP3."""
+
+    work_directory = _safe_work_path(work_directory, work_directory.parent, label="work directory")
+    if input_path.is_symlink() or not input_path.is_file():
+        raise IngestError("source_download_failed", "the source file is not a regular file")
+    await probe_audio(
+        input_path,
+        root=work_directory,
+        max_duration_seconds=None,
+        timeout_seconds=command_timeout_seconds,
+        secure_input=True,
+    )
+    part_path = _safe_work_path(
+        work_directory / "source.mp3.part", work_directory, label="canonical"
+    )
+    final_path = _safe_work_path(work_directory / "source.mp3", work_directory, label="canonical")
+    if final_path.exists() or final_path.is_symlink():
+        final_path.unlink(missing_ok=True)
+    await normalize_audio(
+        input_path,
+        part_path,
+        root=work_directory,
+        timeout_seconds=command_timeout_seconds,
+        secure_input=True,
+    )
+    try:
+        os.replace(part_path, final_path)
+        with final_path.open("rb") as output:
+            os.fsync(output.fileno())
+    except OSError as exc:
+        raise IngestError("ffmpeg_failed", "the canonical source could not be finalized") from exc
+    measured = await probe_audio(
+        final_path,
+        root=work_directory,
+        max_duration_seconds=None,
+        timeout_seconds=command_timeout_seconds,
+        secure_input=True,
+    )
+    byte_size, digest = sha256_file(final_path)
+    if byte_size <= 0:
+        raise IngestError("prepared_source_invalid", "the canonical source is empty")
+    if byte_size > max_canonical_bytes:
+        raise IngestError(
+            "canonical_source_size_exceeded", "the canonical source exceeds the byte limit"
+        )
+    clean_title = _sanitize_title(title)
+    return PreparedMedia(clean_title, measured.duration_seconds, final_path, byte_size, digest)
+
+
+async def prepare_clip_local(
+    input_path: Path,
+    work_directory: Path,
+    *,
+    start_seconds: float,
+    end_seconds: float,
+    max_bytes: int,
+    command_timeout_seconds: int,
+) -> PreparedMedia:
+    """Create a precise canonical MP3 clip from a verified source MP3."""
+
+    if (
+        isinstance(start_seconds, bool)
+        or isinstance(end_seconds, bool)
+        or not math.isfinite(float(start_seconds))
+        or not math.isfinite(float(end_seconds))
+        or start_seconds < 0
+        or end_seconds <= start_seconds
+    ):
+        raise IngestError("invalid_source_range", "the selected source range is invalid")
+    safe_input = _safe_local_file(input_path, root=work_directory)
+    output_part = _safe_work_path(work_directory / "clip.mp3.part", work_directory, label="clip")
+    output_path = _safe_work_path(work_directory / "clip.mp3", work_directory, label="clip")
+    if output_path.exists() or output_path.is_symlink():
+        output_path.unlink(missing_ok=True)
+    duration = float(end_seconds) - float(start_seconds)
+    arguments = (
+        "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe,fd",
+        "-y",
+        "-ss",
+        f"{float(start_seconds):.6f}",
+        "-i",
+        str(safe_input),
+        "-t",
+        f"{duration:.6f}",
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-ac",
+        "2",
+        "-ar",
+        "48000",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "192k",
+        "-map_metadata",
+        "-1",
+        "-f",
+        "mp3",
+        str(output_part),
+    )
+    await _run_media_command(
+        arguments, error_code="ffmpeg_failed", timeout_seconds=command_timeout_seconds
+    )
+    try:
+        os.replace(output_part, output_path)
+    except OSError as exc:
+        raise IngestError("ffmpeg_failed", "the source clip could not be finalized") from exc
+    measured = await probe_audio(
+        output_path,
+        root=work_directory,
+        max_duration_seconds=None,
+        timeout_seconds=command_timeout_seconds,
+        secure_input=True,
+    )
+    if abs(measured.duration_seconds - duration) > 0.05:
+        raise IngestError("clip_duration_mismatch", "the prepared clip duration is not precise")
+    byte_size, digest = sha256_file(output_path)
+    if byte_size <= 0 or byte_size > max_bytes:
+        raise IngestError("source_size_exceeded", "the prepared clip exceeds the byte limit")
+    return PreparedMedia("source clip", measured.duration_seconds, output_path, byte_size, digest)
 
 
 def cleanup_job_directory(job_directory: Path, *, retain: bool) -> None:

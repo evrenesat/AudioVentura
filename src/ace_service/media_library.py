@@ -299,12 +299,14 @@ class MediaLibraryService:
         """Move every file, commit the tombstone, then best-effort purge bytes."""
 
         quarantine_paths: dict[int, str] = {}
+        source_asset_id: str | None = None
         with self.session_factory() as session:
             item = get_media_item(session, media_item_id)
             if item is None:
                 return False
             if item.deletion_state is MediaDeletionState.ACTIVE:
                 return False
+            source_asset_id = item.source_asset_id
             files = list(
                 session.scalars(
                     select(MediaFile)
@@ -335,6 +337,10 @@ class MediaLibraryService:
                 raise
 
         self._purge_item(media_item_id)
+        if source_asset_id is not None:
+            from ace_service.source_assets import purge_source_raw
+
+            purge_source_raw(self.settings, source_asset_id)
         return True
 
     def _purge_item(self, media_item_id: str) -> None:
@@ -480,6 +486,7 @@ class MediaLibraryService:
                 raise ValueError("project has nonterminal jobs")
             item_ids = [item.id for item in project.media_items]
             job_ids = [job.id for job in project.jobs]
+            source_asset_ids = [project.source_asset.id] if project.source_asset is not None else []
 
         for item_id in item_ids:
             with self.session_factory() as session:
@@ -490,6 +497,12 @@ class MediaLibraryService:
                     mark_media_item_deletion_pending(session, item.id)
                     session.commit()
             self.reconcile_item_deletion(item_id)
+
+        if source_asset_ids:
+            from ace_service.source_assets import purge_source_raw
+
+            for source_asset_id in source_asset_ids:
+                purge_source_raw(self.settings, source_asset_id)
 
         self.reconcile_project_output_files(project_key)
         with self.session_factory() as session:

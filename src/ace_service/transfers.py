@@ -20,6 +20,10 @@ from ace_service.artifact_store import materialize_async_stream
 from ace_service.config import ServiceSettings
 from ace_service.db import SessionFactory, initialize_database_for_settings
 from ace_service.models import (
+    AssetTransferCapability,
+    AssetTransferDirection,
+    AssetTransferPurpose,
+    AssetTransferStatus,
     Output,
     TransferCapability,
     TransferDirection,
@@ -28,20 +32,39 @@ from ace_service.models import (
 )
 from ace_service.repository import (
     attempt_provider_ref,
+    claim_asset_download,
+    complete_asset_upload,
     consume_transfer,
     create_output,
+    get_asset_transfer_by_token,
     get_job,
     get_output_by_path,
     get_transfer_by_token,
     get_variation_attempt,
     issue_transfer_capability,
+    mark_source_uploaded,
 )
 from ace_service.schemas import normalize_extension, normalize_relative_path, resolve_relative_path
 
 _PART_SUFFIX = ".part"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _OUTPUT_INDEX_RE = re.compile(r"(?:variation|cover)[-_](\d+)", re.IGNORECASE)
-_MIME_TYPES = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav"}
+_MIME_TYPES = {
+    ".bin": "application/octet-stream",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".wav": "audio/wav",
+}
+_ASSET_NAMESPACES = frozenset({"uploads", "library", "incoming", "outputs"})
+_ASSET_PURPOSE_CONTRACT = {
+    AssetTransferPurpose.BROWSER_SOURCE_UPLOAD: (AssetTransferDirection.UPLOAD, "uploads"),
+    AssetTransferPurpose.HOME_SOURCE_DOWNLOAD: (AssetTransferDirection.DOWNLOAD, "uploads"),
+    AssetTransferPurpose.HOME_SOURCE_MP3_UPLOAD: (AssetTransferDirection.UPLOAD, "library"),
+    AssetTransferPurpose.HOME_CLIP_DOWNLOAD: (AssetTransferDirection.DOWNLOAD, "library"),
+    AssetTransferPurpose.HOME_CLIP_UPLOAD: (AssetTransferDirection.UPLOAD, "incoming"),
+    AssetTransferPurpose.HOME_DERIVATIVE_DOWNLOAD: (AssetTransferDirection.DOWNLOAD, "outputs"),
+    AssetTransferPurpose.HOME_DERIVATIVE_UPLOAD: (AssetTransferDirection.UPLOAD, "library"),
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -168,6 +191,65 @@ def create_transfer_app(
                 request,
             )
 
+    @app.put("/asset-transfer/v2/upload/{token}", include_in_schema=False)
+    async def upload_asset(token: str, request: Request) -> JSONResponse:
+        """Receive one raw browser/Home Ingest asset without request buffering."""
+
+        settings = app.state.settings
+        with app.state.session_factory() as session:
+            capability = _asset_capability_for_route(session, token, AssetTransferDirection.UPLOAD)
+            final_path = _asset_capability_path(settings, capability)
+            max_bytes = min(capability.max_bytes, settings.direct_upload_max_bytes)
+            if capability.purpose is not AssetTransferPurpose.BROWSER_SOURCE_UPLOAD:
+                max_bytes = capability.max_bytes
+            capability_id = capability.id
+            session.commit()
+        lock = await _capability_lock(app, capability_id)
+        async with lock:
+            return await _receive_asset(
+                app.state.session_factory,
+                settings,
+                capability_id,
+                token,
+                final_path,
+                _asset_root(settings, capability.storage_namespace),
+                max_bytes,
+                request,
+            )
+
+    @app.get("/asset-transfer/v2/download/{token}", include_in_schema=False)
+    async def download_asset(token: str, request: Request) -> Response:
+        if request.headers.get("range") is not None:
+            raise HTTPException(
+                status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE,
+                detail="range requests are not supported",
+            )
+        settings = app.state.settings
+        with app.state.session_factory() as session:
+            capability = claim_asset_download(
+                session,
+                token,
+                max_opens=settings.asset_download_max_opens,
+            )
+            if capability is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="capability not found"
+                )
+            candidate = _asset_capability_path(settings, capability)
+            _validate_asset_file(
+                candidate,
+                _asset_root(settings, capability.storage_namespace),
+                capability,
+            )
+            content_type = _asset_mime_type(capability)
+            expected_size = capability.expected_byte_size or candidate.stat().st_size
+            session.commit()
+        return FileResponse(
+            candidate,
+            media_type=content_type,
+            headers={"Content-Length": str(expected_size), "Cache-Control": "no-store"},
+        )
+
     return app
 
 
@@ -210,6 +292,247 @@ def _active_capability(
     if consume and capability.status is TransferStatus.CONSUMED:
         return capability
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capability not found")
+
+
+def _asset_capability_for_route(
+    session: Session, token: str, direction: AssetTransferDirection
+) -> AssetTransferCapability:
+    capability = get_asset_transfer_by_token(session, token)
+    if capability is None or capability.direction is not direction:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capability not found")
+    current_time = utc_now()
+    if capability.expires_at <= current_time:
+        if capability.status in {AssetTransferStatus.ISSUED, AssetTransferStatus.CONSUMED}:
+            capability.status = AssetTransferStatus.EXPIRED
+            session.commit()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capability expired")
+    if capability.status is AssetTransferStatus.ISSUED:
+        return capability
+    # Upload retries are allowed to re-submit the same content identity.  The
+    # final path/hash comparison in _receive_asset rejects a conflicting body.
+    if (
+        direction is AssetTransferDirection.UPLOAD
+        and capability.status is AssetTransferStatus.CONSUMED
+    ):
+        return capability
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capability not found")
+
+
+def _asset_root(settings: ServiceSettings, namespace: str) -> Path:
+    roots = {
+        "uploads": settings.paths.uploads,
+        "library": settings.paths.library,
+        "incoming": settings.paths.incoming,
+        "outputs": settings.paths.outputs,
+    }
+    try:
+        return roots[namespace]
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability"
+        ) from exc
+
+
+def _asset_capability_path(settings: ServiceSettings, capability: AssetTransferCapability) -> Path:
+    contract = _ASSET_PURPOSE_CONTRACT.get(capability.purpose)
+    if (
+        capability.storage_namespace not in _ASSET_NAMESPACES
+        or contract is None
+        or capability.direction is not contract[0]
+        or capability.storage_namespace != contract[1]
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    root = _asset_root(settings, capability.storage_namespace)
+    relative = normalize_relative_path(capability.expected_relative_path)
+    parts = PurePosixPath(relative).parts
+    if parts and parts[0] == root.name:
+        relative = "/".join(parts[1:])
+    if not relative:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    try:
+        candidate = resolve_relative_path(root, relative)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability"
+        ) from exc
+    expected_extension = normalize_extension(capability.expected_extension)
+    actual_extension = candidate.suffix.lower()
+    if expected_extension == ".lossless":
+        valid_extension = actual_extension in {".flac", ".wav"}
+    else:
+        valid_extension = actual_extension == expected_extension
+    if not valid_extension or _has_symlink_component(root, candidate):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    if capability.purpose is AssetTransferPurpose.BROWSER_SOURCE_UPLOAD:
+        if (
+            capability.source_asset_id is None
+            or relative != f"{capability.source_asset_id}/source.bin"
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    elif capability.purpose is AssetTransferPurpose.HOME_SOURCE_DOWNLOAD:
+        if (
+            capability.source_asset_id is None
+            or relative != f"{capability.source_asset_id}/source.bin"
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    elif capability.purpose is AssetTransferPurpose.HOME_SOURCE_MP3_UPLOAD:
+        if capability.source_asset_id is None or relative != (
+            f"sources/{capability.source_asset_id}/source.mp3"
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    elif capability.purpose is AssetTransferPurpose.HOME_CLIP_DOWNLOAD:
+        if capability.source_asset_id is None or relative != (
+            f"sources/{capability.source_asset_id}/source.mp3"
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    elif capability.purpose is AssetTransferPurpose.HOME_CLIP_UPLOAD:
+        if capability.job_id is None or relative != f"{capability.job_id}/source.mp3":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    elif capability.purpose is AssetTransferPurpose.HOME_DERIVATIVE_DOWNLOAD:
+        task = capability.derivative_task
+        if task is None or task.source_media_file is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+        if relative != task.source_media_file.relative_path:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    elif capability.purpose is AssetTransferPurpose.HOME_DERIVATIVE_UPLOAD:
+        task = capability.derivative_task
+        if task is None or relative != f"generated/{task.media_item_id}/playback.mp3":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        candidate.parent.chmod(0o700)
+    except OSError:
+        pass
+    if _has_symlink_component(root, candidate):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability")
+    return candidate
+
+
+def _asset_mime_type(capability: AssetTransferCapability) -> str:
+    extension = normalize_extension(capability.expected_extension)
+    if extension == ".lossless":
+        extension = normalize_extension(Path(capability.expected_relative_path).suffix)
+    try:
+        return _MIME_TYPES[extension]
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability"
+        ) from exc
+
+
+def _validate_asset_file(candidate: Path, root: Path, capability: AssetTransferCapability) -> int:
+    if _has_symlink_component(root, candidate) or candidate.is_symlink() or not candidate.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
+    try:
+        size = candidate.stat().st_size
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="asset not found"
+        ) from exc
+    expected_size = capability.expected_byte_size
+    expected_hash = capability.expected_sha256
+    if size <= 0 or size > capability.max_bytes or expected_size != size or expected_hash is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset unavailable")
+    if _file_sha256(candidate) != expected_hash:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset unavailable")
+    return size
+
+
+async def _receive_asset(
+    session_factory: SessionFactory,
+    settings: ServiceSettings,
+    capability_id: str,
+    token: str,
+    final_path: Path,
+    root: Path,
+    max_bytes: int,
+    request: Request,
+) -> JSONResponse:
+    content_length = _content_length(request)
+    if content_length is not None and (content_length <= 0 or content_length > max_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="asset exceeds capability byte limit",
+        )
+    existing = final_path.exists() and not final_path.is_symlink()
+    candidate_path = (
+        final_path.with_name(f".{final_path.name}.{capability_id}.retry")
+        if existing
+        else final_path
+    )
+    _unlink_quietly(candidate_path)
+    try:
+        receipt = await materialize_async_stream(
+            request.stream(),
+            root=root,
+            target=candidate_path,
+            max_bytes=max_bytes,
+            content_type="application/octet-stream",
+        )
+        if content_length is not None and content_length != receipt.byte_size:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="body length mismatch"
+            )
+        supplied = request.headers.get("x-ace-asset-sha256") or request.headers.get(
+            "x-ace-output-sha256"
+        )
+        if supplied is not None and (
+            not _SHA256_RE.fullmatch(supplied) or supplied.lower() != receipt.sha256
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="asset checksum mismatch"
+            )
+        if existing:
+            if (
+                final_path.stat().st_size != receipt.byte_size
+                or _file_sha256(final_path) != receipt.sha256
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail="conflicting asset retry"
+                )
+            _unlink_quietly(receipt.path)
+        with session_factory() as session:
+            capability = session.get(AssetTransferCapability, capability_id)
+            if capability is None or capability.token_sha256 != _token_hash(token):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="capability not found"
+                )
+            completed = complete_asset_upload(
+                session,
+                capability.id,
+                byte_size=receipt.byte_size,
+                sha256=receipt.sha256,
+            )
+            if completed.purpose is AssetTransferPurpose.BROWSER_SOURCE_UPLOAD:
+                if completed.source_asset_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND, detail="invalid capability"
+                    )
+                mark_source_uploaded(
+                    session,
+                    completed.source_asset_id,
+                    raw_relative_path=completed.expected_relative_path,
+                    raw_byte_size=receipt.byte_size,
+                    raw_sha256=receipt.sha256,
+                )
+            session.commit()
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "accepted", "bytes": receipt.byte_size, "sha256": receipt.sha256},
+        )
+    except HTTPException:
+        _unlink_quietly(candidate_path)
+        raise
+    except (OSError, ValueError) as exc:
+        _unlink_quietly(candidate_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="asset rejected"
+        ) from exc
+    except Exception as exc:
+        _unlink_quietly(candidate_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="asset rejected"
+        ) from exc
 
 
 def _global_limit(settings: ServiceSettings, direction: TransferDirection) -> int:

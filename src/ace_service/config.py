@@ -47,6 +47,10 @@ class DataPaths:
         return self.root / "incoming"
 
     @property
+    def uploads(self) -> Path:
+        return self.root / "uploads"
+
+    @property
     def outputs(self) -> Path:
         return self.root / "outputs"
 
@@ -78,6 +82,7 @@ class DataPaths:
     def all_directories(self) -> tuple[Path, ...]:
         return (
             self.root,
+            self.uploads,
             self.incoming,
             self.outputs,
             self.library,
@@ -95,6 +100,31 @@ class DataPaths:
 
     def job_temporary(self, job_id: str) -> Path:
         return self.temporary / job_id
+
+    @staticmethod
+    def _uuid_component(value: str) -> str:
+        normalized = str(value)
+        if not re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+            normalized,
+        ):
+            raise ValueError("asset identity must be a UUID")
+        return normalized.lower()
+
+    def source_upload_directory(self, source_asset_id: str) -> Path:
+        return self.uploads / self._uuid_component(source_asset_id)
+
+    def source_upload_part(self, source_asset_id: str) -> Path:
+        return self.source_upload_directory(source_asset_id) / "source.bin.part"
+
+    def source_upload_final(self, source_asset_id: str) -> Path:
+        return self.source_upload_directory(source_asset_id) / "source.bin"
+
+    def source_library(self, source_asset_id: str) -> Path:
+        return self.library / "sources" / self._uuid_component(source_asset_id) / "source.mp3"
+
+    def generated_playback(self, media_item_id: str) -> Path:
+        return self.library / "generated" / self._uuid_component(media_item_id) / "playback.mp3"
 
     def media_trash_item(self, media_item_id: str) -> Path:
         return self.trash / "media" / media_item_id
@@ -177,6 +207,23 @@ class ServiceSettings(BaseSettings):
         default=268435456,
         validation_alias=AliasChoices("ACE_TRANSFER_MAX_OUTPUT_BYTES", "transfer_max_output_bytes"),
         gt=0,
+    )
+    direct_upload_max_bytes: int = Field(
+        default=536_870_912,
+        validation_alias=AliasChoices("ACE_DIRECT_UPLOAD_MAX_BYTES", "direct_upload_max_bytes"),
+        gt=0,
+    )
+    canonical_source_max_bytes: int = Field(
+        default=536_870_912,
+        validation_alias=AliasChoices(
+            "ACE_CANONICAL_SOURCE_MAX_BYTES", "canonical_source_max_bytes"
+        ),
+        gt=0,
+    )
+    asset_download_max_opens: int = Field(
+        default=3,
+        validation_alias=AliasChoices("ACE_ASSET_DOWNLOAD_MAX_OPENS", "asset_download_max_opens"),
+        ge=1,
     )
     home_ingest_base_url: str = Field(
         default="https://home-name.tailnet-name.ts.net",

@@ -50,6 +50,10 @@ class MockProvider:
         native_formats=frozenset({"mp3"}),
         adapter="mock",
         enforces_requested_duration=False,
+        source_duration_min_seconds=1.0,
+        source_duration_max_seconds=600.0,
+        output_duration_min_seconds=1.0,
+        output_duration_max_seconds=600.0,
     )
 
     def __init__(

@@ -751,6 +751,10 @@
       "media_kind": "music",
       "adapter": "ace_step_audio",
       "schema_sha256": "486d94bfffc2523f1283c86ba8325b2069b306578399b3b27e1c86c817704815",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -807,6 +811,10 @@
       "media_kind": "music",
       "adapter": "ace_step_inpaint",
       "schema_sha256": "3c880790f7eb68514d1520396418a182cde90ca9a45d19792cba9bd8309a9438",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -856,6 +864,10 @@
       "media_kind": "music",
       "adapter": "ace_step_outpaint",
       "schema_sha256": "bb28a571cd9a1e0117c3d17b6975adce79be716ae1558bdb46ef21f278173acc",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -903,6 +915,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "a1e734fec8b3e24ce500e2cac51e61b5f891df506c671d2e23361757a344b307",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -943,6 +959,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "f39315f402c29f722e47b0c985ba058296aa5db9de14f641c3d8af245ea38ac3",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -992,6 +1012,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "69cfcf1379924fe039c96c3e9ff3bd2702f2ab14def33101b4816c53520d3011",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1039,6 +1063,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "1f960b606d22a861a8d1e2e4eadb5f4681afe5779094eda55a37d15897eb8b8a",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1079,6 +1107,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "ae6ae985893913bd7e4b5e94261c923b9e15124d6652aef456f40d527f192566",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1128,6 +1160,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "764e5519a8dc2775363ba1599b3582fbab8efec0a6b6cb8582926ef92d37c20f",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1175,6 +1211,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "cf5cf12d05fce328449f31a932cf9d80c2ecb7796c267a7724b25aa7da068f07",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1215,6 +1255,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "9fc097c76d0192c0f9fcc6c6036302467fec466f0da878681d74f06e3bd3b301",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1264,6 +1308,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "77669345cace29fac3534096a715ca122c79f224281cf3507c9e5724d9a8c4cd",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1311,6 +1359,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "b552647b704020c3a9dd9f2970cba644fae93ff4a1fcbabc6f8348962cd9f252",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1351,6 +1403,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "6d951c88e12e75addbcebbd3fe6ff3982ef5a25548398066d693a58acca5d6f4",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1400,6 +1456,10 @@
       "media_kind": "music",
       "adapter": "stable_audio_3_audio",
       "schema_sha256": "63e3a2d61ec7e3132c40c9e2500167c190624e6710833da8a66f1d4522aa7fbe",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1447,6 +1507,10 @@
       "media_kind": "music_and_sfx",
       "adapter": "stable_audio_25_audio",
       "schema_sha256": "8b9609e3c45803f62f45a35f24bb660820ed584b84f9046d6ff9bff12a07a1d8",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",
@@ -1488,6 +1552,10 @@
       "media_kind": "music_and_sfx",
       "adapter": "stable_audio_25_audio",
       "schema_sha256": "6094acf70e1f4f9a7217cbbd3600894aca5ac24d238e6c9e3b573a7e317bacd8",
+      "source_duration_min_seconds": 1,
+      "source_duration_max_seconds": 600,
+      "output_duration_min_seconds": 1,
+      "output_duration_max_seconds": 600,
       "fields": {
         "source_audio": {
           "ui_name": "Source audio",

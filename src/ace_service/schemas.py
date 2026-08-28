@@ -313,7 +313,7 @@ class CoverRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    youtube_url: str = Field(min_length=1, max_length=2048)
+    youtube_url: str | None = Field(default=None, min_length=1, max_length=2048)
     target_style: str = Field(min_length=3, max_length=4000)
     source_style: str | None = Field(default=None, min_length=1, max_length=4000)
     remix_guidance: str | None = Field(default=None, max_length=4000)
@@ -336,10 +336,10 @@ class CoverRequest(BaseModel):
     # jobs. Browser submissions no longer ask for a redundant confirmation.
     rights_confirmation: StrictBool = True
 
-    @field_validator("youtube_url")
+    @field_validator("youtube_url", mode="before")
     @classmethod
-    def youtube_url_is_approved(cls, value: str) -> str:
-        return validate_youtube_url(value)
+    def youtube_url_is_approved(cls, value: str | None) -> str | None:
+        return validate_youtube_url(value) if value is not None else None
 
     @field_validator("target_style", mode="before")
     @classmethod

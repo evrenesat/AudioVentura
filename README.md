@@ -1,15 +1,19 @@
 # AudioVentura
 
 AudioVentura is a private web application for generating music with ACE-Step.
-It supports original songs and covers made from a public YouTube source. The
-intended audience for this repository is the operator and coding agents.
+It supports a source-first workflow: a user can ingest a YouTube source or one
+audio/video upload, play the canonical source, choose a backend-valid range,
+and create a remix. The intended audience for this repository is the operator
+and coding agents.
 
 The system is split into separate processes because they have different trust
 and hardware requirements:
 
 - the controller owns the private UI, SQLite state, and job orchestration;
-- the transfer service moves audio through short-lived signed URLs;
-- Home Ingest downloads and prepares YouTube audio on the home network;
+- the transfer service moves raw and prepared audio through short-lived signed
+  URLs;
+- Home Ingest downloads, probes, and prepares YouTube or uploaded media on the
+  home network;
 - the private sequential MIDI mock renders deterministic corpus entries on p100;
 - Runpod or SaladCloud runs the GPU worker; reviewed fal.ai Model APIs run as
   controller-pulled managed backends.
@@ -32,13 +36,14 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
 - `mock/midi-sequential` is an opt-in, MP3-only integration backend. It ignores
   creative parameters, consumes one MIDI cursor entry per variation, and never
   replaces a real-provider default or acts as fallback.
-- Completed MP3 variations are published into the authenticated media library
-  only after output verification. Library tracks can be renamed, deleted into
-  a recoverable trash state, and placed in ordered custom playlists or
-  generated auto-playlists.
+- A ready source is published as one canonical stereo 48 kHz 192 kbps MP3
+  before remix submission and is added to its project playlist exactly once.
+  Completed MP3 variations are published after output verification. FLAC/WAV
+  results retain their lossless primary download and enter the library only
+  after a verified MP3 playback derivative is ready.
 - The persistent player owns one global audio element and keeps its queue,
   playback position, shuffle, repeat, and rate across same-origin navigation.
-  It intentionally has no source-upload or offline-cache feature.
+  It is online-only; offline caching is deferred.
 - Queued and in-flight jobs can be cancelled when the persisted provider state
   permits it. Project deletion is available only after every job is terminal;
   it records a bounded audit summary before path-verifying and removing the
@@ -108,7 +113,12 @@ Important groups are:
   public hostname. `ACE_SERVICE_INCOMING_DIRECTORY_MODE` defaults to `0700`;
   the isolated beta controller sets it to `0770` for its restricted SFTP
   group while keeping the data root and all other directories private;
-- `ACE_TRANSFER_*`: public signed-transfer origin, limits, and token lifetime;
+- `ACE_TRANSFER_*`: public signed-transfer origin, limits, and token lifetime.
+  New direct/source/clip/derivative transfers use v2 capabilities; the raw
+  source and canonical MP3 limits are exactly 536,870,912 bytes (512 MiB).
+- `ACE_DIRECT_UPLOAD_MAX_BYTES`, `ACE_CANONICAL_SOURCE_MAX_BYTES`, and
+  `ACE_ASSET_DOWNLOAD_MAX_OPENS`: direct upload/canonical limits and bounded
+  Home Ingest download retries;
 - `ACE_HOME_INGEST_*`: private Home Ingest endpoint and bearer token;
 - `MOCK_BASE_URL`, `MOCK_TOKEN`, `MOCK_POLL_INTERVAL_SECONDS`, and
   `MOCK_*_TIMEOUT_SECONDS`: private mock endpoint credentials and bounded
@@ -191,7 +201,8 @@ Default binds are:
 
 Do not expose these ports directly. The controller belongs behind the private
 tailnet. The public proxy may forward only the signed transfer paths described
-in [the operations runbook](docs/OPERATIONS.md).
+in [the operations runbook](docs/OPERATIONS.md). The controller never runs
+`ffmpeg`/`ffprobe`; all media probing and transcoding stays in Home Ingest.
 
 ## Database migrations
 
@@ -209,11 +220,11 @@ uv run python -m ace_service migrate-upgrade \
 Do not retry an incomplete migration. Restore the verified backup and
 investigate first.
 
-Schema v10 adds media items/files, playlists and entries, project-deletion
-audits, and durable cancellation outcomes. It is additive and does not
-backfill the library: only later verified completions are published. See the
-[operations runbook](docs/OPERATIONS.md) for the backup, rehearsal, and
-rollback sequence.
+Schema v11 adds source assets, v2 asset capabilities, source provenance,
+backend-frozen clip bounds, and MP3 derivative tasks on top of the v10 media
+library. The migration is additive and does not backfill historical source or
+media rows. See the [operations runbook](docs/OPERATIONS.md) for backup,
+rehearsal, and rollback sequencing.
 
 ## Browser verification
 
@@ -225,11 +236,12 @@ uv run playwright install --with-deps chromium firefox
 uv run pytest -q tests/e2e --browser chromium --browser firefox
 ```
 
-The browser suite uses a disposable loopback server and fake providers. It
-checks the `/beta` root-path contract, library and playlist flows, one global
-player across soft navigation, mobile target sizes, deletion, and
-cancellation. The non-paid live mock acceptance script is separate and requires
-protected credentials plus a caller-approved YouTube URL; see
+The browser suite uses a disposable loopback server, real local
+ffmpeg/ffprobe, real v2 transfer streaming, and a non-paid provider stub. It
+checks the `/beta` root-path contract, source upload and playlist ordering, one
+global player across soft navigation, mobile target sizes, deletion, and
+cancellation. The protected beta mock acceptance script is separate and
+requires protected credentials plus a caller-approved YouTube URL; see
 [Operations](docs/OPERATIONS.md).
 
 ## Verification

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 import httpx
@@ -92,6 +94,62 @@ class PreparedCoverSource:
             prepared_bytes=prepared_bytes,
             prepared_sha256=prepared_sha256.lower(),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSourceAsset:
+    """Verified metadata returned by the v2 source operation."""
+
+    source_asset_id: str
+    title: str
+    duration_seconds: float
+    prepared_bytes: int
+    prepared_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedClip:
+    """Verified metadata returned by the v2 clip operation."""
+
+    job_id: str
+    duration_seconds: float
+    prepared_bytes: int
+    prepared_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedDerivative:
+    """Verified metadata returned by the v2 playback-derivative operation."""
+
+    derivative_task_id: str
+    duration_seconds: float
+    prepared_bytes: int
+    prepared_sha256: str
+
+
+def _bounded_hash(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in value)
+    ):
+        raise HomeIngestError("home_ingest_invalid_response", "home returned an invalid checksum")
+    return value.lower()
+
+
+def _positive_float(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise HomeIngestError("home_ingest_invalid_response", "home returned an invalid duration")
+    result = float(value)
+    if not math.isfinite(result):
+        raise HomeIngestError("home_ingest_invalid_response", "home returned an invalid duration")
+    return result
+
+
+def _positive_bytes(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise HomeIngestError("home_ingest_invalid_response", "home returned invalid byte metadata")
+    return cast(int, value)
 
 
 class HomeIngestService(Protocol):
@@ -233,6 +291,167 @@ class HomeIngestClient:
             extra={"component": "controller"},
         )
         return result
+
+    async def _post_v2(self, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Call one v2 operation without exposing capability URLs in logs."""
+
+        try:
+            response = await self._client.post(path, json=dict(payload))
+        except httpx.HTTPError as exc:
+            raise HomeIngestError(
+                "home_ingest_unavailable", "the home ingest service could not be reached"
+            ) from exc
+        if len(response.content) > _MAX_RESPONSE_BYTES:
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned an oversized response"
+            )
+        if response.status_code < 200 or response.status_code >= 300:
+            raise _error_from_response(response)
+        try:
+            body = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned non-JSON metadata"
+            ) from exc
+        if not isinstance(body, Mapping):
+            raise HomeIngestError("home_ingest_invalid_response", "home returned invalid metadata")
+        return body
+
+    async def prepare_source_v2(
+        self,
+        *,
+        source_asset_id: str,
+        origin: str,
+        display_title: str,
+        canonical_upload_url: str,
+        youtube_url: str | None = None,
+        raw_download_url: str | None = None,
+        raw_byte_size: int | None = None,
+        raw_sha256: str | None = None,
+        max_raw_bytes: int,
+        max_canonical_bytes: int,
+    ) -> PreparedSourceAsset:
+        body = await self._post_v2(
+            "v2/prepare-source",
+            {
+                "source_asset_id": source_asset_id,
+                "origin": origin,
+                "display_title": display_title,
+                "youtube_url": youtube_url,
+                "raw_download_url": raw_download_url,
+                "raw_byte_size": raw_byte_size,
+                "raw_sha256": raw_sha256,
+                "canonical_upload_url": canonical_upload_url,
+                "max_raw_bytes": max_raw_bytes,
+                "max_canonical_bytes": max_canonical_bytes,
+            },
+        )
+        try:
+            returned_id = str(UUID(str(body["source_asset_id"])))
+            title = body["title"]
+            byte_size = _positive_bytes(body["prepared_bytes"])
+            digest = _bounded_hash(body["prepared_sha256"])
+            duration = _positive_float(body["duration_seconds"])
+            prepared_format = body["prepared_format"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned incomplete source metadata"
+            ) from exc
+        if (
+            returned_id != str(UUID(str(source_asset_id)))
+            or not isinstance(title, str)
+            or not title
+            or len(title) > 300
+            or prepared_format != "mp3"
+        ):
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned invalid source metadata"
+            )
+        return PreparedSourceAsset(returned_id, title, duration, byte_size, digest)
+
+    async def prepare_clip_v2(
+        self,
+        *,
+        job_id: str,
+        source_download_url: str,
+        source_byte_size: int,
+        source_sha256: str,
+        clip_upload_url: str,
+        start_seconds: float,
+        end_seconds: float,
+        max_source_bytes: int,
+    ) -> PreparedClip:
+        body = await self._post_v2(
+            "v2/prepare-clip",
+            {
+                "job_id": job_id,
+                "source_download_url": source_download_url,
+                "source_byte_size": source_byte_size,
+                "source_sha256": source_sha256,
+                "clip_upload_url": clip_upload_url,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+                "max_source_bytes": max_source_bytes,
+            },
+        )
+        try:
+            returned_id = str(UUID(str(body["job_id"])))
+            duration = _positive_float(body["duration_seconds"])
+            byte_size = _positive_bytes(body["prepared_bytes"])
+            digest = _bounded_hash(body["prepared_sha256"])
+            prepared_format = body["prepared_format"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned incomplete clip metadata"
+            ) from exc
+        if returned_id != str(UUID(str(job_id))) or prepared_format != "mp3":
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned invalid clip metadata"
+            )
+        return PreparedClip(returned_id, duration, byte_size, digest)
+
+    async def prepare_derivative_v2(
+        self,
+        *,
+        derivative_task_id: str,
+        source_download_url: str,
+        source_byte_size: int,
+        source_sha256: str,
+        source_format: str,
+        derivative_upload_url: str,
+        max_source_bytes: int,
+        max_canonical_bytes: int,
+        expected_duration_seconds: float | None,
+    ) -> PreparedDerivative:
+        body = await self._post_v2(
+            "v2/prepare-playback-derivative",
+            {
+                "derivative_task_id": derivative_task_id,
+                "source_download_url": source_download_url,
+                "source_byte_size": source_byte_size,
+                "source_sha256": source_sha256,
+                "source_format": source_format,
+                "derivative_upload_url": derivative_upload_url,
+                "max_source_bytes": max_source_bytes,
+                "max_canonical_bytes": max_canonical_bytes,
+                "expected_duration_seconds": expected_duration_seconds,
+            },
+        )
+        try:
+            returned_id = str(UUID(str(body["derivative_task_id"])))
+            duration = _positive_float(body["duration_seconds"])
+            byte_size = _positive_bytes(body["prepared_bytes"])
+            digest = _bounded_hash(body["prepared_sha256"])
+            prepared_format = body["prepared_format"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned incomplete derivative metadata"
+            ) from exc
+        if returned_id != str(UUID(str(derivative_task_id))) or prepared_format != "mp3":
+            raise HomeIngestError(
+                "home_ingest_invalid_response", "home returned invalid derivative metadata"
+            )
+        return PreparedDerivative(returned_id, duration, byte_size, digest)
 
 
 def _error_from_response(response: httpx.Response) -> HomeIngestError:

@@ -13,6 +13,7 @@ import httpx
 
 _ALLOWED_CDN_HOSTS = frozenset({"storage.googleapis.com", "fal.media", "cdn.fal.ai"})
 _MIME_BY_FORMAT = {"mp3": "audio/mpeg", "flac": "audio/flac", "wav": "audio/wav"}
+_RAW_UPLOAD_MIME = "application/octet-stream"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +71,7 @@ def materialize_stream(
 ) -> ArtifactReceipt:
     """Write a synchronous byte iterator atomically below ``root``."""
 
-    if max_bytes <= 0 or content_type not in _MIME_BY_FORMAT.values():
+    if max_bytes <= 0 or content_type not in {*_MIME_BY_FORMAT.values(), _RAW_UPLOAD_MIME}:
         raise ValueError("artifact limits are invalid")
     final_path = _safe_target(root, target)
     if final_path.exists() and final_path.is_file() and not final_path.is_symlink():
@@ -125,7 +126,7 @@ async def materialize_async_stream(
 ) -> ArtifactReceipt:
     """Write an asynchronous byte stream atomically below ``root``."""
 
-    if max_bytes <= 0 or content_type not in _MIME_BY_FORMAT.values():
+    if max_bytes <= 0 or content_type not in {*_MIME_BY_FORMAT.values(), _RAW_UPLOAD_MIME}:
         raise ValueError("artifact limits are invalid")
     final_path = _safe_target(root, target)
     if final_path.exists() and final_path.is_file() and not final_path.is_symlink():

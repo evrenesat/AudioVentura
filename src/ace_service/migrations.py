@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -681,6 +681,152 @@ def _cp10_ddl(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _cp11_ddl(connection: sqlite3.Connection) -> None:
+    """Add source-first ingestion, asset transfer, and derivative state.
+
+    This step is intentionally additive.  Existing schema-v10 source rows are
+    experimental and cannot be assigned an owner without guessing, so the
+    migration refuses them before adding the stronger v11 provenance rules.
+    """
+
+    existing_source = connection.execute(
+        "SELECT COUNT(*) FROM media_items WHERE kind = 'source'"
+    ).fetchone()
+    if existing_source is None or int(existing_source[0]) != 0:
+        raise MigrationError(
+            "schema-v11 migration found existing source media rows; no-backfill is required"
+        )
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS source_assets ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "project_id VARCHAR(36) NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE, "
+        "origin VARCHAR(16) NOT NULL, "
+        "status VARCHAR(24) NOT NULL DEFAULT 'queued', "
+        "display_title VARCHAR(300) NOT NULL, "
+        "youtube_url VARCHAR(2048), youtube_video_id VARCHAR(128), "
+        "original_filename VARCHAR(300), declared_byte_size INTEGER, "
+        "raw_relative_path VARCHAR(1024), raw_byte_size INTEGER, raw_sha256 VARCHAR(64), "
+        "canonical_byte_size INTEGER, canonical_sha256 VARCHAR(64), duration_seconds REAL, "
+        "rights_confirmation_at DATETIME NOT NULL, error_code VARCHAR(64), "
+        "user_facing_error VARCHAR(500), attempt_count INTEGER NOT NULL DEFAULT 0, "
+        "next_attempt_at DATETIME, started_at DATETIME, completed_at DATETIME, "
+        "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+        "CHECK (origin IN ('youtube', 'upload')), "
+        "CHECK (status IN ('awaiting_upload', 'uploaded', 'queued', 'preparing', "
+        "'ready', 'failed', 'cancelled')), "
+        "CHECK ((origin = 'youtube' AND youtube_url IS NOT NULL AND youtube_video_id IS NOT NULL) "
+        "OR (origin = 'upload' AND original_filename IS NOT NULL "
+        "AND declared_byte_size IS NOT NULL)), "
+        "CHECK (declared_byte_size IS NULL OR declared_byte_size > 0), "
+        "CHECK (raw_byte_size IS NULL OR raw_byte_size > 0), "
+        "CHECK (canonical_byte_size IS NULL OR canonical_byte_size > 0), "
+        "CHECK (duration_seconds IS NULL OR (duration_seconds > 0 AND "
+        "duration_seconds = duration_seconds)), "
+        "CHECK ((status = 'ready') = (duration_seconds IS NOT NULL AND "
+        "canonical_byte_size IS NOT NULL "
+        "AND canonical_sha256 IS NOT NULL)))"
+    )
+
+    media_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(media_items)").fetchall()
+    }
+    if "source_asset_id" not in media_columns:
+        connection.execute(
+            "ALTER TABLE media_items ADD COLUMN source_asset_id VARCHAR(36) "
+            "REFERENCES source_assets(id) ON DELETE CASCADE"
+        )
+    job_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+    for name, declaration in {
+        "source_media_item_id": "VARCHAR(36) REFERENCES media_items(id) ON DELETE SET NULL",
+        "source_clip_start_seconds": "REAL",
+        "source_clip_end_seconds": "REAL",
+        "source_clip_duration_seconds": "REAL",
+    }.items():
+        if name not in job_columns:
+            connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS media_derivative_tasks ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "media_item_id VARCHAR(36) NOT NULL UNIQUE REFERENCES media_items(id) ON DELETE CASCADE, "
+        "source_media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE, "
+        "output_media_file_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL, "
+        "kind VARCHAR(24) NOT NULL DEFAULT 'mp3_playback', "
+        "status VARCHAR(16) NOT NULL DEFAULT 'pending', attempt_count INTEGER NOT NULL DEFAULT 0, "
+        "next_attempt_at DATETIME, error_code VARCHAR(64), user_facing_error VARCHAR(500), "
+        "started_at DATETIME, completed_at DATETIME, created_at DATETIME NOT NULL, "
+        "updated_at DATETIME NOT NULL, CHECK (kind IN ('mp3_playback')), "
+        "CHECK (status IN ('pending', 'running', 'ready', 'failed')), "
+        "CHECK (attempt_count >= 0))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS asset_transfer_capabilities ("
+        "id VARCHAR(36) PRIMARY KEY, token_sha256 VARCHAR(64) NOT NULL UNIQUE, "
+        "direction VARCHAR(8) NOT NULL, purpose VARCHAR(32) NOT NULL, "
+        "source_asset_id VARCHAR(36) REFERENCES source_assets(id) ON DELETE CASCADE, "
+        "job_id VARCHAR(36) REFERENCES jobs(id) ON DELETE CASCADE, "
+        "derivative_task_id VARCHAR(36) REFERENCES media_derivative_tasks(id) ON DELETE CASCADE, "
+        "storage_namespace VARCHAR(16) NOT NULL, expected_relative_path VARCHAR(1024) NOT NULL, "
+        "expected_extension VARCHAR(16) NOT NULL, expected_mime_type VARCHAR(128), "
+        "expected_byte_size INTEGER, expected_sha256 VARCHAR(64), max_bytes INTEGER NOT NULL, "
+        "status VARCHAR(16) NOT NULL DEFAULT 'issued', access_count INTEGER NOT NULL DEFAULT 0, "
+        "received_byte_size INTEGER, received_sha256 VARCHAR(64), expires_at DATETIME NOT NULL, "
+        "consumed_at DATETIME, created_at DATETIME NOT NULL, "
+        "CHECK (direction IN ('upload', 'download')), "
+        "CHECK (purpose IN ('browser_source_upload', 'home_source_download', "
+        "'home_source_mp3_upload', 'home_clip_download', 'home_clip_upload', "
+        "'home_derivative_download', 'home_derivative_upload')), "
+        "CHECK (storage_namespace IN ('uploads', 'library', 'incoming', 'outputs')), "
+        "CHECK (status IN ('issued', 'consumed', 'expired', 'revoked')), "
+        "CHECK (((source_asset_id IS NOT NULL) + (job_id IS NOT NULL) + "
+        "(derivative_task_id IS NOT NULL)) = 1), "
+        "CHECK (max_bytes > 0), "
+        "CHECK (received_byte_size IS NULL OR received_byte_size > 0))"
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_media_items_source_asset_id "
+        "ON media_items (source_asset_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_media_items_source_asset_id "
+        "ON media_items (source_asset_id) WHERE source_asset_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_jobs_source_media_item_id ON jobs (source_media_item_id)",
+        "CREATE INDEX IF NOT EXISTS ix_media_derivative_tasks_media_item_id "
+        "ON media_derivative_tasks (media_item_id)",
+        "CREATE INDEX IF NOT EXISTS ix_asset_transfer_capabilities_token_sha256 "
+        "ON asset_transfer_capabilities (token_sha256)",
+        "CREATE INDEX IF NOT EXISTS ix_asset_transfer_capabilities_source_asset_id "
+        "ON asset_transfer_capabilities (source_asset_id)",
+        "CREATE INDEX IF NOT EXISTS ix_asset_transfer_capabilities_job_id "
+        "ON asset_transfer_capabilities (job_id)",
+        "CREATE INDEX IF NOT EXISTS ix_asset_transfer_capabilities_derivative_task_id "
+        "ON asset_transfer_capabilities (derivative_task_id)",
+    ):
+        connection.execute(statement)
+    for statement in (
+        "CREATE TRIGGER IF NOT EXISTS trg_media_items_provenance_insert "
+        "BEFORE INSERT ON media_items FOR EACH ROW WHEN NOT "
+        "((NEW.kind = 'source' AND NEW.source_asset_id IS NOT NULL AND "
+        "NEW.generated_output_id IS NULL) OR (NEW.kind = 'generated' AND "
+        "NEW.source_asset_id IS NULL AND NEW.generated_output_id IS NOT NULL)) "
+        "BEGIN SELECT RAISE(ABORT, 'invalid media provenance'); END",
+        "CREATE TRIGGER IF NOT EXISTS trg_media_items_provenance_update "
+        "BEFORE UPDATE OF kind, source_asset_id, generated_output_id ON media_items "
+        "FOR EACH ROW WHEN NOT ((NEW.kind = 'source' AND NEW.source_asset_id IS NOT NULL "
+        "AND NEW.generated_output_id IS NULL) OR (NEW.kind = 'generated' AND "
+        "NEW.source_asset_id IS NULL AND NEW.generated_output_id IS NOT NULL)) "
+        "BEGIN SELECT RAISE(ABORT, 'invalid media provenance'); END",
+        "CREATE TRIGGER IF NOT EXISTS trg_media_derivative_ready_insert "
+        "BEFORE INSERT ON media_derivative_tasks FOR EACH ROW WHEN NEW.status = 'ready' "
+        "AND NEW.output_media_file_id IS NULL BEGIN SELECT RAISE(ABORT, "
+        "'ready derivative has no output'); END",
+        "CREATE TRIGGER IF NOT EXISTS trg_media_derivative_ready_update "
+        "BEFORE UPDATE OF status, output_media_file_id ON media_derivative_tasks "
+        "FOR EACH ROW WHEN NEW.status = 'ready' AND NEW.output_media_file_id IS NULL "
+        "BEGIN SELECT RAISE(ABORT, 'ready derivative has no output'); END",
+    ):
+        connection.execute(statement)
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
@@ -700,6 +846,9 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
         "notification_deliveries",
         "media_items",
         "media_files",
+        "source_assets",
+        "asset_transfer_capabilities",
+        "media_derivative_tasks",
         "playlists",
         "playlist_entries",
         "project_deletion_audits",
@@ -755,6 +904,10 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
                 "cancel_requested_at",
                 "cancel_completed_at",
                 "cancel_outcome",
+                "source_media_item_id",
+                "source_clip_start_seconds",
+                "source_clip_end_seconds",
+                "source_clip_duration_seconds",
             },
             "variation_attempts": {
                 "inference_provider",
@@ -767,6 +920,7 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
                 "id",
                 "project_id",
                 "generated_output_id",
+                "source_asset_id",
                 "kind",
                 "title",
                 "duration_seconds",
@@ -810,6 +964,71 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
                 "cost_summary_json",
                 "project_created_at",
                 "deleted_at",
+            },
+            "source_assets": {
+                "id",
+                "project_id",
+                "origin",
+                "status",
+                "display_title",
+                "youtube_url",
+                "youtube_video_id",
+                "original_filename",
+                "declared_byte_size",
+                "raw_relative_path",
+                "raw_byte_size",
+                "raw_sha256",
+                "canonical_byte_size",
+                "canonical_sha256",
+                "duration_seconds",
+                "rights_confirmation_at",
+                "error_code",
+                "user_facing_error",
+                "attempt_count",
+                "next_attempt_at",
+                "started_at",
+                "completed_at",
+                "created_at",
+                "updated_at",
+            },
+            "asset_transfer_capabilities": {
+                "id",
+                "token_sha256",
+                "direction",
+                "purpose",
+                "source_asset_id",
+                "job_id",
+                "derivative_task_id",
+                "storage_namespace",
+                "expected_relative_path",
+                "expected_extension",
+                "expected_mime_type",
+                "expected_byte_size",
+                "expected_sha256",
+                "max_bytes",
+                "status",
+                "access_count",
+                "received_byte_size",
+                "received_sha256",
+                "expires_at",
+                "consumed_at",
+                "created_at",
+            },
+            "media_derivative_tasks": {
+                "id",
+                "media_item_id",
+                "source_media_file_id",
+                "output_media_file_id",
+                "kind",
+                "status",
+                "attempt_count",
+                "next_attempt_at",
+                "error_code",
+                "user_facing_error",
+                "started_at",
+                "completed_at",
+                "created_at",
+                "updated_at",
             },
         }
     )
@@ -946,6 +1165,47 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if invalid_cancel is None or int(invalid_cancel[0]) != 0:
         raise MigrationError("migrated schema contains invalid cancellation outcomes")
+    invalid_source = connection.execute(
+        "SELECT COUNT(*) FROM source_assets WHERE origin NOT IN ('youtube', 'upload') "
+        "OR status NOT IN ('awaiting_upload', 'uploaded', 'queued', 'preparing', "
+        "'ready', 'failed', 'cancelled') "
+        "OR trim(display_title) = '' OR length(display_title) > 300 "
+        "OR (status = 'ready' AND (duration_seconds IS NULL OR canonical_byte_size IS NULL "
+        "OR canonical_sha256 IS NULL))"
+    ).fetchone()
+    if invalid_source is None or int(invalid_source[0]) != 0:
+        raise MigrationError("migrated schema contains invalid source assets")
+    invalid_provenance = connection.execute(
+        "SELECT COUNT(*) FROM media_items WHERE "
+        "NOT ((kind = 'source' AND source_asset_id IS NOT NULL AND generated_output_id IS NULL) "
+        "OR (kind = 'generated' AND source_asset_id IS NULL AND generated_output_id IS NOT NULL))"
+    ).fetchone()
+    if invalid_provenance is None or int(invalid_provenance[0]) != 0:
+        raise MigrationError("migrated schema contains invalid media provenance")
+    for table_name, expected in (
+        (
+            "media_items",
+            {"trg_media_items_provenance_insert", "trg_media_items_provenance_update"},
+        ),
+        (
+            "media_derivative_tasks",
+            {"trg_media_derivative_ready_insert", "trg_media_derivative_ready_update"},
+        ),
+    ):
+        actual = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name = ?",
+                (table_name,),
+            )
+        }
+        if not expected.issubset(actual):
+            raise MigrationError(f"migrated schema is missing {table_name} invariants")
+    source_indexes = {
+        str(row[1]) for row in connection.execute("PRAGMA index_list(media_items)").fetchall()
+    }
+    if "ux_media_items_source_asset_id" not in source_indexes:
+        raise MigrationError("migrated schema is missing source media uniqueness")
 
 
 def _create_schema_version_table(connection: sqlite3.Connection) -> None:
@@ -1022,7 +1282,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9, 10}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -1068,6 +1328,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             _cp8_ddl(connection)
             _cp9_ddl(connection)
             _cp10_ddl(connection)
+            _cp11_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

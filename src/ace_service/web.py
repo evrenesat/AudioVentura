@@ -8,13 +8,15 @@ import inspect
 import json
 import math
 import os
+import re
 import tempfile
 import time
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -54,11 +56,15 @@ from ace_service.models import (
     KEEP_WARM_LABELS,
     KEEP_WARM_SECONDS,
     PROJECT_TITLE_MAX_LENGTH,
+    AssetTransferCapability,
+    AssetTransferPurpose,
+    AssetTransferStatus,
     CapacityLease,
     Job,
     JobStatus,
     JobType,
     MediaDeletionState,
+    MediaDerivativeTask,
     MediaFileState,
     MediaItem,
     NotificationDelivery,
@@ -67,6 +73,9 @@ from ace_service.models import (
     Playlist,
     PlaylistKind,
     Project,
+    SourceAsset,
+    SourceAssetOrigin,
+    SourceAssetStatus,
     SubmissionQuote,
     VariationAttempt,
 )
@@ -88,7 +97,10 @@ from ace_service.repository import (
     create_cover_job,
     create_custom_playlist,
     create_original_job,
+    create_project,
     create_project_deletion_audit,
+    create_source_asset,
+    create_source_remix_job,
     create_submission_quote,
     delete_playlist,
     finalize_cover_job_duration,
@@ -100,6 +112,8 @@ from ace_service.repository import (
     get_output,
     get_playlist,
     get_project,
+    get_source_asset,
+    issue_asset_transfer_capability,
     job_backend,
     list_media_library,
     list_media_queue,
@@ -107,6 +121,7 @@ from ace_service.repository import (
     list_playlists,
     list_project_jobs,
     list_projects,
+    mark_source_uploaded,
     project_is_deletable,
     query_media_library,
     recent_completed_attempt_execution_ms,
@@ -118,10 +133,18 @@ from ace_service.repository import (
     request_job_cancellation,
     resolve_continuation_source,
     resolve_cover_continuation_output,
+    retry_derivative_task,
+    retry_source_asset,
     set_keep_warm_seconds,
     transition_job,
+    validate_source_range,
 )
-from ace_service.schemas import CoverRequest, OriginalSongRequest, resolve_relative_path
+from ace_service.schemas import (
+    CoverRequest,
+    OriginalSongRequest,
+    resolve_relative_path,
+    validate_youtube_url,
+)
 
 _TEMPLATES = Path(__file__).with_name("templates")
 _STATIC = Path(__file__).with_name("static")
@@ -571,6 +594,10 @@ def _backend_choices(
                 ),
                 "result_delivery": capabilities.result_delivery.value,
                 "catalog_revision": "builtin-v1",
+                "source_duration_min_seconds": capabilities.source_duration_min_seconds,
+                "source_duration_max_seconds": capabilities.source_duration_max_seconds,
+                "output_duration_min_seconds": capabilities.output_duration_min_seconds,
+                "output_duration_max_seconds": capabilities.output_duration_max_seconds,
             }
         choices.append(
             {
@@ -592,6 +619,39 @@ def _preferred_output_format(formats: Any) -> str:
     if "mp3" in values:
         return "mp3"
     return sorted(values)[0] if values else "mp3"
+
+
+def _has_reviewed_source_bounds(choice: Mapping[str, Any]) -> bool:
+    snapshot = choice.get("snapshot")
+    if not isinstance(snapshot, Mapping):
+        return False
+    minimum = snapshot.get("source_duration_min_seconds")
+    maximum = snapshot.get("source_duration_max_seconds")
+    return (
+        isinstance(minimum, (int, float))
+        and not isinstance(minimum, bool)
+        and math.isfinite(float(minimum))
+        and float(minimum) > 0
+        and isinstance(maximum, (int, float))
+        and not isinstance(maximum, bool)
+        and math.isfinite(float(maximum))
+        and float(maximum) >= float(minimum)
+    )
+
+
+def _source_backend_choices(app: FastAPI) -> list[dict[str, Any]]:
+    """Return only audio-transform backends with a frozen source contract."""
+
+    operations = (
+        BackendOperation.AUDIO_TRANSFORM,
+        BackendOperation.AUDIO_INPAINT,
+        BackendOperation.AUDIO_OUTPAINT,
+    )
+    return [
+        choice
+        for choice in _backend_choices(app, operations)
+        if _has_reviewed_source_bounds(choice)
+    ]
 
 
 async def _refresh_fal_health(app: FastAPI, *, force: bool = False) -> None:
@@ -666,15 +726,20 @@ def _select_backend(
     app: FastAPI,
     fields: Mapping[str, str],
     operation: BackendOperation | tuple[BackendOperation, ...],
+    *,
+    choices: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     requested = fields.get("backend", "").strip()
-    choices = _backend_choices(app, operation)
+    available_choices = choices if choices is not None else _backend_choices(app, operation)
     if not requested:
         default_operation = operation[0] if isinstance(operation, tuple) else operation
-        requested = str(
-            app.state.provider_registry.default_for(default_operation).capabilities.backend_id
-        )
-    choice = next((item for item in choices if item["backend_id"] == requested), None)
+        try:
+            requested = str(
+                app.state.provider_registry.default_for(default_operation).capabilities.backend_id
+            )
+        except ValueError:
+            requested = available_choices[0]["backend_id"] if available_choices else ""
+    choice = next((item for item in available_choices if item["backend_id"] == requested), None)
     if choice is None:
         raise ValueError("selected backend is not enabled or compatible with this form")
     try:
@@ -808,6 +873,9 @@ def register_web_routes(app: FastAPI) -> None:
                     "dashboard": _route_path(request, "dashboard"),
                     "create": _route_path(request, "create_form"),
                     "cover": _route_path(request, "cover_form"),
+                    "sources_new": _route_path(request, "sources_new"),
+                    "source_youtube": _route_path(request, "source_youtube"),
+                    "source_uploads": _route_path(request, "source_uploads"),
                     "library": _route_path(request, "library"),
                     "playlists": _route_path(request, "playlists"),
                     "projects": _route_path(request, "projects"),
@@ -831,6 +899,8 @@ def register_web_routes(app: FastAPI) -> None:
                     "player_js": _route_path(request, "static", path="player.js"),
                     "app_shell_js": _route_path(request, "static", path="app_shell.js"),
                     "media_library_js": _route_path(request, "static", path="media_library.js"),
+                    "source_upload_js": _route_path(request, "static", path="source_upload.js"),
+                    "source_range_js": _route_path(request, "static", path="source_range.js"),
                 },
             },
             status_code=response_status,
@@ -991,6 +1061,326 @@ def register_web_routes(app: FastAPI) -> None:
                 "capacity": capacity,
             },
         )
+
+    @app.get("/sources/new", dependencies=[Depends(authenticated)], name="sources_new")
+    async def sources_new(request: Request) -> Response:
+        return render(
+            request,
+            "source_new.html",
+            {
+                "form": {"project_title": "", "youtube_url": ""},
+                "errors": [],
+            },
+        )
+
+    @app.post("/sources/youtube", dependencies=[Depends(authenticated)], name="source_youtube")
+    async def source_youtube(request: Request) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        form = dict(fields)
+        errors: list[str] = []
+        project_title = fields.get("project_title", "").strip()
+        youtube_url = fields.get("youtube_url", "").strip()
+        if not _truthy_form_value(fields.get("rights_confirmation")):
+            errors.append("Confirm that you have the rights to use this source.")
+        try:
+            validated_url = validate_youtube_url(youtube_url)
+            video_id = _youtube_video_id(validated_url)
+        except ValueError as exc:
+            errors.append(str(exc))
+            validated_url = ""
+            video_id = ""
+        if not project_title or len(project_title) > PROJECT_TITLE_MAX_LENGTH:
+            errors.append(f"Project title must contain 1-{PROJECT_TITLE_MAX_LENGTH} characters.")
+        if errors:
+            return render(
+                request,
+                "source_new.html",
+                {"form": form, "errors": errors},
+                response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        try:
+            with app.state.session_factory() as session:
+                project = create_project(session, job_type=JobType.COVER, title=project_title)
+                asset = create_source_asset(
+                    session,
+                    project=project,
+                    origin=SourceAssetOrigin.YOUTUBE,
+                    display_title=project_title,
+                    youtube_url=validated_url,
+                    youtube_video_id=video_id,
+                    rights_confirmation_at=utc_now(),
+                )
+                session.commit()
+                source_asset_id = asset.id
+        except (KeyError, ValueError) as exc:
+            return render(
+                request,
+                "source_new.html",
+                {"form": form, "errors": [str(exc)]},
+                response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        app.state.source_coordinator.enqueue_source(source_asset_id)
+        return RedirectResponse(
+            _route_path(request, "source_status", source_asset_id=source_asset_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.post("/sources/uploads", dependencies=[Depends(authenticated)], name="source_uploads")
+    async def source_uploads(request: Request) -> JSONResponse:
+        fields = await _parse_source_init(request)
+        require_csrf(request, fields)
+        project_title = fields.get("project_title", "").strip()
+        filename = fields.get("filename", "").strip()
+        source_title = fields.get("source_title", "").strip() or _source_filename_title(filename)
+        raw_size_value = _required_int(fields.get("byte_size", ""))
+        raw_size = raw_size_value if isinstance(raw_size_value, int) else None
+        errors: list[str] = []
+        if not project_title or len(project_title) > PROJECT_TITLE_MAX_LENGTH:
+            errors.append(f"Project title must contain 1-{PROJECT_TITLE_MAX_LENGTH} characters.")
+        if (
+            not filename
+            or len(filename) > 300
+            or any(ord(character) < 32 for character in filename)
+        ):
+            errors.append("The upload filename is invalid.")
+        if not source_title or len(source_title) > 300:
+            errors.append("The source title is invalid.")
+        if not isinstance(raw_size, int) or not (
+            raw_size is not None
+            and 1 <= raw_size <= request.app.state.settings.direct_upload_max_bytes
+        ):
+            errors.append("Upload size must be between 1 byte and 512 MiB.")
+        if not _truthy_form_value(fields.get("rights_confirmation")):
+            errors.append("Confirm that you have the rights to use this source.")
+        if errors:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=errors)
+        settings: ServiceSettings = app.state.settings
+        try:
+            with app.state.session_factory() as session:
+                project = create_project(session, job_type=JobType.COVER, title=project_title)
+                asset = create_source_asset(
+                    session,
+                    project=project,
+                    origin=SourceAssetOrigin.UPLOAD,
+                    display_title=source_title,
+                    original_filename=filename,
+                    declared_byte_size=raw_size,
+                    rights_confirmation_at=utc_now(),
+                )
+                capability = issue_asset_transfer_capability(
+                    session,
+                    purpose=AssetTransferPurpose.BROWSER_SOURCE_UPLOAD,
+                    source_asset_id=asset.id,
+                    expected_relative_path=f"{asset.id}/source.bin",
+                    expected_extension=".bin",
+                    expected_mime_type="application/octet-stream",
+                    expected_byte_size=raw_size,
+                    max_bytes=settings.direct_upload_max_bytes,
+                    expires_at=utc_now() + timedelta(seconds=settings.transfer_token_ttl_seconds),
+                )
+                session.commit()
+                source_asset_id = asset.id
+                project_id = project.id
+                token = capability.token
+                expires_at = capability.capability.expires_at
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "source_asset_id": source_asset_id,
+                "project_id": project_id,
+                "status": SourceAssetStatus.AWAITING_UPLOAD.value,
+                "status_url": _route_path(
+                    request, "source_status", source_asset_id=source_asset_id
+                ),
+                "project_url": _route_path(request, "project_detail", project_id=project_id),
+                "upload_complete_url": _route_path(
+                    request, "source_upload_complete", source_asset_id=source_asset_id
+                ),
+                "cancel_url": _route_path(
+                    request, "source_cancel", source_asset_id=source_asset_id
+                ),
+                "upload_url": (
+                    f"{settings.transfer_public_base_url.rstrip('/')}/"
+                    f"asset-transfer/v2/upload/{token}"
+                ),
+                "expires_at": _iso(expires_at),
+                "max_bytes": settings.direct_upload_max_bytes,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post(
+        "/sources/{source_asset_id}/upload-complete",
+        dependencies=[Depends(authenticated)],
+        name="source_upload_complete",
+    )
+    async def source_upload_complete(request: Request, source_asset_id: str) -> JSONResponse:
+        fields = await _parse_source_init(request)
+        require_csrf(request, fields)
+        should_enqueue = False
+        try:
+            with app.state.session_factory() as session:
+                asset = get_source_asset(session, source_asset_id)
+                if asset is None:
+                    raise HTTPException(status_code=404, detail="source asset not found")
+                if (
+                    asset.origin is SourceAssetOrigin.UPLOAD
+                    and asset.status is SourceAssetStatus.AWAITING_UPLOAD
+                ):
+                    capability = session.scalar(
+                        select(AssetTransferCapability)
+                        .where(
+                            AssetTransferCapability.source_asset_id == asset.id,
+                            AssetTransferCapability.purpose
+                            == AssetTransferPurpose.BROWSER_SOURCE_UPLOAD,
+                            AssetTransferCapability.status == AssetTransferStatus.CONSUMED,
+                        )
+                        .order_by(AssetTransferCapability.created_at.desc())
+                    )
+                    if (
+                        capability is not None
+                        and capability.received_byte_size is not None
+                        and capability.received_sha256
+                    ):
+                        mark_source_uploaded(
+                            session,
+                            asset.id,
+                            raw_relative_path=capability.expected_relative_path,
+                            raw_byte_size=capability.received_byte_size,
+                            raw_sha256=capability.received_sha256,
+                        )
+                if asset.status is SourceAssetStatus.AWAITING_UPLOAD:
+                    raise HTTPException(status_code=409, detail="upload is not complete")
+                should_enqueue = asset.status in {
+                    SourceAssetStatus.UPLOADED,
+                    SourceAssetStatus.QUEUED,
+                }
+                view = _source_asset_view(request, asset)
+                session.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if should_enqueue:
+            app.state.source_coordinator.enqueue_source(source_asset_id)
+        return JSONResponse(view, headers={"Cache-Control": "no-store"})
+
+    @app.get(
+        "/sources/{source_asset_id}/status",
+        dependencies=[Depends(authenticated)],
+        name="source_status",
+    )
+    async def source_status(request: Request, source_asset_id: str) -> Response:
+        try:
+            with app.state.session_factory() as session:
+                asset = get_source_asset(session, source_asset_id)
+                if asset is None:
+                    raise HTTPException(status_code=404, detail="source asset not found")
+                view = _source_asset_view(request, asset)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="source asset not found") from exc
+        if "text/html" in request.headers.get("accept", "").lower():
+            return render(request, "source_status.html", {"source": view})
+        return JSONResponse(view, headers={"Cache-Control": "no-store"})
+
+    @app.post(
+        "/sources/{source_asset_id}/cancel-upload",
+        dependencies=[Depends(authenticated)],
+        name="source_cancel",
+    )
+    async def source_cancel(request: Request, source_asset_id: str) -> Response:
+        fields = await _parse_source_init(request)
+        require_csrf(request, fields)
+        from ace_service.source_assets import purge_source_raw
+
+        try:
+            with app.state.session_factory() as session:
+                asset = get_source_asset(session, source_asset_id)
+                if asset is None:
+                    raise HTTPException(status_code=404, detail="source asset not found")
+                if asset.status is SourceAssetStatus.READY:
+                    raise HTTPException(status_code=409, detail="ready sources cannot be cancelled")
+                if asset.status in {SourceAssetStatus.FAILED, SourceAssetStatus.CANCELLED}:
+                    view = _source_asset_view(request, asset)
+                    session.rollback()
+                else:
+                    asset.status = SourceAssetStatus.CANCELLED
+                    asset.error_code = "upload_cancelled"
+                    asset.user_facing_error = "This source upload was cancelled."
+                    asset.next_attempt_at = None
+                    asset.updated_at = utc_now()
+                    if asset.origin is SourceAssetOrigin.UPLOAD:
+                        asset.raw_relative_path = None
+                        asset.raw_byte_size = None
+                        asset.raw_sha256 = None
+                    from ace_service.repository import revoke_asset_transfers
+
+                    revoke_asset_transfers(session, source_asset_id=asset.id)
+                    view = _source_asset_view(request, asset)
+                    session.commit()
+            purge_source_raw(app.state.settings, source_asset_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="source asset not found") from exc
+        if request.headers.get("accept", "").lower().startswith("application/json"):
+            return JSONResponse(view, headers={"Cache-Control": "no-store"})
+        return RedirectResponse(view["status_url"], status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post(
+        "/sources/{source_asset_id}/retry",
+        dependencies=[Depends(authenticated)],
+        name="source_retry",
+    )
+    async def source_retry(request: Request, source_asset_id: str) -> Response:
+        fields = await _parse_source_init(request)
+        require_csrf(request, fields)
+        settings: ServiceSettings = app.state.settings
+        upload_url: str | None = None
+        issued_capability = None
+        try:
+            with app.state.session_factory() as session:
+                asset = retry_source_asset(session, source_asset_id)
+                from ace_service.repository import revoke_asset_transfers
+
+                revoke_asset_transfers(session, source_asset_id=asset.id)
+                if asset.status is SourceAssetStatus.AWAITING_UPLOAD:
+                    issued_capability = issue_asset_transfer_capability(
+                        session,
+                        purpose=AssetTransferPurpose.BROWSER_SOURCE_UPLOAD,
+                        source_asset_id=asset.id,
+                        expected_relative_path=f"{asset.id}/source.bin",
+                        expected_extension=".bin",
+                        expected_mime_type="application/octet-stream",
+                        expected_byte_size=asset.declared_byte_size,
+                        max_bytes=settings.direct_upload_max_bytes,
+                        expires_at=utc_now()
+                        + timedelta(seconds=settings.transfer_token_ttl_seconds),
+                    )
+                    upload_url = (
+                        f"{settings.transfer_public_base_url.rstrip('/')}/"
+                        f"asset-transfer/v2/upload/{issued_capability.token}"
+                    )
+                view = _source_asset_view(request, asset)
+                session.commit()
+                expires_at = (
+                    issued_capability.capability.expires_at
+                    if upload_url and issued_capability is not None
+                    else None
+                )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if asset.status is SourceAssetStatus.QUEUED:
+            app.state.source_coordinator.enqueue_source(asset.id)
+        if request.headers.get("accept", "").lower().startswith("application/json"):
+            payload = dict(view)
+            payload.update(
+                {
+                    "upload_url": upload_url,
+                    "expires_at": _iso(expires_at) if expires_at is not None else None,
+                    "max_bytes": settings.direct_upload_max_bytes if upload_url else None,
+                }
+            )
+            return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+        return RedirectResponse(view["status_url"], status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/create", dependencies=[Depends(authenticated)], name="create_form")
     async def create_form(request: Request) -> Response:
@@ -1680,6 +2070,160 @@ def register_web_routes(app: FastAPI) -> None:
             context = _project_detail_context(request, session, project_id)
         return render(request, "project_detail.html", context)
 
+    @app.get(
+        "/projects/{project_id}/remixes/new",
+        dependencies=[Depends(authenticated)],
+        name="new_source_remix",
+    )
+    async def new_source_remix(request: Request, project_id: str) -> Response:
+        await _refresh_fal_health(app)
+        choices = _source_backend_choices(app)
+        with app.state.session_factory() as session:
+            project = get_project(session, project_id)
+            if project is None:
+                raise HTTPException(status_code=404, detail="project not found")
+            source = project.source_asset
+            if (
+                source is None
+                or source.status is not SourceAssetStatus.READY
+                or source.media_item is None
+                or source.media_item.deletion_state is not MediaDeletionState.ACTIVE
+                or not any(
+                    media_file.format is OutputFormat.MP3
+                    and media_file.is_playback == 1
+                    and media_file.state is MediaFileState.ACTIVE
+                    for media_file in source.media_item.files
+                )
+            ):
+                raise HTTPException(status_code=409, detail="source is not ready to remix")
+            source_view = _source_asset_view(request, source)
+            form = {
+                "backend": request.query_params.get("backend", ""),
+                "source_media_item_id": source.media_item.id,
+                "clip_start_seconds": "0",
+                "clip_end_seconds": str(source.duration_seconds or ""),
+                "target_style": "",
+                "duration_mode": "source",
+                "variation_count": "1",
+                "output_format": "mp3",
+            }
+        if not choices:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no reviewed remix backend is available",
+            )
+        return render(
+            request,
+            "remix_form.html",
+            {
+                "source": source_view,
+                "form": form,
+                "errors": [],
+                "source_duration_seconds": source.duration_seconds,
+                "remix_url": _route_path(request, "create_source_remix", project_id=project.id),
+                **_source_backend_form_context(choices, form),
+            },
+        )
+
+    @app.post(
+        "/projects/{project_id}/remixes",
+        dependencies=[Depends(authenticated)],
+        name="create_source_remix",
+    )
+    async def create_source_remix(request: Request, project_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        await _refresh_fal_health(app)
+        form = dict(fields)
+        choices = _source_backend_choices(app)
+        with app.state.session_factory() as session:
+            project = get_project(session, project_id)
+            if project is None:
+                raise HTTPException(status_code=404, detail="project not found")
+            source = project.source_asset
+            if (
+                source is None
+                or source.media_item is None
+                or source.status is not SourceAssetStatus.READY
+            ):
+                raise HTTPException(status_code=409, detail="source is not ready to remix")
+            source_view = _source_asset_view(request, source)
+            errors: list[str] = []
+            try:
+                selected_provider, backend_snapshot = _select_backend(
+                    app,
+                    fields,
+                    (
+                        BackendOperation.AUDIO_TRANSFORM,
+                        BackendOperation.AUDIO_INPAINT,
+                        BackendOperation.AUDIO_OUTPAINT,
+                    ),
+                    choices=choices,
+                )
+                source_item_id = fields.get("source_media_item_id", "").strip()
+                if source_item_id != source.media_item.id:
+                    raise ValueError("selected source does not belong to this project")
+                start = _optional_number(fields.get("clip_start_seconds"))
+                end = _optional_number(fields.get("clip_end_seconds"))
+                if (
+                    not isinstance(start, (int, float))
+                    or isinstance(start, bool)
+                    or not isinstance(end, (int, float))
+                    or isinstance(end, bool)
+                ):
+                    raise ValueError("start and end seconds are required")
+                validate_source_range(source.media_item, float(start), float(end), backend_snapshot)
+                maximum = float(backend_snapshot["source_duration_max_seconds"])
+                if float(source.duration_seconds or 0) > maximum + 0.001 and not _truthy_form_value(
+                    fields.get("range_confirmation")
+                ):
+                    raise ValueError("confirm the selected range before generating")
+                request_values = _cover_form_values(fields)
+                request_values["youtube_url"] = None
+                request_values["duration_mode"] = fields.get("duration_mode", "source")
+                if request_values["duration_mode"] == "source":
+                    request_values["duration_seconds"] = None
+                request_values["rights_confirmation"] = True
+                cover_request = CoverRequest(**request_values)
+                job = create_source_remix_job(
+                    session,
+                    cover_request,
+                    source_media_item_id=source.media_item.id,
+                    clip_start_seconds=float(start),
+                    clip_end_seconds=float(end),
+                    backend_snapshot_json=backend_snapshot,
+                    rights_confirmation_at=utc_now(),
+                    project=project.id,
+                    inference_provider=selected_provider.capabilities.name,
+                    inference_backend=selected_provider.capabilities.backend_id,
+                )
+                job_id = job.id
+                session.commit()
+            except (ValidationError, ValueError, KeyError) as exc:
+                session.rollback()
+                errors = _validation_errors(exc) if isinstance(exc, ValidationError) else [str(exc)]
+            if errors:
+                return render(
+                    request,
+                    "remix_form.html",
+                    {
+                        "source": source_view,
+                        "form": form,
+                        "errors": errors,
+                        "source_duration_seconds": source.duration_seconds,
+                        "remix_url": _route_path(
+                            request, "create_source_remix", project_id=project.id
+                        ),
+                        **_source_backend_form_context(choices, form),
+                    },
+                    response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+        _enqueue(app, job_id)
+        return RedirectResponse(
+            _route_path(request, "job_detail", job_id=job_id),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
     @app.post(
         "/projects/{project_id}/rename",
         dependencies=[Depends(authenticated)],
@@ -1869,6 +2413,35 @@ def register_web_routes(app: FastAPI) -> None:
             media_type = media_file.mime_type
         return FileResponse(
             path, media_type=media_type, headers={"Content-Disposition": disposition}
+        )
+
+    @app.post(
+        "/media/{media_item_id}/derivative/retry",
+        dependencies=[Depends(authenticated)],
+        name="retry_derivative",
+    )
+    async def retry_derivative(request: Request, media_item_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        try:
+            with app.state.session_factory() as session:
+                task = session.scalar(
+                    select(MediaDerivativeTask).where(
+                        MediaDerivativeTask.media_item_id == media_item_id
+                    )
+                )
+                if task is None or task.media_item.project is None:
+                    raise HTTPException(status_code=404, detail="derivative task not found")
+                project_id = task.media_item.project_id
+                retry_derivative_task(session, task.id)
+                session.commit()
+                task_id = task.id
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        app.state.source_coordinator.enqueue_derivative(task_id)
+        return RedirectResponse(
+            _route_path(request, "project_detail", project_id=project_id),
+            status_code=status.HTTP_303_SEE_OTHER,
         )
 
     @app.get("/media/{output_id}", dependencies=[Depends(authenticated)], name="media")
@@ -2177,21 +2750,23 @@ def _continuation_form(job: Job) -> dict[str, Any]:
             "variation_count": job.variation_count,
         }
         OriginalSongRequest(**request_values)
-        return _renderable_form_values({
-            **common,
-            "description": generation["prompt"],
-            "lyrics": generation["lyrics"],
-            "instrumental": "true" if generation["instrumental"] is True else "",
-            "vocal_language": generation["vocal_language"],
-            "prompt_mode": generation["prompt_mode"],
-            "duration_mode": generation["duration_mode"],
-            "duration_seconds": generation["duration_seconds"],
-            "bpm": generation["bpm"],
-            "key_scale": generation["key_scale"],
-            "time_signature": generation["time_signature"],
-            "seed": generation["seed"],
-            "output_format": generation["output_format"],
-        })
+        return _renderable_form_values(
+            {
+                **common,
+                "description": generation["prompt"],
+                "lyrics": generation["lyrics"],
+                "instrumental": "true" if generation["instrumental"] is True else "",
+                "vocal_language": generation["vocal_language"],
+                "prompt_mode": generation["prompt_mode"],
+                "duration_mode": generation["duration_mode"],
+                "duration_seconds": generation["duration_seconds"],
+                "bpm": generation["bpm"],
+                "key_scale": generation["key_scale"],
+                "time_signature": generation["time_signature"],
+                "seed": generation["seed"],
+                "output_format": generation["output_format"],
+            }
+        )
 
     required = {
         "target_style",
@@ -2231,23 +2806,25 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         "rights_confirmation": True,
     }
     CoverRequest(**request_values)
-    return _renderable_form_values({
-        **common,
-        "youtube_url": job.source_url,
-        "target_style": generation["target_style"],
-        "source_style": generation.get("source_style"),
-        "remix_guidance": generation["remix_guidance"],
-        "source_lyrics": generation.get("source_lyrics"),
-        "lyrics": generation["lyrics"],
-        "audio_cover_strength": generation["audio_cover_strength"],
-        "cover_noise_strength": generation["cover_noise_strength"],
-        "duration_mode": generation["duration_mode"],
-        "duration_seconds": (
-            generation["duration_seconds"] if generation["duration_mode"] == "custom" else None
-        ),
-        "seed": generation["seed"],
-        "output_format": generation["output_format"],
-    })
+    return _renderable_form_values(
+        {
+            **common,
+            "youtube_url": job.source_url,
+            "target_style": generation["target_style"],
+            "source_style": generation.get("source_style"),
+            "remix_guidance": generation["remix_guidance"],
+            "source_lyrics": generation.get("source_lyrics"),
+            "lyrics": generation["lyrics"],
+            "audio_cover_strength": generation["audio_cover_strength"],
+            "cover_noise_strength": generation["cover_noise_strength"],
+            "duration_mode": generation["duration_mode"],
+            "duration_seconds": (
+                generation["duration_seconds"] if generation["duration_mode"] == "custom" else None
+            ),
+            "seed": generation["seed"],
+            "output_format": generation["output_format"],
+        }
+    )
 
 
 def _renderable_form_values(form: Mapping[str, Any]) -> dict[str, Any]:
@@ -2315,6 +2892,133 @@ def _route_path(request: Request, name: str, **path_params: Any) -> str:
     return request.url_for(name, **path_params).path
 
 
+_SOURCE_STATUS_LABELS = {
+    SourceAssetStatus.AWAITING_UPLOAD: "Waiting for upload",
+    SourceAssetStatus.UPLOADED: "Upload received",
+    SourceAssetStatus.QUEUED: "Queued for source preparation",
+    SourceAssetStatus.PREPARING: "Extracting and preparing audio",
+    SourceAssetStatus.READY: "Ready to remix",
+    SourceAssetStatus.FAILED: "Source preparation failed",
+    SourceAssetStatus.CANCELLED: "Upload cancelled",
+}
+
+
+def _source_asset_view(request: Request, asset: SourceAsset) -> dict[str, Any]:
+    declared_size = asset.declared_byte_size
+    received_size = asset.raw_byte_size
+    upload_progress = None
+    if declared_size and received_size is not None:
+        upload_progress = min(100, round(received_size / declared_size * 100))
+    media = asset.media_item
+    playable = media is not None and media.deletion_state is MediaDeletionState.ACTIVE
+    return {
+        "id": asset.id,
+        "project_id": asset.project_id,
+        "title": asset.display_title,
+        "origin": asset.origin.value,
+        "status": asset.status.value,
+        "status_label": _SOURCE_STATUS_LABELS[asset.status],
+        "filename": asset.original_filename,
+        "declared_byte_size": declared_size,
+        "received_byte_size": received_size,
+        "declared_size_label": _size_label(declared_size) if declared_size else None,
+        "received_size_label": _size_label(received_size) if received_size else None,
+        "upload_progress": upload_progress,
+        "duration_seconds": asset.duration_seconds,
+        "error": asset.user_facing_error,
+        "error_code": asset.error_code,
+        "project_url": _route_path(request, "project_detail", project_id=asset.project_id),
+        "status_url": _route_path(request, "source_status", source_asset_id=asset.id),
+        "upload_complete_url": _route_path(
+            request, "source_upload_complete", source_asset_id=asset.id
+        ),
+        "cancel_url": _route_path(request, "source_cancel", source_asset_id=asset.id),
+        "retry_url": _route_path(request, "source_retry", source_asset_id=asset.id),
+        "remix_url": (
+            _route_path(request, "new_source_remix", project_id=asset.project_id)
+            if playable
+            else None
+        ),
+        "media": _media_item_view(request, media) if media is not None else None,
+        "playable": playable,
+        "can_cancel": asset.status
+        in {
+            SourceAssetStatus.AWAITING_UPLOAD,
+            SourceAssetStatus.UPLOADED,
+            SourceAssetStatus.QUEUED,
+            SourceAssetStatus.PREPARING,
+        },
+        "can_retry": asset.status in {SourceAssetStatus.FAILED, SourceAssetStatus.CANCELLED},
+    }
+
+
+def _source_backend_form_context(
+    choices: list[dict[str, Any]], form: Mapping[str, Any]
+) -> dict[str, Any]:
+    selected = str(form.get("backend") or (choices[0]["backend_id"] if choices else ""))
+    choice = next((item for item in choices if item["backend_id"] == selected), None)
+    native_formats = choice["native_formats"] if choice is not None else ["mp3"]
+    return {
+        "backend_choices": choices,
+        "selected_backend": selected,
+        "selected_backend_is_fal": choice is not None and choice["provider"] == "fal.ai",
+        "selected_backend_is_mock": choice is not None
+        and choice["provider"] == ProviderName.MOCK.value,
+        "selected_native_formats": list(native_formats),
+        "selected_output_format": _preferred_output_format(native_formats),
+    }
+
+
+def _source_filename_title(filename: str) -> str:
+    """Derive a bounded display title without treating the filename as a path."""
+
+    basename = filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    stem = Path(basename).stem.strip()
+    stem = re.sub(r"\s+", " ", stem)
+    return (stem or "Uploaded source")[:300]
+
+
+def _truthy_form_value(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _youtube_video_id(value: str) -> str:
+    validated = validate_youtube_url(value)
+    parsed = urlsplit(validated)
+    if parsed.hostname == "youtu.be":
+        return parsed.path.strip("/").split("/", 1)[0]
+    if parsed.path == "/watch":
+        return parse_qs(parsed.query).get("v", [""])[0]
+    return parsed.path.strip("/").split("/", 1)[-1]
+
+
+async def _parse_source_init(request: Request) -> dict[str, str]:
+    """Parse the small source initialization body, never the media payload."""
+
+    body = await request.body()
+    if len(body) > 128 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="source initialization is too large",
+        )
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("application/json"):
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail="source initialization is invalid") from exc
+        if not isinstance(payload, dict) or len(payload) > 12:
+            raise HTTPException(status_code=422, detail="source initialization is invalid")
+        fields = {
+            str(key): str(value).lower() if isinstance(value, bool) else str(value)
+            for key, value in payload.items()
+        }
+        if "csrf_token" not in fields and request.headers.get("x-csrf-token"):
+            fields["csrf_token"] = request.headers["x-csrf-token"]
+        return fields
+    return await parse_form(request)
+
+
 def _project_view(request: Request, project: Project) -> dict[str, Any]:
     deletable = all(
         job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
@@ -2332,6 +3036,12 @@ def _project_view(request: Request, project: Project) -> dict[str, Any]:
         "deletable": deletable,
         "created_at": _iso(project.created_at),
         "updated_at": _iso(project.updated_at),
+        "source_status": project.source_asset.status.value if project.source_asset else None,
+        "source_url": (
+            _route_path(request, "source_status", source_asset_id=project.source_asset.id)
+            if project.source_asset
+            else None
+        ),
         "detail_url": _route_path(request, "project_detail", project_id=project.id),
         "rename_url": _route_path(request, "rename_project", project_id=project.id),
         "delete_url": _route_path(request, "delete_project", project_id=project.id),
@@ -2353,8 +3063,10 @@ def _project_detail_context(
             detail="project not found",
         )
     jobs = list_project_jobs(session, project.id)
+    source = project.source_asset
     return {
         "project": _project_view(request, project),
+        "source": _source_asset_view(request, source) if source is not None else None,
         "versions": [_job_view(request, job) for job in jobs],
         "rename_title": project.title if rename_title is None else rename_title,
         "rename_errors": rename_errors or [],
@@ -2463,6 +3175,10 @@ def _job_view(request: Request, job: Job) -> dict[str, Any]:
         "status_label": _STATUS_LABELS[job.status],
         "source_title": job.sanitized_source_title,
         "source_url": job.source_url,
+        "source_media_item_id": job.source_media_item_id,
+        "source_clip_start_seconds": job.source_clip_start_seconds,
+        "source_clip_end_seconds": job.source_clip_end_seconds,
+        "source_clip_duration_seconds": job.source_clip_duration_seconds,
         "prompt": job.prompt,
         "lyrics": job.lyrics,
         "profile_id": normalized.get("profile_id"),
@@ -2559,35 +3275,58 @@ def _output_view(request: Request, output: Output) -> dict[str, Any]:
                 for media_file in media_item.files
                 if media_file.format is OutputFormat.MP3
                 and media_file.is_playback == 1
-                and media_file.is_primary_download == 1
                 and media_file.state is MediaFileState.ACTIVE
             ),
             None,
         )
-        active = (
-            media_item.deletion_state is MediaDeletionState.ACTIVE and playback_file is not None
+        primary_file = next(
+            (
+                media_file
+                for media_file in media_item.files
+                if media_file.is_primary_download == 1 and media_file.state is MediaFileState.ACTIVE
+            ),
+            None,
         )
+        active = media_item.deletion_state is MediaDeletionState.ACTIVE
+        playable = active and playback_file is not None
+        download_file = primary_file if primary_file is not None else playback_file
+        derivative = media_item.derivative_task
         return {
             "id": output.id,
             "variation_index": output.variation_index,
             "result_index": output.result_index,
             "mime_type": output.mime_type,
             "byte_size": output.byte_size,
-            "size_label": _size_label(output.byte_size),
+            "size_label": _size_label(
+                primary_file.byte_size if primary_file is not None else output.byte_size
+            ),
             "media_url": (
                 _route_path(request, "library_media", media_file_id=playback_file.id)
                 if active and playback_file is not None
                 else None
             ),
             "download_url": (
-                _route_path(request, "library_download", media_file_id=playback_file.id)
-                if active and playback_file is not None
+                _route_path(
+                    request,
+                    "library_download",
+                    media_file_id=download_file.id,
+                )
+                if active and download_file is not None
                 else None
             ),
             "created_at": _iso(output.created_at),
             "title": media_item.title,
             "media_item_id": media_item.id,
             "deleted": not active,
+            "playable": playable,
+            "preparing_mp3": active and not playable and derivative is not None,
+            "derivative_status": derivative.status if derivative is not None else None,
+            "derivative_error": derivative.user_facing_error if derivative is not None else None,
+            "derivative_retry_url": (
+                _route_path(request, "retry_derivative", media_item_id=media_item.id)
+                if derivative is not None and derivative.status == "failed"
+                else None
+            ),
             "legacy": False,
         }
     return {
@@ -2614,12 +3353,22 @@ def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
             for media_file in item.files
             if media_file.format is OutputFormat.MP3
             and media_file.is_playback == 1
-            and media_file.is_primary_download == 1
             and media_file.state is MediaFileState.ACTIVE
         ),
         None,
     )
-    active = item.deletion_state is MediaDeletionState.ACTIVE and playback_file is not None
+    primary_file = next(
+        (
+            media_file
+            for media_file in item.files
+            if media_file.is_primary_download == 1 and media_file.state is MediaFileState.ACTIVE
+        ),
+        None,
+    )
+    active = item.deletion_state is MediaDeletionState.ACTIVE
+    playable = active and playback_file is not None
+    download_file = primary_file if primary_file is not None else playback_file
+    derivative = item.derivative_task
     project = item.project
     return {
         "id": item.id,
@@ -2633,21 +3382,35 @@ def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
             else None
         ),
         "duration_seconds": item.duration_seconds,
-        "size_label": _size_label(playback_file.byte_size) if playback_file is not None else None,
+        "size_label": _size_label(
+            primary_file.byte_size
+            if primary_file is not None
+            else playback_file.byte_size
+            if playback_file is not None
+            else 0
+        )
+        if primary_file is not None or playback_file is not None
+        else None,
         "created_at": _iso(item.created_at),
         "updated_at": _iso(item.updated_at),
         "deletion_state": item.deletion_state.value,
         "deleted": not active,
-        "file_available": active,
+        "file_available": active and (primary_file is not None or playback_file is not None),
+        "playable": playable,
         "media_file_id": playback_file.id if active and playback_file is not None else None,
+        "primary_media_file_id": primary_file.id if active and primary_file is not None else None,
         "media_url": (
             _route_path(request, "library_media", media_file_id=playback_file.id)
             if active and playback_file is not None
             else None
         ),
         "download_url": (
-            _route_path(request, "library_download", media_file_id=playback_file.id)
-            if active and playback_file is not None
+            _route_path(
+                request,
+                "library_download",
+                media_file_id=download_file.id,
+            )
+            if active and download_file is not None
             else None
         ),
         "rename_url": _route_path(request, "rename_media", media_item_id=item.id)
@@ -2656,6 +3419,14 @@ def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
         "delete_url": _route_path(request, "delete_media", media_item_id=item.id)
         if active
         else None,
+        "preparing_mp3": active and not playable and derivative is not None,
+        "derivative_status": derivative.status if derivative is not None else None,
+        "derivative_error": derivative.user_facing_error if derivative is not None else None,
+        "derivative_retry_url": (
+            _route_path(request, "retry_derivative", media_item_id=item.id)
+            if derivative is not None and derivative.status == "failed"
+            else None
+        ),
     }
 
 

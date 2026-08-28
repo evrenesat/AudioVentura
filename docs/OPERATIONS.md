@@ -28,7 +28,7 @@ and rollback snapshot:
 | Surface | Beta | Production |
 | --- | --- | --- |
 | Controller | `127.0.0.1:8010`, `https://player.evren.io/beta/` | `127.0.0.1:8000` |
-| Transfer | `127.0.0.1:8011`, `/beta-transfer/transfer/v1/{source\|output}/<token>` | `127.0.0.1:8001` |
+| Transfer | `127.0.0.1:8011`, `/beta-transfer/transfer/v1/{source\|output}/<token>` and `/beta-transfer/asset-transfer/v2/{upload\|download}/<token>` | `127.0.0.1:8001` |
 | Home Ingest | p100 `:8101`, beta-only restricted SFTP | p100 `:8100` |
 | MIDI mock | p100 `:8201`, opt-in | p100 `:8200`, opt-in |
 | Data | `/srv/ace-service-beta/data` | `/srv/ace-service/data` |
@@ -85,10 +85,12 @@ cd /root/code/evreniops/infra/ansible
 ```
 
 The beta controller talks to Home Ingest on p100 `:8101` through its private
-tailnet address and uploads source material over the beta-only chrooted SFTP
-account. The mock listens on p100 `:8201`, requires its own bearer token, and
-accepts only the exact `mock/midi-sequential` backend. It receives source
-metadata for contract coverage but never follows a source URL. A service
+tailnet address. New source, clip, and derivative operations use the beta
+`/beta-transfer/asset-transfer/v2/...` capability prefix; legacy cover
+recovery may still use the beta-only chrooted SFTP account and v1 route. The
+mock listens on p100 `:8201`, requires its own bearer token, and accepts only
+the exact `mock/midi-sequential` backend. It receives source metadata for
+contract coverage but never follows a source URL. A service
 rollback restores the paired mock cursor/state, Home Ingest state, controller
 overlay, and beta SFTP mapping from one explicit snapshot:
 
@@ -161,12 +163,20 @@ The controller binds to `127.0.0.1:8000` and the transfer service to
 ## Reverse proxies
 
 Expose the controller only through Tailscale Serve or another private proxy.
-The public proxy may forward only:
+The public proxy may forward only these exact route families:
 
 ```text
 /transfer/v1/source/*  ->  127.0.0.1:8001
 /transfer/v1/output/*  ->  127.0.0.1:8001
+/asset-transfer/v2/upload/<token>    ->  127.0.0.1:8001
+/asset-transfer/v2/download/<token>  ->  127.0.0.1:8001
 ```
+
+The v2 upload location alone accepts a raw body up to exactly 512 MiB and has
+request/response buffering disabled. The v2 download location is separately
+allow-listed and revalidated by the transfer app; it does not receive the
+large-body nginx exception. Beta uses the same locations below the
+`/beta-transfer` prefix and reaches port `8011`, never production port `8001`.
 
 Reject every other path before it reaches the transfer app. Never publish
 ports 8000 or 8001 directly.
@@ -204,6 +214,23 @@ The SFTP account should:
 Home Ingest binds to `127.0.0.1:8100` by default. Make it reachable only over
 the private tailnet. Its authenticated `GET /healthz` is the basic readiness
 check.
+
+Home Ingest exposes bearer-authenticated v2 operations for source preparation,
+clip staging, and FLAC/WAV playback derivatives:
+
+```text
+POST /v2/prepare-source
+POST /v2/prepare-clip
+POST /v2/prepare-playback-derivative
+```
+
+These operations accept only controller-issued transfer URLs matching the
+configured scheme, host, port, and exact v2 route. They stream to private
+temporary directories, verify size and SHA-256, use the first audio stream,
+strip metadata, and normalize to stereo 48 kHz 192 kbps MP3. Uploaded media is
+not duration-limited at ingestion; byte, subprocess, and network timeouts are
+the limits. The legacy YouTube/SFTP endpoint remains for persisted recovery
+only.
 
 Temporary job directories are removed after success or failure. Startup and
 periodic cleanup remove old orphan directories. Debug artifact retention is
@@ -275,13 +302,21 @@ uv run python -m ace_service migrate-upgrade \
 The upgrade uses a sidecar lock and durable attempt marker. If it reports an
 incomplete or failed migration, do not retry it. Restore the verified backup.
 
-Schema v10 adds the media library, playlist entries, project-deletion audit,
-and durable cancellation state. Existing generated outputs remain outside the
-library until a new verified completion is published; this avoids an
-unreviewed historical media backfill. Before deploying a v10 revision, run a
-disposable v9-to-v10 rehearsal and confirm both the pre-upgrade status and the
-post-upgrade `exact_expected` status. Keep the backup and the database on the
-same recovery record.
+Schema v11 adds source assets, signed asset-transfer capabilities, source
+provenance, backend-frozen clip fields, and derivative tasks to the v10 media
+library. The migration is additive: existing v10 output/media/playlists remain
+unchanged, and an existing experimental `kind='source'` row fails closed
+instead of being guessed into the new ownership model. Run the explicit
+v10-to-v11 rehearsal and confirm `older_version` → upgrade →
+`exact_expected` before deployment. Keep the backup and database on the same
+recovery record. Never start a v10 release against a v11 database.
+
+New data is stored below the configured root as `uploads/<source-uuid>/`,
+`library/sources/<source-uuid>/source.mp3`,
+`library/generated/<media-uuid>/playback.mp3`, and
+`incoming/<job-uuid>/source.mp3`. All source/upload/derivative capabilities
+are revoked when their owning operation resolves; controller cleanup removes
+safe abandoned parts and retries only the durable operation that owns them.
 
 Project deletion uses the committed audit as its recovery marker. It first
 reconciles library media through the normal tombstone transition, then moves
@@ -313,17 +348,18 @@ must remain active.
 Back up these items together:
 
 - `service.db` through SQLite's backup API;
-- completed files under `outputs/`;
-- any retained source files under `incoming/`;
+- completed files under `outputs/` and `library/`;
+- any retained source/upload/clip files under `uploads/` and `incoming/`;
 - deployment configuration through the private configuration repository or
   secret store.
 
 Do not copy a live SQLite file with plain `cp`. Do not include transfer tokens,
 API keys, or private fixture media in diagnostic archives.
 
-After restoring, verify database integrity, output path containment, recorded
-file size and SHA-256, schema version, and service-account ownership before
-starting either application process.
+After restoring, verify database integrity, every output/library/source path
+is contained below the configured root, recorded file size and SHA-256, schema
+version, and service-account ownership before starting either application
+process.
 
 ## Cleanup and retention
 
@@ -332,7 +368,8 @@ Controller cleanup runs at startup and on a configured interval. It may:
 - remove stale `.part` files;
 - expire or revoke transfer capabilities;
 - prune old capability records;
-- remove non-retained terminal cover sources.
+- reconcile consumed direct uploads and retryable source/derivative state;
+- remove non-retained terminal cover sources and safe raw upload remnants;
 - reconcile pending/deleted library items and purge only their deterministic
   trash paths after the delayed deletion policy permits it.
 
@@ -407,21 +444,22 @@ For covers, also verify Home Ingest, source size/hash validation, signed source
 download, and source cleanup. Keep source URLs and capability URLs out of the
 record.
 
-For the media-library/player beta, use the disposable browser gate before the
-protected live smoke:
+For the source-ingest beta, use the disposable browser gate before the
+protected non-paid live smoke:
 
 ```text
 uv run playwright install --with-deps chromium firefox
 uv run pytest -q tests/e2e --browser chromium --browser firefox
 ```
 
-Then run the protected beta foundation smoke with an explicit paid-work
-allowance and a maximum of one submission. It must verify the beta URL,
-authenticated playback/download and range behavior, library publication,
-playlist queue JSON, byte/hash evidence, and the post-job budget state. Keep
-the smoke result free of credentials, capability tokens, provider response
-bodies, prompts, and lyrics. A resume-only invocation may recheck an existing
-job without submitting another paid job.
+Then run the protected beta mock smoke with the exact
+`mock/midi-sequential` backend. It must verify the beta URL, authenticated
+source playback/download, v2 upload/download routing, a bounded subrange,
+source/result playlist ordering, byte/hash evidence, raw/clip cleanup, and
+active-source deletion refusal. Keep the smoke result free of credentials,
+capability tokens, provider response bodies, prompts, and lyrics. If a
+lossless fixture is needed, use a local deterministic test fixture; do not
+make a paid request merely to obtain WAV or FLAC.
 
 The optional paid browser smoke in `tests/live_paid_ui_e2e.py` is excluded from
 normal test discovery. It requires protected credentials and an explicit

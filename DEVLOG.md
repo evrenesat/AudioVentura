@@ -1,5 +1,26 @@
 # Development Log
 
+## 2026-08-28 (source ingest, direct uploads, remix ranges, and derivatives)
+
+- Integrated the accepted sequential MIDI mock and isolated beta deployment
+  changes before starting the source-first slice. Beta isolation, the MIDI
+  backend, restricted SFTP recovery path, and backend parity contract remain
+  intact; production stays on its existing revision.
+- Added schema v11 source assets, signed asset-transfer v2, full-source Home
+  Ingest normalization, backend-frozen clip staging, source-first playlist
+  publication, and retryable FLAC/WAV-to-MP3 playback derivatives. Existing
+  schema-v10 rows are not backfilled and no provider is called before clip
+  staging commits.
+- Verification evidence: focused controller/integration tests `157 passed`,
+  Home Ingest `33 passed`, MIDI mock `12 passed`, and browser E2E `12 passed`
+  across Chromium and Firefox. Product/Home Ruff, format, mypy, migration
+  rehearsal, and deployment-contract checks pass. The broad product run has
+  `629 passed, 96 failed`; all 96 failures are the known expired private
+  quality-fixture retention baseline and are fail-closed by design.
+- The browser harness uses runtime-generated media, real local ffmpeg/ffprobe,
+  real v2 transfer streaming, and a non-paid provider stub. Offline caching and
+  production deployment remain deferred pending beta acceptance.
+
 ## 2026-08-28 (continuation form defaults)
 
 - Normalized absent optional continuation values to blank HTML form values so

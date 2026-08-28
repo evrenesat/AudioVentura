@@ -71,10 +71,47 @@ class HomeIngestSettings(BaseSettings):
         le=600,
     )
     max_source_bytes: int = Field(
-        default=268_435_456,
+        default=536_870_912,
         validation_alias=AliasChoices("ACE_HOME_MAX_SOURCE_BYTES", "max_source_bytes"),
         gt=0,
         le=1_073_741_824,
+    )
+    canonical_source_max_bytes: int = Field(
+        default=536_870_912,
+        validation_alias=AliasChoices(
+            "ACE_HOME_CANONICAL_SOURCE_MAX_BYTES", "canonical_source_max_bytes"
+        ),
+        gt=0,
+        le=1_073_741_824,
+    )
+    transfer_base_url: str = Field(
+        default="https://transfer.example.invalid",
+        validation_alias=AliasChoices("ACE_HOME_TRANSFER_BASE_URL", "transfer_base_url"),
+        min_length=1,
+    )
+    transfer_connect_timeout_seconds: float = Field(
+        default=10,
+        validation_alias=AliasChoices(
+            "ACE_HOME_TRANSFER_CONNECT_TIMEOUT_SECONDS", "transfer_connect_timeout_seconds"
+        ),
+        gt=0,
+        le=120,
+    )
+    transfer_read_timeout_seconds: float = Field(
+        default=1800,
+        validation_alias=AliasChoices(
+            "ACE_HOME_TRANSFER_READ_TIMEOUT_SECONDS", "transfer_read_timeout_seconds"
+        ),
+        gt=0,
+        le=7200,
+    )
+    transfer_write_timeout_seconds: float = Field(
+        default=1800,
+        validation_alias=AliasChoices(
+            "ACE_HOME_TRANSFER_WRITE_TIMEOUT_SECONDS", "transfer_write_timeout_seconds"
+        ),
+        gt=0,
+        le=7200,
     )
     command_timeout_seconds: int = Field(
         default=1800,
@@ -193,6 +230,7 @@ class HomeIngestSettings(BaseSettings):
         if self.token.strip().lower() in _PLACEHOLDERS:
             raise ValueError("token still contains a configuration placeholder")
         self.data_root = self.data_root.expanduser().resolve()
+        self.transfer_base_url = validate_private_tailscale_url(self.transfer_base_url)
         return self
 
     @property

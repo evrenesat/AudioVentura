@@ -19,8 +19,8 @@ Private browser
 | - Home Ingest and provider clients                  |
 |                                                     |
 | Transfer app :8001                                  |
-| - signed source GET                                 |
-| - signed output PUT                                 |
+| - signed v1 source GET / output PUT                 |
+| - signed v2 raw asset upload / download             |
 +---------------------+-------------------------------+
                       | short-lived HTTPS capabilities
           +-----------+-----------+
@@ -74,8 +74,11 @@ The boundaries are deliberate:
 The controller:
 
 - validates original and cover forms;
-- creates projects, jobs, variation attempts, outputs, and capabilities;
+- creates projects, source assets, jobs, variation attempts, outputs, and
+  capabilities;
 - stores state in SQLite through `repository.py`;
+- publishes verified canonical source MP3s before any remix submission;
+- validates and stages backend-bounded source clips without running media tools;
 - prepares provider-neutral inference requests;
 - polls the provider that owns each persisted attempt;
 - verifies worker metadata against the uploaded output;
@@ -90,12 +93,26 @@ not a horizontally scaled controller.
 
 ### Transfer service
 
-`src/ace_service/transfers.py` creates a separate FastAPI app with only:
+`src/ace_service/transfers.py` creates a separate FastAPI app. The legacy v1
+contract remains available for persisted job recovery:
 
 ```text
 GET /transfer/v1/source/{token}
 PUT /transfer/v1/output/{token}
 ```
+
+New browser, Home Ingest, clip, and derivative operations use the separate v2
+contract:
+
+```text
+PUT /asset-transfer/v2/upload/{token}
+GET /asset-transfer/v2/download/{token}
+```
+
+Both versions stream bytes without media processing. v2 capabilities bind an
+owner, purpose, direction, namespace, exact UUID-derived path, MIME/extension,
+size/hash expectations, and expiry. Uploads are raw bounded PUTs; downloads
+are revalidated immediately before streaming and allow only bounded retries.
 
 Capabilities are bound to one job, direction, path, extension, byte limit,
 and expiry. Only a SHA-256 hash of the random token is stored. Source downloads
@@ -105,17 +122,22 @@ database records completion.
 
 ### Home Ingest
 
-`home_ingest/` is an independently installed private service. The controller
-sends it a job UUID and public YouTube URL. It downloads one source, validates
-duration and size, normalizes it to MP3, and uploads it through a restricted
-SFTP account as:
+`home_ingest/` is an independently installed private service. It is the only
+component that contacts YouTube or runs `yt-dlp`, `ffprobe`, and `ffmpeg`.
+Source, clip, and playback-derivative v2 calls use bearer-authenticated
+requests and signed transfer URLs. The service downloads one input, probes the
+actual audio streams, normalizes the first audio stream to stereo 48 kHz
+192 kbps MP3 with metadata removed, and uploads the result through v2.
+
+The v1 YouTube/SFTP path remains only for persisted legacy-job recovery:
 
 ```text
 incoming/<job-id>/source.mp3.part
 ```
 
-The controller validates and atomically finalizes that file before issuing a
-provider source capability. A continuation from an existing generated output
+Uploaded containers are accepted based on real `ffprobe`/`ffmpeg` capability,
+not filename or browser MIME. There is no source-duration ceiling at ingest;
+byte and timeout limits remain. A continuation from an existing generated MP3
 reuses the verified local file and does not contact YouTube again.
 
 ### Sequential MIDI mock
@@ -172,9 +194,18 @@ The main job states are:
 ```text
 original: queued -> cloud_queued -> generating -> completed | failed | cancelled
 
-cover:    queued -> ingesting -> staging
-                -> cloud_queued -> generating -> completed | failed | cancelled
+cover/remix: queued -> ingesting -> staging
+                    -> cloud_queued -> generating -> completed | failed | cancelled
 ```
+
+Source assets have their own durable flow (`awaiting_upload`, `uploaded`,
+`queued`, `preparing`, `ready`, `failed`, or `cancelled`). A source reaches
+`ready` only after Home Ingest's canonical MP3 has been received and verified;
+the project playlist gets that source before a remix job can be submitted.
+Each remix stores the active source media ID, full-source offsets, selected
+clip duration, and an immutable backend capability snapshot. Full-range clips
+use a verified local copy; subranges are prepared by Home Ingest. Provider
+submission is blocked until staging commits.
 
 One to four variations run sequentially. A supplied seed advances
 deterministically for later variations. Status shown in the UI is evidence,
@@ -190,18 +221,18 @@ cancellation is terminal and never enters the publication seam.
 
 ## Media library and playlists
 
-`MediaItem` is the user-facing identity of a generated track and
-`MediaFile` is its verified playable representation. A media item belongs to
-one project and one generated output, while a playlist entry belongs to one
-playlist and references a media item. The project relationship uses database
-cascade semantics; the repository removes dependent entries and library rows
-before deleting a project so SQLite checks cannot expose a half-deleted
-generated-output reference.
+`MediaItem` is the user-facing identity of a source or generated track and
+`MediaFile` is its verified representation. A source item points to one
+`SourceAsset`; a generated item points to one `Output`. Source items always
+have one canonical MP3 in `library/sources/<uuid>/source.mp3` and enter their
+project playlist on publication.
 
-Only a completed variation with a verified, positive-size MP3 output is
-published. Publication is idempotent by generated-output identity and creates
-the generated auto-playlist entry in the same repository operation. Existing
-outputs are not backfilled merely because schema v10 is installed. Custom
+Native MP3 completions publish immediately. FLAC/WAV completions first create a
+logical generated item with a primary lossless download in `outputs/` and one
+pending `mp3_playback` derivative task. The item enters library queries and
+playlists only after Home Ingest verifies the canonical MP3 at
+`library/generated/<uuid>/playback.mp3`. Repeated completion or derivative
+callbacks are idempotent. Existing v10 rows are not backfilled. Custom
 playlists preserve explicit positions, reject duplicate entries, and use a
 two-phase reorder when moving an item across positions.
 
@@ -225,8 +256,9 @@ the project commit. No output is promoted into the library for deletion.
 The browser shell keeps one `<audio>` element in the persistent layout. Its
 queue is filled from safe same-origin media metadata, not provider responses,
 and its state is held in browser storage across soft navigation and reload.
-There is deliberately no source upload through the library, no audio bytes in
-queue JSON, and no offline media cache.
+Source upload starts at the authenticated source picker, not the library. The
+queue contains no audio bytes or capability URLs, and there is no offline
+media cache.
 
 ## Provider boundary
 
@@ -256,12 +288,13 @@ selection, autoscaling, image credentials, and container-group changes remain
 provider-specific operator work.
 
 The interface models prompt-to-audio and audio-to-audio plus individual request
-features. `BackendId` is persisted beside the coarse provider name; every
-provider operation checks both values. A static reviewed Fal catalog maps
-finite product fields to endpoint-specific JSON and is never replaced by live
-discovery data at runtime. New jobs persist the selected backend and descriptor
-snapshot before enqueue; variations remain sequential and never fall back to
-another backend.
+features. Each selectable audio backend advertises reviewed finite source and
+output duration bounds. `BackendId` is persisted beside the coarse provider
+name; every provider operation checks both values. A static reviewed Fal
+catalog maps finite product fields to endpoint-specific JSON and is never
+replaced by live discovery data at runtime. New jobs persist the selected
+backend and descriptor snapshot before enqueue; variations remain sequential
+and never fall back to another backend.
 
 The mock backend advertises every built-in request feature and both modes while
 remaining MP3-only. Its deterministic corpus timing is intentionally exempt
@@ -379,11 +412,14 @@ silently upgrades production data. A migration failure leaves a durable
 incomplete marker; recovery is by restoring the verified pre-upgrade backup,
 not retrying the partial upgrade.
 
-Schema v10 adds the library, playlist, project-deletion, and cancellation
-columns/tables without changing existing output rows into library rows. The
-migration validates generated-item and cancellation invariants with SQLite
-constraints/triggers; publication remains an application-level seam because
-it requires verified output evidence and an idempotent generated-output key.
+Schema v11 adds source assets, asset-transfer v2 capabilities, source
+provenance, remix clip fields, and derivative tasks to the v10 library. The
+ordered v10-to-v11 migration is additive and refuses existing experimental
+`kind='source'` rows rather than guessing their ownership. It does not backfill
+historical outputs. SQLite constraints/triggers plus repository validation
+protect provenance, capability ownership, and derivative readiness;
+publication remains an application-level seam because it requires verified
+file evidence and idempotent source/output keys.
 
 The quality campaign uses a separate private database and fixture. Its CLI and
 ordinary-submission maintenance gate are currently quarantined. The campaign
@@ -393,7 +429,8 @@ recovery, and evaluation contracts are still tested.
 ## Security and failure rules
 
 - The private UI uses HTTP Basic authentication and same-site CSRF tokens.
-- The public proxy forwards only the two transfer route families.
+- The public proxy forwards only the v1 recovery routes and the v2 upload /
+  download routes; only v2 upload locations permit 512 MiB raw bodies.
 - Secrets stay in deployment configuration and are redacted from logs.
 - Capability-bearing paths are not written to application or proxy access
   logs.
@@ -402,8 +439,8 @@ recovery, and evaluation contracts are still tested.
 - Library deletion is a state machine (`active -> pending -> deleted`) with a
   private, mode-restricted trash location and delayed purge reconciliation.
 - Cleanup may remove expired capabilities, stale partial files, temporary
-  cover sources, and eligible library-trash files. It never silently removes
-  an active completed output.
+  uploads, cover clips, and eligible library-trash files. It never silently
+  removes an active completed output or published source.
 - A malformed provider response, missing evidence, unknown state, or stale
   migration is an error. The system does not infer success or safe teardown.
 

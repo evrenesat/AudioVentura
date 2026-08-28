@@ -462,6 +462,10 @@ class FalProvider:
             ResultDeliveryMode.CONTROLLER_PULL,
             frozenset(descriptor.output.native_formats),
             descriptor.adapter,
+            source_duration_min_seconds=descriptor.source_duration_min_seconds,
+            source_duration_max_seconds=descriptor.source_duration_max_seconds,
+            output_duration_min_seconds=descriptor.output_duration_min_seconds,
+            output_duration_max_seconds=descriptor.output_duration_max_seconds,
         )
 
     async def submit(self, request: InferenceRequest) -> ProviderJobRef:

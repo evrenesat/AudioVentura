@@ -5,6 +5,7 @@ import hashlib
 import math
 import socket
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -46,6 +47,10 @@ from ace_service.repository import (
     transition_variation_attempt,
 )
 from ace_service.schemas import OriginalSongRequest
+
+HOME_INGEST_SRC = Path(__file__).parents[2] / "home_ingest" / "src"
+if str(HOME_INGEST_SRC) not in sys.path:
+    sys.path.insert(0, str(HOME_INGEST_SRC))
 
 E2E_BACKEND = BackendId("runpod/ace-step-v15-xl-turbo")
 

@@ -82,6 +82,7 @@ from ace_service.repository import (
     recover_uncertain_submissions,
     recover_uncertain_variation_submissions,
     revoke_active_transfers,
+    revoke_asset_transfers,
     set_variation_progress,
     set_variation_provider_result,
     transition_job,
@@ -100,6 +101,7 @@ from ace_service.schemas import (
     validate_sha256,
     validate_worker_result_metadata,
 )
+from ace_service.source_assets import stage_source_job
 from ace_service.state import ControllerLock
 from ace_service.transfers import issue_transfer_url
 
@@ -154,6 +156,7 @@ class ControllerWorker:
         poll_interval_seconds: float | None = None,
         capacity_controller: CapacityController | None = None,
         capacity_registry: CapacityRegistry | None = None,
+        home_ingest_semaphore: asyncio.Semaphore | None = None,
     ) -> None:
         self.settings = settings
         self.session_factory = session_factory
@@ -168,6 +171,7 @@ class ControllerWorker:
         self.home_ingest_client = home_ingest_client
         self.capacity_controller = capacity_controller
         self.capacity_registry = capacity_registry
+        self.home_ingest_semaphore = home_ingest_semaphore or asyncio.Semaphore(1)
         self.poll_interval_seconds = poll_interval_seconds
         if self.poll_interval_seconds is not None and self.poll_interval_seconds < 0:
             raise ValueError("poll interval must not be negative")
@@ -179,6 +183,8 @@ class ControllerWorker:
         self._accepting = False
         self._poll_error_counts: dict[str, int] = {}
         self._poll_delays: dict[str, float] = {}
+        self._source_stage_retry_counts: dict[str, int] = {}
+        self._source_stage_retry_delays: dict[str, float] = {}
 
     @property
     def queue(self) -> asyncio.Queue[str]:
@@ -219,6 +225,8 @@ class ControllerWorker:
         self._accepting = False
         self._poll_error_counts.clear()
         self._poll_delays.clear()
+        self._source_stage_retry_counts.clear()
+        self._source_stage_retry_delays.clear()
         task = self._task
         self._task = None
         if task is not None:
@@ -271,7 +279,11 @@ class ControllerWorker:
             self._enqueued.discard(job_id)
             try:
                 await self.process_job(job_id)
-                if self._job_needs_poll(job_id) and self._accepting:
+                source_delay = self._source_stage_retry_delays.pop(job_id, None)
+                if source_delay is not None and self._accepting:
+                    await asyncio.sleep(source_delay)
+                    self.enqueue(job_id)
+                elif self._job_needs_poll(job_id) and self._accepting:
                     delay = self._poll_delays.pop(job_id, self._base_poll_delay(job_id))
                     if delay:
                         await asyncio.sleep(delay)
@@ -306,12 +318,18 @@ class ControllerWorker:
 
         if status is JobStatus.QUEUED:
             if job.job_type is JobType.COVER:
+                if job.source_media_item_id is not None:
+                    await self._stage_source_job(job_id)
+                    return
                 await self._prepare_cover(job_id)
                 return
             await self._submit_variation(job_id, variation_index)
             return
 
         if status is JobStatus.INGESTING:
+            if job.source_media_item_id is not None:
+                await self._stage_source_job(job_id)
+                return
             # A home-ingest agent owns this state during normal operation. On
             # restart, _recover_on_startup advances it only after validation.
             return
@@ -332,6 +350,70 @@ class ControllerWorker:
                 await self._submit_variation(job_id, variation_index)
                 return
             await self._poll_variation(job_id, variation_index)
+
+    async def _stage_source_job(self, job_id: str) -> None:
+        """Stage a published source clip before crossing the provider nonce boundary."""
+
+        try:
+            staged = await stage_source_job(
+                self.settings,
+                self.session_factory,
+                self.home_ingest_client,
+                job_id,
+                home_ingest_semaphore=self.home_ingest_semaphore,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            code = str(getattr(exc, "code", "source_staging_failed"))[:64]
+            message = str(getattr(exc, "message", "The selected source could not be staged."))[:500]
+            transient = isinstance(exc, HomeIngestError) and code in {
+                "home_ingest_unavailable",
+                "home_ingest_failed",
+                "home_ingest_timeout",
+                "transfer_download_failed",
+                "transfer_upload_failed",
+                "transfer_target_invalid",
+            }
+            with self.session_factory() as session:
+                job = get_job(session, job_id)
+                if job is None or job.status in {
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                }:
+                    session.rollback()
+                    return
+                revoke_asset_transfers(session, job_id=job_id)
+                if transient:
+                    transition_job(
+                        session,
+                        job_id,
+                        JobStatus.QUEUED,
+                        error_code=code,
+                        user_facing_error=message,
+                    )
+                    attempt = self._source_stage_retry_counts.get(job_id, 0) + 1
+                    self._source_stage_retry_counts[job_id] = attempt
+                    self._source_stage_retry_delays[job_id] = min(
+                        60.0, max(5.0, 2.0 ** min(attempt - 1, 6))
+                    )
+                else:
+                    transition_job(
+                        session,
+                        job_id,
+                        JobStatus.FAILED,
+                        error_code=code,
+                        user_facing_error=message,
+                    )
+                session.commit()
+            if not transient:
+                discard_staged_cover_source(self.settings, job_id)
+            return
+        if not staged:
+            return
+        self._source_stage_retry_counts.pop(job_id, None)
+        await self._submit_variation(job_id, 1)
 
     async def _handle_requested_cancellation(self, job_id: str, variation_index: int) -> bool:
         """Handle one durable cancellation request, keeping provider calls outside SQL."""
@@ -367,6 +449,7 @@ class ControllerWorker:
                     CancelOutcome.CANCELLED,
                     user_facing_error="Generation cancelled.",
                 )
+                revoke_asset_transfers(session, job_id=cancelled.id)
                 session.commit()
                 if cancelled.job_type is JobType.COVER:
                     discard_staged_cover_source(self.settings, cancelled.id)
@@ -908,12 +991,13 @@ class ControllerWorker:
             )
         if await self._handle_requested_cancellation(job_id, 1):
             return
-        prepared = await self.home_ingest_client.prepare(
-            job_id=job_id,
-            url=source_url,
-            max_duration_seconds=self.settings.max_source_duration_seconds,
-            max_source_bytes=self.settings.transfer_max_source_bytes,
-        )
+        async with self.home_ingest_semaphore:
+            prepared = await self.home_ingest_client.prepare(
+                job_id=job_id,
+                url=source_url,
+                max_duration_seconds=self.settings.max_source_duration_seconds,
+                max_source_bytes=self.settings.transfer_max_source_bytes,
+            )
         if await self._handle_requested_cancellation(job_id, 1):
             discard_staged_cover_source(self.settings, job_id)
             return
@@ -986,6 +1070,9 @@ class ControllerWorker:
                     self._enqueue_recovered(job.id)
                     continue
                 if job.status is JobStatus.INGESTING:
+                    if job.source_media_item_id is not None:
+                        self._enqueue_recovered(job.id)
+                        continue
                     if self._incoming_source_is_valid(job.id):
                         transition_job(session, job.id, JobStatus.STAGING)
                         self._enqueue_recovered(job.id)
@@ -999,6 +1086,13 @@ class ControllerWorker:
                         )
                     continue
                 if job.status is JobStatus.STAGING:
+                    if job.source_media_item_id is not None:
+                        if self._incoming_source_is_valid(job.id):
+                            self._enqueue_recovered(job.id)
+                        else:
+                            transition_job(session, job.id, JobStatus.QUEUED)
+                            self._enqueue_recovered(job.id)
+                        continue
                     if self._cover_is_confirmed(job):
                         self._enqueue_recovered(job.id)
                     continue
@@ -1056,6 +1150,8 @@ class ControllerWorker:
     def _cover_is_confirmed(job: Job) -> bool:
         """Treat legacy staged rows as submitted-era state, but gate v2 rows."""
 
+        if job.source_media_item_id is not None:
+            return True
         normalized = job.normalized_request_json
         if (
             not isinstance(normalized, Mapping)

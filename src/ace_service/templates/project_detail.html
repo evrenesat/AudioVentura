@@ -10,6 +10,13 @@
   </form>
 </section>
 {% if rename_errors %}<div class="banner error"><strong>Project was not renamed:</strong><ul>{% for error in rename_errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
+{% if source %}
+<section class="source-card" aria-labelledby="project-source-title">
+  <div class="source-card-heading"><div><p class="eyebrow">Original source</p><h2 id="project-source-title">{{ source.title }}</h2><p class="muted">{{ source.status_label }}{% if source.duration_seconds %} · {{ source.duration_seconds|round(1) }} seconds{% endif %}</p></div>{% if source.media and source.media.file_available %}<button class="play-button" type="button" data-player-track data-media-id="{{ source.media.id }}" data-player-title="{{ source.media.title }}" data-player-project="{{ source.media.project_title }}" data-player-src="{{ source.media.media_url }}" data-player-download="{{ source.media.download_url }}" data-player-play aria-label="Play original source">▶ Play</button>{% endif %}</div>
+  {% if source.error %}<div class="banner error">{{ source.error }}</div>{% endif %}
+  <div class="source-actions">{% if source.remix_url %}<a class="button" href="{{ source.remix_url }}">Create remix</a>{% endif %}<a class="button secondary" href="{{ source.status_url }}">Source status</a></div>
+</section>
+{% endif %}
 {% if project.deletable %}<details class="danger-zone"><summary>Delete project</summary><p>This removes the project and quarantines its audio. Custom playlists remain, without deleted tracks.</p><form method="post" action="{{ project.delete_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label for="confirm-project-title">Type <strong>{{ project.title }}</strong> to confirm</label><input id="confirm-project-title" name="confirm_title" required autocomplete="off"><button class="button danger" type="submit">Delete project</button></form></details>{% else %}<p class="hint">Project deletion becomes available after every version reaches a terminal state.</p>{% endif %}
 
 <section class="section-heading"><h2>Versions</h2><a href="{{ urls.jobs }}">Operational history</a></section>
@@ -29,8 +36,8 @@
       {% if job.outputs %}
       {% for output in job.outputs %}
       <div class="output-card">
-        <div><strong>Variation {{ output.variation_index }}</strong><span>{{ output.size_label }} · {{ output.mime_type }}</span></div>
-        {% if output.legacy %}<button class="play-button" type="button" data-player-track data-player-title="Variation {{ output.variation_index }}" data-player-src="{{ output.media_url }}" src="{{ output.media_url }}" data-player-play aria-label="Play variation {{ output.variation_index }}">▶ Play</button><a href="{{ output.download_url }}">Download</a>{% elif output.deleted %}<span class="muted">Deleted audio · unavailable</span>{% else %}<button class="play-button" type="button" data-player-track data-player-title="{{ output.title }}" data-player-src="{{ output.media_url }}" data-player-play aria-label="Play {{ output.title }}">▶ Play</button><a href="{{ output.download_url }}">Download</a>{% endif %}
+        <div><strong>{% if output.preparing_mp3 %}Preparing MP3{% elif output.deleted %}Deleted audio{% else %}Variation {{ output.variation_index }}{% endif %}</strong><span>{{ output.size_label }} · {{ output.mime_type }}</span></div>
+        {% if output.legacy %}<button class="play-button" type="button" data-player-track data-player-title="Variation {{ output.variation_index }}" data-player-src="{{ output.media_url }}" src="{{ output.media_url }}" data-player-play aria-label="Play variation {{ output.variation_index }}">▶ Play</button><a href="{{ output.download_url }}">Download</a>{% elif output.deleted %}<span class="muted">Deleted audio · unavailable</span>{% else %}{% if output.playable %}<button class="play-button" type="button" data-player-track data-player-title="{{ output.title }}" data-player-src="{{ output.media_url }}" data-player-play aria-label="Play {{ output.title }}">▶ Play</button>{% else %}<span class="muted">MP3 player version is being prepared.</span>{% endif %}{% if output.download_url %}<a href="{{ output.download_url }}">Download primary</a>{% endif %}{% if output.derivative_error %}<span class="muted">Preparing player version failed: {{ output.derivative_error }}</span>{% endif %}{% if output.derivative_retry_url %}<form method="post" action="{{ output.derivative_retry_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button small secondary" type="submit">Retry MP3</button></form>{% endif %}{% endif %}
       </div>
       {% endfor %}
       {% else %}<p class="muted">No outputs for this version.</p>{% endif %}

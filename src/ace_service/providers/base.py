@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -121,6 +122,10 @@ class ProviderCapabilities:
     native_formats: frozenset[str] = frozenset({"mp3", "flac", "wav"})
     adapter: str | None = None
     enforces_requested_duration: bool = True
+    source_duration_min_seconds: float | None = None
+    source_duration_max_seconds: float | None = None
+    output_duration_min_seconds: float | None = None
+    output_duration_max_seconds: float | None = None
 
     def __post_init__(self) -> None:
         backend_id = self.backend_id
@@ -132,6 +137,33 @@ class ProviderCapabilities:
         object.__setattr__(self, "media_kind", MediaKind(self.media_kind))
         object.__setattr__(self, "result_delivery", ResultDeliveryMode(self.result_delivery))
         object.__setattr__(self, "native_formats", frozenset(self.native_formats))
+        for label, value in (
+            ("source_duration_min_seconds", self.source_duration_min_seconds),
+            ("source_duration_max_seconds", self.source_duration_max_seconds),
+            ("output_duration_min_seconds", self.output_duration_min_seconds),
+            ("output_duration_max_seconds", self.output_duration_max_seconds),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) <= 0
+            ):
+                raise ValueError(f"{label} must be a finite positive number")
+        for minimum, maximum, label in (
+            (
+                self.source_duration_min_seconds,
+                self.source_duration_max_seconds,
+                "source duration",
+            ),
+            (
+                self.output_duration_min_seconds,
+                self.output_duration_max_seconds,
+                "output duration",
+            ),
+        ):
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(f"{label} minimum exceeds maximum")
 
 
 def _bounded_mapping(value: Mapping[str, Any], *, label: str) -> Mapping[str, Any]:

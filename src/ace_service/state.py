@@ -15,8 +15,12 @@ ALLOWED_JOB_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.QUEUED: frozenset(
         {JobStatus.INGESTING, JobStatus.CLOUD_QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),
-    JobStatus.INGESTING: frozenset({JobStatus.STAGING, JobStatus.FAILED, JobStatus.CANCELLED}),
-    JobStatus.STAGING: frozenset({JobStatus.CLOUD_QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}),
+    JobStatus.INGESTING: frozenset(
+        {JobStatus.QUEUED, JobStatus.STAGING, JobStatus.FAILED, JobStatus.CANCELLED}
+    ),
+    JobStatus.STAGING: frozenset(
+        {JobStatus.QUEUED, JobStatus.CLOUD_QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}
+    ),
     JobStatus.CLOUD_QUEUED: frozenset(
         {JobStatus.GENERATING, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),

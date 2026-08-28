@@ -35,6 +35,7 @@ from ace_service.providers.registry import BackendRegistry
 from ace_service.providers.runpod import RunpodProvider
 from ace_service.providers.salad import SaladProvider
 from ace_service.runpod_client import RunpodClient
+from ace_service.source_assets import SourceIngestCoordinator
 from ace_service.web import register_web_routes
 from ace_service.worker import ControllerWorker, RunpodWorkerClient
 
@@ -91,6 +92,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await capacity_controller.start()
     notification_dispatcher = app.state.notification_dispatcher
     await notification_dispatcher.start()
+    source_coordinator = app.state.source_coordinator
+    await source_coordinator.start()
     worker = app.state.worker
     try:
         if hasattr(worker, "start"):
@@ -102,6 +105,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cleanup_task
         if hasattr(worker, "stop"):
             await worker.stop()
+        await source_coordinator.stop()
         await capacity_controller.stop()
         await notification_dispatcher.stop()
         clients = [app.state.home_ingest_client]
@@ -133,6 +137,7 @@ def create_app(
     provider_registry: BackendRegistry | None = None,
     home_ingest_client: Any | None = None,
     worker: Any | None = None,
+    source_coordinator: SourceIngestCoordinator | None = None,
 ) -> FastAPI:
     """Create the authenticated main app; the public transfer app is separate."""
 
@@ -242,6 +247,9 @@ def create_app(
         )
     capacity_registry = build_capacity_registry(resolved_settings)
     resolved_home = home_ingest_client or HomeIngestClient(resolved_settings)
+    resolved_source_coordinator = source_coordinator or SourceIngestCoordinator(
+        resolved_settings, cast(SessionFactory, session_factory), resolved_home
+    )
     resolved_pricing = None
     if resolved_settings.fal_key and any(
         str(provider.capabilities.backend_id).startswith("fal/")
@@ -255,6 +263,7 @@ def create_app(
         provider_registry,
         home_ingest_client=resolved_home,
         capacity_registry=capacity_registry,
+        home_ingest_semaphore=resolved_source_coordinator.home_ingest_semaphore,
     )
     if hasattr(resolved_worker, "capacity_controller"):
         resolved_worker.capacity_controller = capacity_controller
@@ -281,6 +290,7 @@ def create_app(
     app.state.fal_health_cache = {}
     app.state.home_ingest_client = resolved_home
     app.state.worker = resolved_worker
+    app.state.source_coordinator = resolved_source_coordinator
     app.state.cleanup_task = None
     register_web_routes(app)
     return app

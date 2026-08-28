@@ -11,10 +11,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, validates
@@ -138,6 +140,43 @@ class TransferStatus(_ValueEnum):
     revoked = REVOKED
 
 
+class SourceAssetOrigin(_ValueEnum):
+    YOUTUBE = "youtube"
+    UPLOAD = "upload"
+
+
+class SourceAssetStatus(_ValueEnum):
+    AWAITING_UPLOAD = "awaiting_upload"
+    UPLOADED = "uploaded"
+    QUEUED = "queued"
+    PREPARING = "preparing"
+    READY = "ready"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AssetTransferDirection(_ValueEnum):
+    UPLOAD = "upload"
+    DOWNLOAD = "download"
+
+
+class AssetTransferStatus(_ValueEnum):
+    ISSUED = "issued"
+    CONSUMED = "consumed"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
+class AssetTransferPurpose(_ValueEnum):
+    BROWSER_SOURCE_UPLOAD = "browser_source_upload"
+    HOME_SOURCE_DOWNLOAD = "home_source_download"
+    HOME_SOURCE_MP3_UPLOAD = "home_source_mp3_upload"
+    HOME_CLIP_DOWNLOAD = "home_clip_download"
+    HOME_CLIP_UPLOAD = "home_clip_upload"
+    HOME_DERIVATIVE_DOWNLOAD = "home_derivative_download"
+    HOME_DERIVATIVE_UPLOAD = "home_derivative_upload"
+
+
 def _enum_type(enum_type: type[_ValueEnum]) -> SqlEnum:
     return SqlEnum(
         enum_type,
@@ -153,6 +192,118 @@ class Base(DeclarativeBase):
 
 PROJECT_TITLE_MAX_LENGTH = 160
 MEDIA_TITLE_MAX_LENGTH = 300
+
+
+class SourceAsset(Base):
+    """Durable source-first ingestion state for one project."""
+
+    __tablename__ = "source_assets"
+    __table_args__ = (
+        UniqueConstraint("project_id"),
+        CheckConstraint("origin IN ('youtube', 'upload')", name="ck_source_assets_origin"),
+        CheckConstraint(
+            "status IN ('awaiting_upload', 'uploaded', 'queued', 'preparing', 'ready', "
+            "'failed', 'cancelled')",
+            name="ck_source_assets_status",
+        ),
+        CheckConstraint(
+            "(origin = 'youtube' AND youtube_url IS NOT NULL AND youtube_video_id IS NOT NULL) "
+            "OR (origin = 'upload' AND original_filename IS NOT NULL "
+            "AND declared_byte_size IS NOT NULL)",
+            name="ck_source_assets_origin_metadata",
+        ),
+        CheckConstraint(
+            "declared_byte_size IS NULL OR declared_byte_size > 0",
+            name="ck_source_assets_declared_size",
+        ),
+        CheckConstraint(
+            "raw_byte_size IS NULL OR raw_byte_size > 0", name="ck_source_assets_raw_size"
+        ),
+        CheckConstraint(
+            "canonical_byte_size IS NULL OR canonical_byte_size > 0",
+            name="ck_source_assets_canonical_size",
+        ),
+        CheckConstraint(
+            "duration_seconds IS NULL OR (duration_seconds > 0 AND "
+            "duration_seconds = duration_seconds)",
+            name="ck_source_assets_duration",
+        ),
+        CheckConstraint(
+            "(status = 'ready') = (duration_seconds IS NOT NULL AND "
+            "canonical_byte_size IS NOT NULL "
+            "AND canonical_sha256 IS NOT NULL)",
+            name="ck_source_assets_ready_metadata",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    origin: Mapped[SourceAssetOrigin] = mapped_column(_enum_type(SourceAssetOrigin), nullable=False)
+    status: Mapped[SourceAssetStatus] = mapped_column(
+        _enum_type(SourceAssetStatus), nullable=False, default=SourceAssetStatus.QUEUED
+    )
+    display_title: Mapped[str] = mapped_column(String(MEDIA_TITLE_MAX_LENGTH), nullable=False)
+    youtube_url: Mapped[str | None] = mapped_column(String(2048))
+    youtube_video_id: Mapped[str | None] = mapped_column(String(128))
+    original_filename: Mapped[str | None] = mapped_column(String(300))
+    declared_byte_size: Mapped[int | None] = mapped_column(Integer)
+    raw_relative_path: Mapped[str | None] = mapped_column(String(1024))
+    raw_byte_size: Mapped[int | None] = mapped_column(Integer)
+    raw_sha256: Mapped[str | None] = mapped_column(String(64))
+    canonical_byte_size: Mapped[int | None] = mapped_column(Integer)
+    canonical_sha256: Mapped[str | None] = mapped_column(String(64))
+    duration_seconds: Mapped[float | None]
+    rights_confirmation_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    user_facing_error: Mapped[str | None] = mapped_column(String(500))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    project: Mapped[Project] = relationship("Project", back_populates="source_asset")
+    media_item: Mapped[MediaItem | None] = relationship(
+        "MediaItem", back_populates="source_asset", uselist=False
+    )
+    transfer_capabilities: Mapped[list[AssetTransferCapability]] = relationship(
+        "AssetTransferCapability",
+        back_populates="source_asset",
+        foreign_keys="AssetTransferCapability.source_asset_id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    @validates("display_title")
+    def _validate_display_title(self, key: str, value: str) -> str:
+        del key
+        title = value.strip() if isinstance(value, str) else ""
+        if not title or len(title) > MEDIA_TITLE_MAX_LENGTH:
+            raise ValueError(f"source title must be 1..{MEDIA_TITLE_MAX_LENGTH} characters")
+        return title
+
+    @validates("original_filename")
+    def _validate_original_filename(self, key: str, value: str | None) -> str | None:
+        del key
+        if value is None:
+            return None
+        filename = value.strip()
+        if (
+            not filename
+            or len(filename) > 300
+            or any(ord(character) < 32 for character in filename)
+        ):
+            raise ValueError("source filename is invalid")
+        return filename
 
 
 class Project(Base):
@@ -174,6 +325,13 @@ class Project(Base):
     )
     playlists: Mapped[list[Playlist]] = relationship(
         back_populates="project", cascade="all, delete-orphan", passive_deletes=True
+    )
+    source_asset: Mapped[SourceAsset | None] = relationship(
+        "SourceAsset",
+        back_populates="project",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     @validates("job_type")
@@ -198,6 +356,12 @@ class Job(Base):
     project_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    source_media_item_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("media_items.id", ondelete="SET NULL"), index=True
+    )
+    source_clip_start_seconds: Mapped[float | None]
+    source_clip_end_seconds: Mapped[float | None]
+    source_clip_duration_seconds: Mapped[float | None]
     job_type: Mapped[JobType] = mapped_column(_enum_type(JobType), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
         _enum_type(JobStatus), nullable=False, default=JobStatus.QUEUED
@@ -238,6 +402,9 @@ class Job(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="jobs")
+    source_media_item: Mapped[MediaItem | None] = relationship(
+        "MediaItem", foreign_keys=[source_media_item_id]
+    )
     outputs: Mapped[list[Output]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -280,10 +447,22 @@ class MediaItem(Base):
 
     __tablename__ = "media_items"
     __table_args__ = (
+        Index(
+            "ux_media_items_source_asset_id",
+            "source_asset_id",
+            unique=True,
+            sqlite_where=text("source_asset_id IS NOT NULL"),
+        ),
         CheckConstraint("kind IN ('generated', 'source')", name="ck_media_items_kind"),
         CheckConstraint(
             "kind = 'source' OR generated_output_id IS NOT NULL",
             name="ck_media_items_generated_output",
+        ),
+        CheckConstraint(
+            "(kind = 'source' AND source_asset_id IS NOT NULL AND "
+            "generated_output_id IS NULL) OR (kind = 'generated' AND "
+            "source_asset_id IS NULL AND generated_output_id IS NOT NULL)",
+            name="ck_media_items_provenance",
         ),
         CheckConstraint(
             "deletion_state IN ('active', 'pending', 'deleted')",
@@ -303,6 +482,9 @@ class MediaItem(Base):
     generated_output_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("outputs.id", ondelete="SET NULL"), unique=True, index=True
     )
+    source_asset_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("source_assets.id", ondelete="CASCADE"), index=True
+    )
     kind: Mapped[MediaItemKind] = mapped_column(
         _enum_type(MediaItemKind), nullable=False, default=MediaItemKind.GENERATED
     )
@@ -320,6 +502,12 @@ class MediaItem(Base):
 
     project: Mapped[Project] = relationship(back_populates="media_items")
     generated_output: Mapped[Output | None] = relationship(back_populates="media_item")
+    source_asset: Mapped[SourceAsset | None] = relationship(
+        "SourceAsset", back_populates="media_item", uselist=False
+    )
+    derivative_task: Mapped[MediaDerivativeTask | None] = relationship(
+        "MediaDerivativeTask", back_populates="media_item", uselist=False
+    )
     files: Mapped[list[MediaFile]] = relationship(
         back_populates="media_item", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -375,6 +563,63 @@ class MediaFile(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
 
     media_item: Mapped[MediaItem] = relationship(back_populates="files")
+
+
+class MediaDerivativeTask(Base):
+    """Durable preparation state for a compact playback derivative."""
+
+    __tablename__ = "media_derivative_tasks"
+    __table_args__ = (
+        UniqueConstraint("media_item_id"),
+        CheckConstraint("kind IN ('mp3_playback')", name="ck_media_derivative_tasks_kind"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'ready', 'failed')",
+            name="ck_media_derivative_tasks_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_media_derivative_tasks_attempts"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    media_item_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("media_items.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    source_media_file_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("media_files.id", ondelete="CASCADE"), nullable=False
+    )
+    output_media_file_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("media_files.id", ondelete="SET NULL")
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False, default="mp3_playback")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    user_facing_error: Mapped[str | None] = mapped_column(String(500))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    media_item: Mapped[MediaItem] = relationship("MediaItem", back_populates="derivative_task")
+    source_media_file: Mapped[MediaFile] = relationship(
+        "MediaFile", foreign_keys=[source_media_file_id]
+    )
+    output_media_file: Mapped[MediaFile | None] = relationship(
+        "MediaFile", foreign_keys=[output_media_file_id]
+    )
+    transfer_capabilities: Mapped[list[AssetTransferCapability]] = relationship(
+        "AssetTransferCapability",
+        back_populates="derivative_task",
+        foreign_keys="AssetTransferCapability.derivative_task_id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Playlist(Base):
@@ -931,6 +1176,85 @@ class TransferCapability(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
     job: Mapped[Job] = relationship(back_populates="transfers")
+
+
+class AssetTransferCapability(Base):
+    """One-shot signed transfer for browser and Home Ingest asset flows."""
+
+    __tablename__ = "asset_transfer_capabilities"
+    __table_args__ = (
+        CheckConstraint("direction IN ('upload', 'download')", name="ck_asset_transfer_direction"),
+        CheckConstraint(
+            "purpose IN ('browser_source_upload', 'home_source_download', "
+            "'home_source_mp3_upload', 'home_clip_download', 'home_clip_upload', "
+            "'home_derivative_download', 'home_derivative_upload')",
+            name="ck_asset_transfer_purpose",
+        ),
+        CheckConstraint(
+            "storage_namespace IN ('uploads', 'library', 'incoming', 'outputs')",
+            name="ck_asset_transfer_namespace",
+        ),
+        CheckConstraint(
+            "status IN ('issued', 'consumed', 'expired', 'revoked')",
+            name="ck_asset_transfer_status",
+        ),
+        CheckConstraint(
+            "((source_asset_id IS NOT NULL) + (job_id IS NOT NULL) + "
+            "(derivative_task_id IS NOT NULL)) = 1",
+            name="ck_asset_transfer_one_owner",
+        ),
+        CheckConstraint("max_bytes > 0", name="ck_asset_transfer_max_bytes"),
+        CheckConstraint(
+            "received_byte_size IS NULL OR received_byte_size > 0",
+            name="ck_asset_transfer_received_size",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    token_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    direction: Mapped[AssetTransferDirection] = mapped_column(
+        _enum_type(AssetTransferDirection), nullable=False
+    )
+    purpose: Mapped[AssetTransferPurpose] = mapped_column(
+        _enum_type(AssetTransferPurpose), nullable=False
+    )
+    source_asset_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("source_assets.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    derivative_task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("media_derivative_tasks.id", ondelete="CASCADE"), index=True
+    )
+    storage_namespace: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_relative_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    expected_extension: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_mime_type: Mapped[str | None] = mapped_column(String(128))
+    expected_byte_size: Mapped[int | None] = mapped_column(Integer)
+    expected_sha256: Mapped[str | None] = mapped_column(String(64))
+    max_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[AssetTransferStatus] = mapped_column(
+        _enum_type(AssetTransferStatus), nullable=False, default=AssetTransferStatus.ISSUED
+    )
+    access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    received_byte_size: Mapped[int | None] = mapped_column(Integer)
+    received_sha256: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+    source_asset: Mapped[SourceAsset | None] = relationship(
+        "SourceAsset",
+        back_populates="transfer_capabilities",
+        foreign_keys=[source_asset_id],
+    )
+    job: Mapped[Job | None] = relationship("Job", foreign_keys=[job_id])
+    derivative_task: Mapped[MediaDerivativeTask | None] = relationship(
+        "MediaDerivativeTask",
+        back_populates="transfer_capabilities",
+        foreign_keys=[derivative_task_id],
+    )
 
 
 JobOutput = Output

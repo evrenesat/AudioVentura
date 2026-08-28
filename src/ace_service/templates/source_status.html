@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ source.title }} · AudioVentura{% endblock %}
+{% block content %}
+<article class="source-status-page" data-source-status-url="{{ source.status_url }}">
+  <p class="eyebrow">{{ source.origin|capitalize }} source</p>
+  <h1>{{ source.title }}</h1>
+  <div class="detail-status"><span class="status status-{{ source.status }}" data-source-status-label>{{ source.status_label }}</span>{% if source.duration_seconds %}<span>{{ source.duration_seconds|round(1) }} seconds</span>{% endif %}</div>
+  {% if source.filename %}<p class="muted">{{ source.filename }}{% if source.declared_size_label %} · {{ source.declared_size_label }}{% endif %}</p>{% endif %}
+  <div class="source-status-message" data-source-status-message aria-live="polite">
+    {% if source.error %}<div class="banner error">{{ source.error }}</div>{% elif source.status == 'preparing' %}<div class="banner warning">Extracting the first audio stream and creating your canonical MP3 at Home Ingest.</div>{% elif source.status == 'uploaded' or source.status == 'queued' %}<div class="banner">Upload received. Preparing the complete source before generation.</div>{% elif source.status == 'ready' %}<div class="banner success">The complete source is ready to play and remix.</div>{% endif %}
+  </div>
+  {% if source.origin == 'upload' and source.declared_byte_size %}<progress data-source-progress max="100" value="{{ source.upload_progress or 0 }}" aria-label="Upload progress"></progress><span data-source-progress-label>{{ source.upload_progress or 0 }}%{% if source.received_size_label %} · {{ source.received_size_label }}{% endif %}</span>{% endif %}
+  {% if source.media and source.media.file_available %}
+  <section class="source-card" aria-labelledby="source-playback-title">
+    <h2 id="source-playback-title">Original source</h2>
+    <p class="muted">{{ source.media.duration_seconds|round(1) }} seconds · available in the project playlist</p>
+    <button class="play-button" type="button" data-player-track data-media-id="{{ source.media.id }}" data-player-title="{{ source.media.title }}" data-player-project="{{ source.media.project_title }}" data-player-src="{{ source.media.media_url }}" data-player-download="{{ source.media.download_url }}" data-player-play aria-label="Play original source">▶ Play source</button>
+  </section>
+  {% endif %}
+  <div class="source-actions">
+    {% if source.remix_url %}<a class="button" href="{{ source.remix_url }}">Create remix</a>{% endif %}
+    <a class="button secondary" href="{{ source.project_url }}">Open project</a>
+    {% if source.can_cancel %}<form method="post" action="{{ source.cancel_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button danger" type="submit">Cancel source preparation</button></form>{% endif %}
+    {% if source.can_retry %}<form method="post" action="{{ source.retry_url }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Retry source preparation</button></form>{% endif %}
+  </div>
+</article>
+<script src="{{ urls.source_upload_js }}" defer></script>
+{% endblock %}

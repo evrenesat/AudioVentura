@@ -40,6 +40,10 @@ _KNOWN_KEYS = {
     "available",
     "unavailable_reason",
     "pricing",
+    "source_duration_min_seconds",
+    "source_duration_max_seconds",
+    "output_duration_min_seconds",
+    "output_duration_max_seconds",
 }
 _FIELD_KEYS = {
     "ui_name",
@@ -213,6 +217,51 @@ class CatalogDescriptor:
     available: bool = True
     unavailable_reason: str | None = None
     pricing: dict[str, Any] | None = None
+    source_duration_min_seconds: float | None = None
+    source_duration_max_seconds: float | None = None
+    output_duration_min_seconds: float | None = None
+    output_duration_max_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        """Freeze reviewed duration limits for source-aware remix selection.
+
+        Older catalog entries predate the explicit top-level fields.  Audio
+        endpoints still carry the reviewed 1..600-second contract in their
+        endpoint schemas/runtime review, so defaults are materialized here;
+        prompt-only endpoints derive output limits from their duration field.
+        """
+
+        source_min = self.source_duration_min_seconds
+        source_max = self.source_duration_max_seconds
+        output_min = self.output_duration_min_seconds
+        output_max = self.output_duration_max_seconds
+        duration = self.fields.get("duration")
+        if self.operation is not BackendOperation.TEXT_TO_MUSIC:
+            source_min = 1.0 if source_min is None else source_min
+            source_max = 600.0 if source_max is None else source_max
+            output_min = 1.0 if output_min is None else output_min
+            output_max = 600.0 if output_max is None else output_max
+        elif duration is not None:
+            output_min = duration.minimum if output_min is None else output_min
+            output_max = duration.maximum if output_max is None else output_max
+        for label, value in (
+            ("source_duration_min_seconds", source_min),
+            ("source_duration_max_seconds", source_max),
+            ("output_duration_min_seconds", output_min),
+            ("output_duration_max_seconds", output_max),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+            ):
+                raise ValueError(f"Fal catalog {label} is invalid")
+        if source_min is not None and source_max is not None and source_min > source_max:
+            raise ValueError("Fal catalog source duration bounds are inverted")
+        if output_min is not None and output_max is not None and output_min > output_max:
+            raise ValueError("Fal catalog output duration bounds are inverted")
+        object.__setattr__(self, "source_duration_min_seconds", source_min)
+        object.__setattr__(self, "source_duration_max_seconds", source_max)
+        object.__setattr__(self, "output_duration_min_seconds", output_min)
+        object.__setattr__(self, "output_duration_max_seconds", output_max)
 
     @property
     def provider(self) -> ProviderName:
@@ -235,6 +284,10 @@ class CatalogDescriptor:
             "native_formats": list(self.output.native_formats),
             "result_path": self.output.result_path,
             "result_delivery": self.result_delivery.value,
+            "source_duration_min_seconds": self.source_duration_min_seconds,
+            "source_duration_max_seconds": self.source_duration_max_seconds,
+            "output_duration_min_seconds": self.output_duration_min_seconds,
+            "output_duration_max_seconds": self.output_duration_max_seconds,
         }
 
     def normalized_schema(self) -> dict[str, Any]:
@@ -367,6 +420,10 @@ def load_catalog(path: Path | str | None = None) -> ReviewedCatalog:
             bool(raw_entry.get("available", True)),
             raw_entry.get("unavailable_reason"),
             _pricing_policy(raw_entry.get("pricing")),
+            raw_entry.get("source_duration_min_seconds"),
+            raw_entry.get("source_duration_max_seconds"),
+            raw_entry.get("output_duration_min_seconds"),
+            raw_entry.get("output_duration_max_seconds"),
         )
         if not entry.label or not entry.adapter:
             raise ValueError("Fal catalog label and adapter are required")

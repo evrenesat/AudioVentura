@@ -9,6 +9,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Literal, cast, overload
 from uuid import UUID, uuid4
 
@@ -37,6 +38,10 @@ from ace_service.models import (
     NOTIFICATION_EVENT_KINDS,
     PROJECT_TITLE_MAX_LENGTH,
     QUOTE_UNAVAILABLE_REASONS,
+    AssetTransferCapability,
+    AssetTransferDirection,
+    AssetTransferPurpose,
+    AssetTransferStatus,
     BillingObservation,
     BillingProjection,
     CapacityLease,
@@ -46,6 +51,7 @@ from ace_service.models import (
     JobStatus,
     JobType,
     MediaDeletionState,
+    MediaDerivativeTask,
     MediaFile,
     MediaFileState,
     MediaItem,
@@ -61,6 +67,9 @@ from ace_service.models import (
     ProjectDeletionAudit,
     PushSubscription,
     RuntimeCalibration,
+    SourceAsset,
+    SourceAssetOrigin,
+    SourceAssetStatus,
     SubmissionQuote,
     TransferCapability,
     TransferDirection,
@@ -103,6 +112,43 @@ _PROGRESS_SEQUENCES = {
     "generation": 20,
     "finalizing": 30,
     "output_upload": 40,
+}
+_ASSET_PURPOSE_POLICY: dict[AssetTransferPurpose, tuple[AssetTransferDirection, str, str]] = {
+    AssetTransferPurpose.BROWSER_SOURCE_UPLOAD: (
+        AssetTransferDirection.UPLOAD,
+        "uploads",
+        ".bin",
+    ),
+    AssetTransferPurpose.HOME_SOURCE_DOWNLOAD: (
+        AssetTransferDirection.DOWNLOAD,
+        "uploads",
+        ".bin",
+    ),
+    AssetTransferPurpose.HOME_SOURCE_MP3_UPLOAD: (
+        AssetTransferDirection.UPLOAD,
+        "library",
+        ".mp3",
+    ),
+    AssetTransferPurpose.HOME_CLIP_DOWNLOAD: (
+        AssetTransferDirection.DOWNLOAD,
+        "library",
+        ".mp3",
+    ),
+    AssetTransferPurpose.HOME_CLIP_UPLOAD: (
+        AssetTransferDirection.UPLOAD,
+        "incoming",
+        ".mp3",
+    ),
+    AssetTransferPurpose.HOME_DERIVATIVE_DOWNLOAD: (
+        AssetTransferDirection.DOWNLOAD,
+        "outputs",
+        ".lossless",
+    ),
+    AssetTransferPurpose.HOME_DERIVATIVE_UPLOAD: (
+        AssetTransferDirection.UPLOAD,
+        "library",
+        ".mp3",
+    ),
 }
 
 
@@ -654,6 +700,565 @@ class IssuedTransfer:
     token: str
 
 
+@dataclass(frozen=True, slots=True)
+class IssuedAssetTransfer:
+    """Plaintext returned exactly once when an asset capability is issued."""
+
+    capability: AssetTransferCapability
+    token: str
+
+
+def _asset_uuid(value: str | UUID) -> str:
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("asset identity must be a UUID") from exc
+
+
+def create_source_asset(
+    session: Session,
+    *,
+    project: Project | str | UUID,
+    origin: SourceAssetOrigin | str,
+    display_title: str,
+    rights_confirmation_at: datetime,
+    youtube_url: str | None = None,
+    youtube_video_id: str | None = None,
+    original_filename: str | None = None,
+    declared_byte_size: int | None = None,
+    source_asset_id: str | UUID | None = None,
+) -> SourceAsset:
+    """Create the one primary source asset for an existing project."""
+
+    persisted_project = (
+        project if isinstance(project, Project) else get_project(session, str(project))
+    )
+    if persisted_project is None:
+        raise KeyError(f"unknown source project: {project}")
+    normalized_origin = SourceAssetOrigin(origin)
+    title = _media_title(display_title)
+    confirmation = _utc_timestamp(rights_confirmation_at)
+    if normalized_origin is SourceAssetOrigin.YOUTUBE:
+        if not youtube_url or not youtube_video_id:
+            raise ValueError("YouTube sources require URL and video identity")
+        # Importing the validator here avoids making repository-only tests
+        # depend on the full request schema module at import time.
+        from ace_service.schemas import validate_youtube_url
+
+        normalized_url = validate_youtube_url(youtube_url)
+        if len(youtube_video_id) > 128 or not youtube_video_id.strip():
+            raise ValueError("YouTube video identity is invalid")
+        upload_status = SourceAssetStatus.QUEUED
+        original_filename = None
+        declared_byte_size = None
+    else:
+        if youtube_url is not None or youtube_video_id is not None:
+            raise ValueError("upload sources must not carry YouTube metadata")
+        if original_filename is None or not original_filename.strip():
+            raise ValueError("uploaded source filename is required")
+        filename = original_filename.strip()
+        if len(filename) > 300 or any(ord(character) < 32 for character in filename):
+            raise ValueError("uploaded source filename is invalid")
+        if (
+            isinstance(declared_byte_size, bool)
+            or not isinstance(declared_byte_size, int)
+            or declared_byte_size <= 0
+            or declared_byte_size > 536_870_912
+        ):
+            raise ValueError("uploaded source size must be between 1 and 512 MiB")
+        normalized_url = None
+        upload_status = SourceAssetStatus.AWAITING_UPLOAD
+    existing = persisted_project.source_asset
+    if existing is not None:
+        raise ValueError("project already has a primary source")
+    asset = SourceAsset(
+        id=_asset_uuid(source_asset_id or uuid4()),
+        project_id=persisted_project.id,
+        origin=normalized_origin,
+        status=upload_status,
+        display_title=title,
+        youtube_url=normalized_url,
+        youtube_video_id=youtube_video_id.strip() if youtube_video_id else None,
+        original_filename=original_filename.strip() if original_filename else None,
+        declared_byte_size=declared_byte_size,
+        rights_confirmation_at=confirmation,
+    )
+    session.add(asset)
+    persisted_project.updated_at = confirmation
+    session.flush()
+    return asset
+
+
+def get_source_asset(session: Session, source_asset_id: str | UUID) -> SourceAsset | None:
+    return session.get(SourceAsset, _asset_uuid(source_asset_id))
+
+
+def list_source_assets(session: Session, project_id: str | UUID | None = None) -> list[SourceAsset]:
+    statement = select(SourceAsset).order_by(SourceAsset.created_at.desc(), SourceAsset.id)
+    if project_id is not None:
+        statement = statement.where(SourceAsset.project_id == _asset_uuid(project_id))
+    return list(session.scalars(statement))
+
+
+def mark_source_uploaded(
+    session: Session,
+    source_asset_id: str | UUID,
+    *,
+    raw_relative_path: str,
+    raw_byte_size: int,
+    raw_sha256: str,
+) -> SourceAsset:
+    asset = get_source_asset(session, source_asset_id)
+    if asset is None:
+        raise KeyError(f"unknown source asset: {source_asset_id}")
+    if asset.origin is not SourceAssetOrigin.UPLOAD:
+        raise ValueError("only direct uploads have a raw upload handoff")
+    if asset.status not in {SourceAssetStatus.AWAITING_UPLOAD, SourceAssetStatus.UPLOADED}:
+        raise ValueError("source asset is not accepting an upload")
+    asset.raw_relative_path = normalize_relative_path(raw_relative_path)
+    asset.raw_byte_size = _non_negative_int(raw_byte_size, "raw byte size", allow_none=False)
+    if asset.raw_byte_size <= 0:
+        raise ValueError("raw byte size must be positive")
+    asset.raw_sha256 = validate_sha256(raw_sha256)
+    asset.status = SourceAssetStatus.UPLOADED
+    asset.updated_at = utc_now()
+    session.flush()
+    return asset
+
+
+def mark_source_preparing(
+    session: Session, source_asset_id: str | UUID, *, now: datetime | None = None
+) -> SourceAsset:
+    asset = get_source_asset(session, source_asset_id)
+    if asset is None:
+        raise KeyError(f"unknown source asset: {source_asset_id}")
+    if asset.status not in {
+        SourceAssetStatus.QUEUED,
+        SourceAssetStatus.UPLOADED,
+        SourceAssetStatus.PREPARING,
+    }:
+        raise ValueError("source asset is not queued for preparation")
+    asset.status = SourceAssetStatus.PREPARING
+    asset.attempt_count += 1
+    asset.started_at = _utc_timestamp(now)
+    asset.next_attempt_at = None
+    asset.updated_at = asset.started_at
+    session.flush()
+    return asset
+
+
+def fail_source_asset(
+    session: Session,
+    source_asset_id: str | UUID,
+    *,
+    error_code: str,
+    user_facing_error: str,
+    retry_at: datetime | None = None,
+) -> SourceAsset:
+    asset = get_source_asset(session, source_asset_id)
+    if asset is None:
+        raise KeyError(f"unknown source asset: {source_asset_id}")
+    if not error_code or len(error_code) > 64 or not user_facing_error:
+        raise ValueError("source failure details are invalid")
+    asset.status = SourceAssetStatus.FAILED
+    asset.error_code = error_code[:64]
+    asset.user_facing_error = user_facing_error[:500]
+    asset.next_attempt_at = _utc_timestamp(retry_at) if retry_at is not None else None
+    asset.updated_at = utc_now()
+    session.flush()
+    return asset
+
+
+def retry_source_asset(session: Session, source_asset_id: str | UUID) -> SourceAsset:
+    asset = get_source_asset(session, source_asset_id)
+    if asset is None:
+        raise KeyError(f"unknown source asset: {source_asset_id}")
+    if asset.status not in {SourceAssetStatus.FAILED, SourceAssetStatus.CANCELLED}:
+        raise ValueError("only terminal source failures can be retried")
+    source_media_item_id = asset.media_item.id if asset.media_item is not None else None
+    if source_media_item_id is not None and session.scalar(
+        select(func.count(Job.id)).where(
+            Job.source_media_item_id == source_media_item_id,
+            Job.status.not_in(list(_TERMINAL_JOB_STATUSES)),
+        )
+    ):
+        raise ValueError("source is referenced by a nonterminal job")
+    asset.status = (
+        SourceAssetStatus.AWAITING_UPLOAD
+        if asset.origin is SourceAssetOrigin.UPLOAD and asset.raw_relative_path is None
+        else SourceAssetStatus.QUEUED
+    )
+    asset.error_code = None
+    asset.user_facing_error = None
+    asset.next_attempt_at = None
+    asset.updated_at = utc_now()
+    session.flush()
+    return asset
+
+
+def validate_source_range(
+    source_media_item: MediaItem,
+    start_seconds: float,
+    end_seconds: float,
+    backend_snapshot: dict[str, Any],
+) -> float:
+    """Validate a source clip against its frozen backend duration contract."""
+
+    values = (start_seconds, end_seconds)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in values
+    ):
+        raise ValueError("source range must contain finite numbers")
+    duration = source_media_item.duration_seconds
+    if duration is None or not math.isfinite(float(duration)) or duration <= 0:
+        raise ValueError("source has no measured duration")
+    start, end = float(start_seconds), float(end_seconds)
+    if start < 0 or end <= start or end > float(duration) + 0.001:
+        raise ValueError("source range is outside the source duration")
+    minimum = backend_snapshot.get("source_duration_min_seconds")
+    maximum = backend_snapshot.get("source_duration_max_seconds")
+    if (
+        isinstance(minimum, bool)
+        or not isinstance(minimum, (int, float))
+        or isinstance(maximum, bool)
+        or not isinstance(maximum, (int, float))
+        or not math.isfinite(float(minimum))
+        or not math.isfinite(float(maximum))
+        or float(minimum) <= 0
+        or float(maximum) < float(minimum)
+    ):
+        raise ValueError("selected backend has no reviewed source duration bounds")
+    clip_duration = end - start
+    if clip_duration < float(minimum) - 0.001 or clip_duration > float(maximum) + 0.001:
+        raise ValueError("selected source range is outside backend duration limits")
+    return clip_duration
+
+
+def issue_asset_transfer_capability(
+    session: Session,
+    *,
+    purpose: AssetTransferPurpose | str,
+    expected_relative_path: str,
+    expected_extension: str,
+    max_bytes: int,
+    expires_at: datetime,
+    source_asset_id: str | UUID | None = None,
+    job_id: str | UUID | None = None,
+    derivative_task_id: str | UUID | None = None,
+    expected_mime_type: str | None = None,
+    expected_byte_size: int | None = None,
+    expected_sha256: str | None = None,
+    token: str | None = None,
+    capability_id: str | UUID | None = None,
+) -> IssuedAssetTransfer:
+    normalized_purpose = AssetTransferPurpose(purpose)
+    policy_direction, namespace, fixed_extension = _ASSET_PURPOSE_POLICY[normalized_purpose]
+    extension = normalize_extension(expected_extension)
+    if fixed_extension != ".lossless" and extension != fixed_extension:
+        raise ValueError("asset transfer extension does not match its purpose")
+    if fixed_extension == ".lossless" and extension not in {".flac", ".wav"}:
+        raise ValueError("derivative source must be FLAC or WAV")
+    owners = [source_asset_id is not None, job_id is not None, derivative_task_id is not None]
+    if sum(owners) != 1:
+        raise ValueError("asset transfer must have exactly one owner")
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("asset transfer maximum must be positive")
+    if expected_byte_size is not None and (
+        isinstance(expected_byte_size, bool)
+        or not isinstance(expected_byte_size, int)
+        or expected_byte_size <= 0
+        or expected_byte_size > max_bytes
+    ):
+        raise ValueError("expected asset size is invalid")
+    if expected_sha256 is not None:
+        expected_sha256 = validate_sha256(expected_sha256)
+    if expected_mime_type is not None and (not expected_mime_type or len(expected_mime_type) > 128):
+        raise ValueError("asset MIME type is invalid")
+    if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+        raise ValueError("asset capability expiry must be timezone-aware")
+    if source_asset_id is not None and get_source_asset(session, source_asset_id) is None:
+        raise KeyError("unknown source asset owner")
+    if job_id is not None and get_job(session, job_id) is None:
+        raise KeyError("unknown job owner")
+    if (
+        derivative_task_id is not None
+        and session.get(MediaDerivativeTask, str(derivative_task_id)) is None
+    ):
+        raise KeyError("unknown derivative task owner")
+    normalized_path = normalize_relative_path(expected_relative_path)
+    if normalized_purpose in {
+        AssetTransferPurpose.BROWSER_SOURCE_UPLOAD,
+        AssetTransferPurpose.HOME_SOURCE_DOWNLOAD,
+    }:
+        if (
+            source_asset_id is None
+            or normalized_path != f"{_asset_uuid(source_asset_id)}/source.bin"
+        ):
+            raise ValueError("source raw capability path is invalid")
+    elif normalized_purpose in {
+        AssetTransferPurpose.HOME_SOURCE_MP3_UPLOAD,
+        AssetTransferPurpose.HOME_CLIP_DOWNLOAD,
+    }:
+        if source_asset_id is None or normalized_path != (
+            f"sources/{_asset_uuid(source_asset_id)}/source.mp3"
+        ):
+            raise ValueError("source MP3 capability path is invalid")
+    elif normalized_purpose is AssetTransferPurpose.HOME_CLIP_UPLOAD:
+        if job_id is None or normalized_path != f"{job_id}/source.mp3":
+            raise ValueError("clip capability path is invalid")
+    elif normalized_purpose is AssetTransferPurpose.HOME_DERIVATIVE_DOWNLOAD:
+        task = session.get(MediaDerivativeTask, str(derivative_task_id))
+        if task is None or normalized_path != task.source_media_file.relative_path:
+            raise ValueError("derivative source capability path is invalid")
+    elif normalized_purpose is AssetTransferPurpose.HOME_DERIVATIVE_UPLOAD:
+        task = session.get(MediaDerivativeTask, str(derivative_task_id))
+        if task is None or normalized_path != f"generated/{task.media_item_id}/playback.mp3":
+            raise ValueError("derivative output capability path is invalid")
+    plaintext_token = token or secrets.token_urlsafe(32)
+    capability = AssetTransferCapability(
+        id=_asset_uuid(capability_id or uuid4()),
+        token_sha256=_token_sha256(plaintext_token),
+        direction=policy_direction,
+        purpose=normalized_purpose,
+        source_asset_id=_asset_uuid(source_asset_id) if source_asset_id is not None else None,
+        job_id=str(job_id) if job_id is not None else None,
+        derivative_task_id=str(derivative_task_id) if derivative_task_id is not None else None,
+        storage_namespace=namespace,
+        expected_relative_path=normalized_path,
+        expected_extension=extension,
+        expected_mime_type=expected_mime_type,
+        expected_byte_size=expected_byte_size,
+        expected_sha256=expected_sha256,
+        max_bytes=max_bytes,
+        expires_at=_utc_timestamp(expires_at),
+    )
+    session.add(capability)
+    session.flush()
+    return IssuedAssetTransfer(capability=capability, token=plaintext_token)
+
+
+def get_asset_transfer_by_token(session: Session, token: str) -> AssetTransferCapability | None:
+    return session.scalar(
+        select(AssetTransferCapability).where(
+            AssetTransferCapability.token_sha256 == _token_sha256(token)
+        )
+    )
+
+
+def get_active_asset_transfer(
+    session: Session, token: str, *, now: datetime | None = None
+) -> AssetTransferCapability | None:
+    capability = get_asset_transfer_by_token(session, token)
+    if capability is None:
+        return None
+    timestamp = _utc_timestamp(now)
+    if capability.status is AssetTransferStatus.ISSUED and capability.expires_at <= timestamp:
+        capability.status = AssetTransferStatus.EXPIRED
+        session.flush()
+        return None
+    return capability if capability.status is AssetTransferStatus.ISSUED else None
+
+
+def claim_asset_download(
+    session: Session,
+    token: str,
+    *,
+    max_opens: int = 3,
+    now: datetime | None = None,
+) -> AssetTransferCapability | None:
+    if isinstance(max_opens, bool) or not isinstance(max_opens, int) or max_opens < 1:
+        raise ValueError("asset download open limit is invalid")
+    capability = get_active_asset_transfer(session, token, now=now)
+    if capability is None or capability.direction is not AssetTransferDirection.DOWNLOAD:
+        return None
+    if capability.access_count >= max_opens:
+        capability.status = AssetTransferStatus.EXPIRED
+        session.flush()
+        return None
+    capability.access_count += 1
+    session.flush()
+    return capability
+
+
+def complete_asset_upload(
+    session: Session,
+    capability_id: str | UUID,
+    *,
+    byte_size: int,
+    sha256: str,
+    now: datetime | None = None,
+) -> AssetTransferCapability:
+    capability = session.get(AssetTransferCapability, _asset_uuid(capability_id))
+    if capability is None:
+        raise KeyError(f"unknown asset transfer capability: {capability_id}")
+    normalized_hash = validate_sha256(sha256)
+    if capability.direction is not AssetTransferDirection.UPLOAD:
+        raise ValueError("only upload capabilities can be completed")
+    if (
+        isinstance(byte_size, bool)
+        or not isinstance(byte_size, int)
+        or byte_size <= 0
+        or byte_size > capability.max_bytes
+    ):
+        raise ValueError("received asset size is invalid")
+    if capability.expected_byte_size is not None and capability.expected_byte_size != byte_size:
+        raise ValueError("received asset size does not match the capability")
+    if capability.expected_sha256 is not None and capability.expected_sha256 != normalized_hash:
+        raise ValueError("received asset hash does not match the capability")
+    if capability.status is AssetTransferStatus.CONSUMED:
+        if (
+            capability.received_byte_size == byte_size
+            and capability.received_sha256 == normalized_hash
+        ):
+            return capability
+        raise ValueError("asset upload retry conflicts with the consumed content")
+    if capability.status is not AssetTransferStatus.ISSUED:
+        raise ValueError(f"asset transfer capability is {capability.status.value}")
+    timestamp = _utc_timestamp(now)
+    if capability.expires_at <= timestamp:
+        capability.status = AssetTransferStatus.EXPIRED
+        session.flush()
+        raise ValueError("asset transfer capability has expired")
+    capability.received_byte_size = byte_size
+    capability.received_sha256 = normalized_hash
+    capability.status = AssetTransferStatus.CONSUMED
+    capability.consumed_at = timestamp
+    session.flush()
+    return capability
+
+
+def revoke_asset_transfers(
+    session: Session,
+    *,
+    source_asset_id: str | UUID | None = None,
+    job_id: str | UUID | None = None,
+    derivative_task_id: str | UUID | None = None,
+    now: datetime | None = None,
+) -> list[AssetTransferCapability]:
+    if sum(value is not None for value in (source_asset_id, job_id, derivative_task_id)) != 1:
+        raise ValueError("one asset transfer owner is required")
+    filters = [AssetTransferCapability.status == AssetTransferStatus.ISSUED]
+    if source_asset_id is not None:
+        filters.append(AssetTransferCapability.source_asset_id == _asset_uuid(source_asset_id))
+    elif job_id is not None:
+        filters.append(AssetTransferCapability.job_id == str(job_id))
+    else:
+        filters.append(AssetTransferCapability.derivative_task_id == str(derivative_task_id))
+    capabilities = list(session.scalars(select(AssetTransferCapability).where(*filters)))
+    # v2 has no separate revoked timestamp; consumed_at is the bounded audit
+    # time for both successful and explicitly revoked capabilities.
+    timestamp = _utc_timestamp(now)
+    for capability in capabilities:
+        capability.status = AssetTransferStatus.REVOKED
+        capability.consumed_at = timestamp
+    session.flush()
+    return capabilities
+
+
+def get_derivative_task(session: Session, task_id: str | UUID) -> MediaDerivativeTask | None:
+    return session.get(MediaDerivativeTask, _asset_uuid(task_id))
+
+
+def create_derivative_task(
+    session: Session,
+    *,
+    media_item_id: str | UUID,
+    source_media_file_id: int,
+    task_id: str | UUID | None = None,
+) -> MediaDerivativeTask:
+    """Create the single MP3 playback task owned by one lossless item."""
+
+    item = get_media_item(session, media_item_id)
+    source_file = session.get(MediaFile, source_media_file_id)
+    if item is None or source_file is None or source_file.media_item_id != item.id:
+        raise KeyError("unknown derivative source")
+    if source_file.format not in {OutputFormat.FLAC, OutputFormat.WAV}:
+        raise ValueError("playback derivatives require a FLAC or WAV source")
+    existing = session.scalar(
+        select(MediaDerivativeTask).where(MediaDerivativeTask.media_item_id == item.id)
+    )
+    if existing is not None:
+        return existing
+    task = MediaDerivativeTask(
+        id=_asset_uuid(task_id or uuid4()),
+        media_item_id=item.id,
+        source_media_file_id=source_file.id,
+        kind="mp3_playback",
+        status="pending",
+        attempt_count=0,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    session.add(task)
+    session.flush()
+    return task
+
+
+def mark_derivative_running(
+    session: Session, task_id: str | UUID, *, now: datetime | None = None
+) -> MediaDerivativeTask:
+    task = get_derivative_task(session, task_id)
+    if task is None:
+        raise KeyError(f"unknown derivative task: {task_id}")
+    if task.status == "ready":
+        return task
+    if task.status not in {"pending", "failed", "running"}:
+        raise ValueError("derivative task is not runnable")
+    timestamp = _utc_timestamp(now)
+    task.status = "running"
+    task.attempt_count += 1
+    task.started_at = timestamp
+    task.next_attempt_at = None
+    task.error_code = None
+    task.user_facing_error = None
+    task.updated_at = timestamp
+    session.flush()
+    return task
+
+
+def fail_derivative_task(
+    session: Session,
+    task_id: str | UUID,
+    *,
+    error_code: str,
+    user_facing_error: str,
+    retry_at: datetime | None = None,
+) -> MediaDerivativeTask:
+    task = get_derivative_task(session, task_id)
+    if task is None:
+        raise KeyError(f"unknown derivative task: {task_id}")
+    task.status = "failed"
+    task.error_code = error_code[:64]
+    task.user_facing_error = user_facing_error[:500]
+    task.next_attempt_at = _utc_timestamp(retry_at) if retry_at is not None else None
+    task.updated_at = utc_now()
+    session.flush()
+    return task
+
+
+def retry_derivative_task(session: Session, task_id: str | UUID) -> MediaDerivativeTask:
+    task = get_derivative_task(session, task_id)
+    if task is None:
+        raise KeyError(f"unknown derivative task: {task_id}")
+    if task.status != "failed":
+        raise ValueError("only failed derivative tasks can be retried")
+    if (
+        task.media_item.deletion_state is not MediaDeletionState.ACTIVE
+        or task.media_item.generated_output is None
+    ):
+        raise ValueError("deleted media cannot retry its playback derivative")
+    task.status = "pending"
+    task.next_attempt_at = None
+    task.error_code = None
+    task.user_facing_error = None
+    task.updated_at = utc_now()
+    session.flush()
+    return task
+
+
 def create_job(
     session: Session,
     *,
@@ -673,6 +1278,10 @@ def create_job(
     inference_provider: ProviderName | str = ProviderName.RUNPOD,
     inference_backend: BackendId | str | None = None,
     backend_snapshot_json: dict[str, Any] | None = None,
+    source_media_item_id: str | UUID | None = None,
+    source_clip_start_seconds: float | None = None,
+    source_clip_end_seconds: float | None = None,
+    source_clip_duration_seconds: float | None = None,
 ) -> Job:
     if variation_count < 1 or variation_count > 4:
         raise ValueError("variation_count must be between 1 and 4")
@@ -717,6 +1326,51 @@ def create_job(
     }
     if snapshot.get("backend_id") != str(backend) or snapshot.get("provider") != provider.value:
         raise ValueError("backend snapshot does not match provider ownership")
+    source_item: MediaItem | None = None
+    effective_source_duration = source_duration
+    if source_media_item_id is not None:
+        source_item = get_media_item(session, source_media_item_id)
+        if source_item is None:
+            raise KeyError(f"unknown source media item: {source_media_item_id}")
+        if source_item.project_id != persisted_project.id:
+            raise ValueError("source media item does not belong to the project")
+        if source_item.deletion_state is not MediaDeletionState.ACTIVE:
+            raise ValueError("source media item is not active")
+        if (
+            session.scalar(
+                select(MediaFile.id).where(
+                    MediaFile.media_item_id == source_item.id,
+                    MediaFile.format == OutputFormat.MP3,
+                    MediaFile.state == MediaFileState.ACTIVE,
+                    MediaFile.is_playback == 1,
+                )
+            )
+            is None
+        ):
+            raise ValueError("source media item has no active MP3 playback file")
+        if source_clip_start_seconds is None or source_clip_end_seconds is None:
+            raise ValueError("source-aware jobs require an explicit clip range")
+        effective_source_duration = validate_source_range(
+            source_item,
+            source_clip_start_seconds,
+            source_clip_end_seconds,
+            snapshot,
+        )
+        if (
+            source_clip_duration_seconds is not None
+            and abs(float(source_clip_duration_seconds) - effective_source_duration) > 0.001
+        ):
+            raise ValueError("stored source clip duration does not match its bounds")
+        source_clip_duration_seconds = effective_source_duration
+    elif any(
+        value is not None
+        for value in (
+            source_clip_start_seconds,
+            source_clip_end_seconds,
+            source_clip_duration_seconds,
+        )
+    ):
+        raise ValueError("clip bounds require a source media item")
     normalized_request = normalized_request_json
     if provider is ProviderName.FAL:
         normalized_request = _fal_generation_contract(
@@ -724,7 +1378,7 @@ def create_job(
             job_type=job_type,
             prompt=prompt,
             lyrics=lyrics,
-            source_duration_seconds=source_duration,
+            source_duration_seconds=effective_source_duration,
             output_format=output_format,
             variation_count=variation_count,
         )
@@ -736,6 +1390,18 @@ def create_job(
         source_url=source_url,
         sanitized_source_title=sanitized_source_title,
         source_duration=source_duration,
+        source_media_item_id=source_item.id if source_item is not None else None,
+        source_clip_start_seconds=(
+            float(source_clip_start_seconds) if source_clip_start_seconds is not None else None
+        ),
+        source_clip_end_seconds=(
+            float(source_clip_end_seconds) if source_clip_end_seconds is not None else None
+        ),
+        source_clip_duration_seconds=(
+            float(source_clip_duration_seconds)
+            if source_clip_duration_seconds is not None
+            else None
+        ),
         prompt=prompt,
         lyrics=lyrics,
         rights_confirmation_at=rights_confirmation_at,
@@ -748,6 +1414,23 @@ def create_job(
         inference_backend=str(backend),
         backend_snapshot_json=snapshot,
     )
+    job.source_duration = effective_source_duration
+    if isinstance(normalized_request, dict) and source_item is not None:
+        assert source_clip_start_seconds is not None
+        assert source_clip_end_seconds is not None
+        assert source_clip_duration_seconds is not None
+        assert effective_source_duration is not None
+        normalized_request = dict(normalized_request)
+        normalized_request.update(
+            {
+                "source_media_item_id": source_item.id,
+                "source_clip_start_seconds": float(source_clip_start_seconds),
+                "source_clip_end_seconds": float(source_clip_end_seconds),
+                "source_clip_duration_seconds": float(source_clip_duration_seconds),
+                "source_duration_seconds": float(effective_source_duration),
+            }
+        )
+        job.normalized_request_json = normalized_request
     session.add(job)
     persisted_project.updated_at = utc_now()
     session.flush()
@@ -766,7 +1449,7 @@ def create_original_job(
 ) -> Job:
     """Persist one validated original-song request before it is enqueued."""
 
-    return create_job(
+    job = create_job(
         session,
         job_type=JobType.ORIGINAL,
         prompt=request.description,
@@ -780,6 +1463,7 @@ def create_original_job(
         inference_backend=inference_backend,
         backend_snapshot_json=backend_snapshot_json,
     )
+    return job
 
 
 def create_cover_job(
@@ -795,10 +1479,12 @@ def create_cover_job(
 ) -> Job:
     """Persist one validated cover request before home ingestion is queued."""
 
+    if request.youtube_url is None:
+        raise ValueError("legacy cover jobs require a YouTube URL")
     confirmation_at = (
         _utc_timestamp(rights_confirmation_at) if rights_confirmation_at is not None else utc_now()
     )
-    return create_job(
+    job = create_job(
         session,
         job_type=JobType.COVER,
         source_url=request.youtube_url,
@@ -815,6 +1501,61 @@ def create_cover_job(
         inference_backend=inference_backend,
         backend_snapshot_json=backend_snapshot_json,
     )
+    return job
+
+
+def create_source_remix_job(
+    session: Session,
+    request: CoverRequest,
+    *,
+    source_media_item_id: str | UUID,
+    clip_start_seconds: float,
+    clip_end_seconds: float,
+    backend_snapshot_json: dict[str, Any],
+    rights_confirmation_at: datetime | None = None,
+    job_id: str | UUID | None = None,
+    project: Project | str | UUID | None = None,
+    inference_provider: ProviderName | str = ProviderName.RUNPOD,
+    inference_backend: BackendId | str | None = None,
+) -> Job:
+    """Create a new remix only after selecting and validating a playable source range."""
+
+    source_item = get_media_item(session, source_media_item_id)
+    if source_item is None:
+        raise KeyError(f"unknown source media item: {source_media_item_id}")
+    if project is None:
+        project = source_item.project_id
+    job = create_job(
+        session,
+        job_type=JobType.COVER,
+        source_url=None,
+        prompt=request.effective_prompt,
+        lyrics=request.lyrics,
+        rights_confirmation_at=(
+            _utc_timestamp(rights_confirmation_at)
+            if rights_confirmation_at is not None
+            else utc_now()
+        ),
+        cover_strength=request.effective_audio_cover_strength,
+        output_format=request.output_format,
+        variation_count=request.variation_count,
+        normalized_request_json=request.to_normalized_request_json(
+            source_duration_seconds=clip_end_seconds - clip_start_seconds
+        ),
+        job_id=job_id,
+        project=project,
+        inference_provider=inference_provider,
+        inference_backend=inference_backend,
+        backend_snapshot_json=backend_snapshot_json,
+        source_media_item_id=source_media_item_id,
+        source_clip_start_seconds=clip_start_seconds,
+        source_clip_end_seconds=clip_end_seconds,
+        source_clip_duration_seconds=clip_end_seconds - clip_start_seconds,
+    )
+    job.sanitized_source_title = source_item.title
+    job.updated_at = utc_now()
+    session.flush()
+    return job
 
 
 def finalize_cover_job_duration(
@@ -1806,7 +2547,6 @@ def _media_query_statement(
             MediaFile.state == MediaFileState.ACTIVE,
             MediaFile.format == OutputFormat.MP3,
             MediaFile.is_playback == 1,
-            MediaFile.is_primary_download == 1,
         )
     )
     if normalized.q:
@@ -1928,6 +2668,24 @@ def ensure_project_playlist(
         )
         session.add(playlist)
         session.flush()
+        source_item = session.scalar(
+            select(MediaItem).where(
+                MediaItem.project_id == project.id,
+                MediaItem.kind == MediaItemKind.SOURCE,
+                MediaItem.deletion_state == MediaDeletionState.ACTIVE,
+            )
+        )
+        if source_item is not None:
+            source_playback = session.scalar(
+                select(MediaFile.id).where(
+                    MediaFile.media_item_id == source_item.id,
+                    MediaFile.format == OutputFormat.MP3,
+                    MediaFile.state == MediaFileState.ACTIVE,
+                    MediaFile.is_playback == 1,
+                )
+            )
+            if source_playback is not None:
+                add_playlist_entry(session, playlist.id, source_item.id, now=timestamp)
     return playlist
 
 
@@ -2091,7 +2849,12 @@ def reorder_playlist_entries(
 def publish_completed_variation_media(
     session: Session, job_id: str | UUID, variation_index: int
 ) -> list[MediaItem]:
-    """Publish one completed variation's verified MP3 outputs exactly once."""
+    """Publish one completed variation's verified output files exactly once.
+
+    MP3 output is immediately playable.  FLAC/WAV output is durable and
+    downloadable immediately, but remains outside library queries until its
+    one MP3 playback derivative is verified.
+    """
 
     job = get_job(session, job_id)
     if job is None:
@@ -2107,8 +2870,7 @@ def publish_completed_variation_media(
             .where(
                 Output.job_id == job.id,
                 Output.variation_index == variation_index,
-                Output.mime_type == "audio/mpeg",
-                Output.relative_path.like("%.mp3"),
+                Output.mime_type.in_(("audio/mpeg", "audio/flac", "audio/wav")),
             )
             .order_by(Output.result_index.asc(), Output.id.asc())
         )
@@ -2122,9 +2884,17 @@ def publish_completed_variation_media(
         if output.byte_size <= 0:
             raise ValueError("cannot publish an empty output")
         normalized_path = normalize_relative_path(output.relative_path)
-        if not normalized_path.lower().endswith(".mp3"):
-            raise ValueError("MP3 publication requires an MP3 path")
         validate_sha256(output.sha256)
+        extension = Path(normalized_path).suffix.lower().lstrip(".")
+        expected_mime = {"mp3": "audio/mpeg", "flac": "audio/flac", "wav": "audio/wav"}.get(
+            extension
+        )
+        if expected_mime is None or output.mime_type != expected_mime:
+            raise ValueError("output extension and MIME type do not agree")
+        try:
+            output_format = OutputFormat(extension)
+        except ValueError as exc:
+            raise ValueError("output format is not publishable") from exc
         existing = session.scalar(
             select(MediaItem).where(MediaItem.generated_output_id == output.id)
         )
@@ -2150,25 +2920,40 @@ def publish_completed_variation_media(
             MediaFile(
                 media_item_id=item.id,
                 storage_namespace="outputs",
-                format=OutputFormat.MP3,
+                format=output_format,
                 relative_path=normalized_path,
-                mime_type="audio/mpeg",
+                mime_type=output.mime_type,
                 byte_size=output.byte_size,
                 sha256=validate_sha256(output.sha256),
-                is_playback=1,
+                is_playback=1 if output_format is OutputFormat.MP3 else 0,
                 is_primary_download=1,
                 state=MediaFileState.ACTIVE,
                 created_at=timestamp,
             )
         )
         session.flush()
-        if playlist is None:
-            playlist = ensure_project_playlist(session, job.project_id, now=timestamp)
-        add_playlist_entry(session, playlist.id, item.id, now=timestamp)
+        if output_format is OutputFormat.MP3:
+            if playlist is None:
+                playlist = ensure_project_playlist(session, job.project_id, now=timestamp)
+            add_playlist_entry(session, playlist.id, item.id, now=timestamp)
+        else:
+            source_media_file = session.scalar(
+                select(MediaFile).where(
+                    MediaFile.media_item_id == item.id,
+                    MediaFile.format == output_format,
+                )
+            )
+            if source_media_file is None:
+                raise ValueError("lossless publication is missing its source file")
+            create_derivative_task(
+                session,
+                media_item_id=item.id,
+                source_media_file_id=source_media_file.id,
+            )
         published.append(item)
     if published:
-        assert playlist is not None
-        playlist.updated_at = timestamp
+        if playlist is not None:
+            playlist.updated_at = timestamp
         job.project.updated_at = timestamp
         session.flush()
     return published
@@ -2182,6 +2967,15 @@ def mark_media_item_deletion_pending(
         raise KeyError(f"unknown media item: {media_item_id}")
     if item.deletion_state is MediaDeletionState.DELETED:
         raise ValueError("media item is already deleted")
+    if item.kind is MediaItemKind.SOURCE:
+        active_reference = session.scalar(
+            select(Job.id).where(
+                Job.source_media_item_id == item.id,
+                Job.status.not_in(list(_TERMINAL_JOB_STATUSES)),
+            )
+        )
+        if active_reference is not None:
+            raise ValueError("source media item is referenced by a nonterminal job")
     timestamp = _utc_timestamp(now)
     item.deletion_state = MediaDeletionState.PENDING
     item.deletion_requested_at = item.deletion_requested_at or timestamp
@@ -2208,6 +3002,18 @@ def mark_media_item_deleted(
             )
         media_file.state = MediaFileState.QUARANTINED
         media_file.deleted_at = timestamp
+    derivative_task = session.scalar(
+        select(MediaDerivativeTask).where(MediaDerivativeTask.media_item_id == item.id)
+    )
+    if derivative_task is not None and derivative_task.status != "ready":
+        derivative_task.status = "failed"
+        derivative_task.error_code = "media_deleted"
+        derivative_task.user_facing_error = (
+            "The media item was deleted before playback preparation completed."
+        )
+        derivative_task.next_attempt_at = None
+        derivative_task.updated_at = timestamp
+        revoke_asset_transfers(session, derivative_task_id=derivative_task.id, now=timestamp)
     session.execute(delete(PlaylistEntry).where(PlaylistEntry.media_item_id == item.id))
     item.deletion_state = MediaDeletionState.DELETED
     item.deleted_at = timestamp

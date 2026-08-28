@@ -14,10 +14,15 @@ only:
 ```text
 /transfer/v1/source/*
 /transfer/v1/output/*
+/asset-transfer/v2/upload/<token>
+/asset-transfer/v2/download/<token>
 ```
 
 The proxy must reject every other path and disable access logging for these
-routes. The final path segment is a bearer credential.
+routes. The final path segment is a bearer credential. Only v2 upload accepts
+the exact 512 MiB raw-body exception; v2 download has no large-body nginx
+override. Beta exposes the same v2 shapes below `/beta-transfer` to port 8011,
+never production port 8001.
 
 Home Ingest binds to loopback port 8100 by default. It requires a bearer token
 and should be reachable only over the private tailnet.
@@ -67,17 +72,20 @@ file descriptor is available.
 Capability tokens are random 256-bit URL-safe values. SQLite stores only their
 SHA-256 hashes. Each capability is restricted by:
 
-- job;
-- source-download or output-upload direction;
-- deterministic relative path;
+- exactly one source, job, or derivative owner;
+- purpose and upload/download direction;
+- storage namespace and exact UUID-derived relative path;
 - extension and MIME expectations;
 - maximum byte count;
 - UTC expiry.
 
-Source downloads validate path containment, file type, extension, size, and
-symlink safety. Output uploads stream through a hard byte limit into a private
-partial file, compute SHA-256 while receiving, fsync, and atomically rename.
-Conflicting replays cannot replace an accepted output.
+V2 uploads use a raw streamed PUT: declared oversize is rejected before body
+read, lying/missing lengths remain bounded, partial files are removed on
+failure, and an identical retry is idempotent while conflicting bytes return
+409. V2 downloads permit only bounded opens and validate containment, file type,
+extension, size, hash, and symlink safety immediately before streaming.
+Conflicting replays cannot replace accepted bytes. V1 capabilities retain their
+legacy recovery contract.
 
 Never place a capability URL in logs, tickets, chat, provider metadata, or a
 durable incident record.
@@ -85,10 +93,11 @@ durable incident record.
 ## Media and paths
 
 The configured data root is the containment boundary for the database,
-incoming sources, outputs, partial files, and logs. All media paths are stored
-as relative paths and resolved below their expected root. Traversal, symlink
-components, unsupported types, size mismatch, and SHA-256 mismatch fail
-closed.
+`uploads/`, `incoming/`, `outputs/`, `library/`, trash, partial files, and logs.
+All media paths are stored as relative paths and resolved below their expected
+root. Traversal, symlink components, unsupported types, size mismatch, and
+SHA-256 mismatch fail closed. Upload filenames, YouTube IDs, titles, and
+provider IDs never enter storage paths.
 
 Authenticated playback and download accept a database media-file ID, not an
 arbitrary path, and revalidate the active file before streaming it. The
@@ -112,7 +121,11 @@ source-upload endpoint and the browser stores playback preferences/position,
 not an offline audio cache.
 
 Home Ingest is the only component allowed to contact YouTube or run media
-tools. Its SFTP account must be key-only, have no shell, and be restricted to
+tools. Uploaded/container inputs are probed locally, select only the first
+audio stream, and run with a local-only ffmpeg/ffprobe protocol allowlist so a
+crafted container cannot cause a network fetch. Its v2 transfer client follows
+no redirects and accepts only the configured scheme, host, port, and route.
+Its legacy SFTP account must be key-only, have no shell, and be restricted to
 the incoming directory. GPU workers must not receive YouTube cookies or home
 credentials.
 
@@ -154,9 +167,10 @@ permissions. Redaction covers configured secrets, authorization values,
 capability URLs, prompts, lyrics, and token-shaped fields. Do not log raw
 requests or provider responses.
 
-Cleanup removes expired capabilities, stale partial files, old Home Ingest
+Cleanup removes expired capabilities, stale upload/clip parts, old Home Ingest
 temporary directories, non-retained terminal cover sources, and eligible
-library-trash files. It does not remove active completed outputs. Backups
+library-trash files. It does not remove active completed outputs or published
+source MP3s. Backups
 therefore contain private user media and must receive the same access controls
 as the live data root.
 
@@ -187,8 +201,8 @@ Before deployment or public source publication:
 
 1. scan the complete Git history, not only the current tree;
 2. confirm `.env`, databases, audio, fixtures, keys, and logs are untracked;
-3. verify root and beta proxy routing, transfer access-log suppression, and
-   separate 8000/8001 versus 8010/8011 upstreams;
+3. verify root and beta v1/v2 proxy routing, token-path access-log suppression,
+   and separate 8000/8001 versus 8010/8011 upstreams;
 4. verify private p100 binds on 8100/8200 and 8101/8201, separate service
    identities, authentication, corpus permissions, and beta SFTP confinement;
 5. verify worker images contain no credentials;

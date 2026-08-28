@@ -55,6 +55,10 @@ class SaladProvider:
         False,
         False,
         BACKEND_ID,
+        source_duration_min_seconds=1.0,
+        source_duration_max_seconds=600.0,
+        output_duration_min_seconds=1.0,
+        output_duration_max_seconds=600.0,
     )
 
     def __init__(

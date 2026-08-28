@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Create remix · AudioVentura{% endblock %}
+{% block content %}
+<section class="form-header">
+  <p class="eyebrow">Source-first remix</p>
+  <h1>Create remix</h1>
+  <p class="lede">Bring one source into your private library, then choose the part and style to remix.</p>
+</section>
+{% if errors %}<div class="banner error" role="alert"><strong>Check your source:</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
+<section class="source-picker" data-source-picker>
+  <div class="source-tabs" role="tablist" aria-label="Source type">
+    <button class="button" type="button" role="tab" aria-selected="true" aria-controls="youtube-panel" data-source-tab="youtube">YouTube URL</button>
+    <button class="button secondary" type="button" role="tab" aria-selected="false" aria-controls="upload-panel" data-source-tab="upload">Upload file</button>
+  </div>
+  <section id="youtube-panel" role="tabpanel" data-source-panel="youtube">
+    <form method="post" action="{{ urls.source_youtube }}" class="form-card">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="youtube-project-title">Project title <span class="required">required</span></label>
+      <input id="youtube-project-title" name="project_title" required maxlength="160" value="{{ form.get('project_title', '') }}" autocomplete="off">
+      <label for="youtube-url">YouTube video URL <span class="required">required</span></label>
+      <input id="youtube-url" name="youtube_url" type="url" required maxlength="2048" value="{{ form.get('youtube_url', '') }}" placeholder="https://www.youtube.com/watch?v=...">
+      <p class="hint">The complete source is extracted and normalized at Home Ingest. Source length is not limited by generation limits.</p>
+      <label class="check-row"><input type="checkbox" name="rights_confirmation" value="1" required> I have the rights to use this source.</label>
+      <button class="button" type="submit">Add YouTube source</button>
+    </form>
+  </section>
+  <section id="upload-panel" role="tabpanel" data-source-panel="upload" hidden>
+    <form class="form-card" data-source-upload-form data-upload-init-url="{{ urls.source_uploads }}" data-status-url-template="{{ urls.source_status }}/__SOURCE_ID__">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="upload-project-title">Project title <span class="required">required</span></label>
+      <input id="upload-project-title" name="project_title" required maxlength="160" autocomplete="off">
+      <label for="source-file">Audio or video file <span class="required">required</span></label>
+      <input id="source-file" name="source_file" type="file" accept="audio/*,video/*" required data-source-file>
+      <p class="hint">The picker accepts audio/video as a convenience. Home Ingest decides whether the file contains an audio stream. Maximum: exactly 512 MiB.</p>
+      <label class="check-row"><input type="checkbox" name="rights_confirmation" value="1" required> I have the rights to use this source.</label>
+      <button class="button" type="submit" data-upload-start>Upload source</button>
+      <div class="upload-status" data-source-status hidden aria-live="polite">
+        <strong data-source-status-label>Waiting for file</strong>
+        <span data-source-file-label></span>
+        <progress data-source-progress max="100" value="0" aria-label="Upload progress"></progress>
+        <span data-source-progress-label>0% · 0 B</span>
+        <button class="button secondary" type="button" data-upload-cancel hidden>Cancel upload</button>
+        <button class="button secondary" type="button" data-upload-retry hidden>Retry upload</button>
+      </div>
+    </form>
+  </section>
+</section>
+<script src="{{ urls.source_upload_js }}" defer></script>
+{% endblock %}

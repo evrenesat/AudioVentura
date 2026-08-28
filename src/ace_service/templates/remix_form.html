@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Remix {{ source.title }} · AudioVentura{% endblock %}
+{% block content %}
+<section class="form-header">
+  <p class="eyebrow">Source range</p>
+  <h1>Remix {{ source.title }}</h1>
+  <p class="lede">Select the exact part sent to the chosen backend. The complete source remains in your library.</p>
+</section>
+{% if errors %}<div class="banner error" role="alert"><strong>Check your remix:</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
+<section class="source-range-card" data-source-range data-source-duration="{{ source_duration_seconds }}">
+  <div class="source-range-heading"><div><h2>Original source</h2><p class="muted">{{ source_duration_seconds|round(1) }} seconds · choose a backend to see its accepted range.</p></div><button class="play-button" type="button" data-player-track data-media-id="{{ source.media.id }}" data-player-title="{{ source.media.title }}" data-player-project="{{ source.media.project_title }}" data-player-src="{{ source.media.media_url }}" data-player-download="{{ source.media.download_url }}" data-player-play aria-label="Play original source">▶ Play source</button></div>
+  <div class="grid two range-fields">
+    <div><label for="clip-start-seconds">Start, seconds</label><input id="clip-start-seconds" name="clip_start_seconds" form="remix-form" type="number" min="0" max="{{ source_duration_seconds }}" step="0.1" value="{{ form.get('clip_start_seconds', '0') }}" required><button class="button small secondary" type="button" data-set-range="start">Set start to current position</button></div>
+    <div><label for="clip-end-seconds">End, seconds</label><input id="clip-end-seconds" name="clip_end_seconds" form="remix-form" type="number" min="0" max="{{ source_duration_seconds }}" step="0.1" value="{{ form.get('clip_end_seconds', source_duration_seconds) }}" required><button class="button small secondary" type="button" data-set-range="end">Set end to current position</button></div>
+  </div>
+  <p class="hint" data-range-limit>Choose a backend to see its reviewed minimum and maximum.</p>
+  <button class="button secondary" type="button" data-preview-range>Preview selection</button>
+</section>
+<form id="remix-form" method="post" action="{{ remix_url }}" class="form-card" data-remix-form>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="source_media_item_id" value="{{ source.media.id }}">
+  <label for="backend">Backend <span class="required">required</span></label>
+  <select id="backend" name="backend" required data-backend-capabilities='{{ backend_choices|tojson }}'>
+    {% for provider_name in backend_choices|map(attribute='provider')|unique|list %}<optgroup label="{{ provider_name }}">{% for backend in backend_choices if backend.provider == provider_name %}<option value="{{ backend.backend_id }}"{% if (form.get('backend', selected_backend) or selected_backend) == backend.backend_id %} selected{% endif %}>{{ backend.label }}</option>{% endfor %}</optgroup>{% endfor %}
+  </select>
+  <p class="hint" id="backend-note">The accepted source range is frozen into this job when submitted.</p>
+  <label for="target_style">Target style <span class="required">required</span></label>
+  <textarea id="target_style" name="target_style" required maxlength="4000" rows="4">{{ form.get('target_style', '') }}</textarea>
+  <label for="remix_guidance">Remix guidance <span class="hint">optional</span></label>
+  <textarea id="remix_guidance" name="remix_guidance" maxlength="4000" rows="3">{{ form.get('remix_guidance', '') }}</textarea>
+  <div class="grid two">
+    <div data-backend-field="source_style"><label for="source_style">Source style / description</label><textarea id="source_style" name="source_style" maxlength="4000" rows="3">{{ form.get('source_style', '') }}</textarea></div>
+    <div data-backend-field="lyrics"><label for="lyrics">Replacement lyrics</label><textarea id="lyrics" name="lyrics" maxlength="4095" rows="3">{{ form.get('lyrics', '') }}</textarea></div>
+    <div data-backend-field="source_lyrics"><label for="source_lyrics">Source lyrics</label><textarea id="source_lyrics" name="source_lyrics" maxlength="20000" rows="3">{{ form.get('source_lyrics', '') }}</textarea></div>
+    <div data-backend-field="strength"><label for="strength">Transform strength</label><input id="strength" name="strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('strength', '') }}"></div>
+    <div data-backend-field="audio_cover_strength"><label for="audio_cover_strength">Reference-audio influence</label><input id="audio_cover_strength" name="audio_cover_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('audio_cover_strength', '0.65') }}"></div>
+    <div data-backend-field="cover_noise_strength"><label for="cover_noise_strength">Source/noise retention</label><input id="cover_noise_strength" name="cover_noise_strength" type="number" min="0" max="1" step="0.01" value="{{ form.get('cover_noise_strength', '0.0') }}"></div>
+    <div data-backend-field="start_seconds"><label for="inpaint-start">Inpaint start <span class="hint">within selected clip</span></label><input id="inpaint-start" name="start_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('inpaint_start_seconds', '') }}"></div>
+    <div data-backend-field="end_seconds"><label for="inpaint-end">Inpaint end <span class="hint">within selected clip</span></label><input id="inpaint-end" name="end_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('inpaint_end_seconds', '') }}"></div>
+    <div data-backend-field="before_seconds"><label for="before_seconds">Extend before <span class="hint">within selected clip</span></label><input id="before_seconds" name="before_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('before_seconds', '') }}"></div>
+    <div data-backend-field="after_seconds"><label for="after_seconds">Extend after <span class="hint">within selected clip</span></label><input id="after_seconds" name="after_seconds" type="number" min="0" max="600" step="0.1" value="{{ form.get('after_seconds', '') }}"></div>
+    <div><label for="variation_count">Variations</label><select id="variation_count" name="variation_count">{% for value in range(1, 5) %}<option value="{{ value }}"{% if form.get('variation_count', '1')|string == value|string %} selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+    <div><label for="output_format">Primary download</label><select id="output_format" name="output_format">{% for value in selected_native_formats %}<option value="{{ value }}"{% if form.get('output_format', selected_output_format) == value %} selected{% endif %}>{{ value|upper }}</option>{% endfor %}</select><p class="hint">FLAC/WAV stays as the primary download while Home Ingest prepares an MP3 player version.</p></div>
+  </div>
+  <label class="check-row long-range-confirmation" data-long-range-confirm hidden><input type="checkbox" name="range_confirmation" value="1"{% if form.get('range_confirmation') %} checked{% endif %}> Use this range for generation. The source is longer than this backend allows.</label>
+  <input type="hidden" name="duration_mode" value="source">
+  <button class="button" type="submit" data-generate-remix>Generate remix</button>
+</form>
+<script src="{{ urls.backend_selector_js }}" defer></script>
+<script src="{{ urls.source_range_js }}" defer></script>
+{% endblock %}
