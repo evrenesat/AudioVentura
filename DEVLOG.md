@@ -1,5 +1,11 @@
 # Development Log
 
+## 2026-08-28 (continuation form defaults)
+
+- Normalized absent optional continuation values to blank HTML form values so
+  the literal string `None` cannot be submitted as a numeric default. Added a
+  regression test covering an auto-duration original continuation.
+
 ## 2026-08-27 (beta provider parity regression)
 
 - Added exact rendered Original/Cover selector inventory coverage for the ten

@@ -770,6 +770,40 @@ def test_continue_original_prefills_every_field_without_enqueue(web_app) -> None
         assert worker.enqueued == []
 
 
+def test_continue_original_auto_defaults_render_blank_and_submit(web_app) -> None:
+    app, factory, worker = web_app
+    source_request = OriginalSongRequest(description="plain continuation default")
+    with factory() as session:
+        source = create_original_job(session, source_request, job_id="original-auto-source")
+        session.commit()
+        source_id = source.id
+
+    with TestClient(app) as client:
+        response = client.get(f"/jobs/{source_id}/continue", auth=_auth(client))
+        assert response.status_code == 200
+        assert 'name="duration_seconds"' in response.text
+        assert 'name="duration_seconds" inputmode="decimal" value=""' in response.text
+        assert 'value="None"' not in response.text
+
+        token = client.cookies.get("ace_csrf")
+        assert token
+        created = client.post(
+            "/create",
+            auth=_auth(client),
+            data={
+                "csrf_token": token,
+                "continue_from_job_id": source_id,
+                "description": source_request.description,
+                "duration_mode": "auto",
+                "duration_seconds": "",
+                "variation_count": "1",
+            },
+            follow_redirects=False,
+        )
+        assert created.status_code == 303
+        assert len(worker.enqueued) == 1
+
+
 def test_continue_original_edits_create_one_same_project_version(web_app) -> None:
     app, factory, worker = web_app
     source_request = _rich_original_request()

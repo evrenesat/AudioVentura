@@ -2177,7 +2177,7 @@ def _continuation_form(job: Job) -> dict[str, Any]:
             "variation_count": job.variation_count,
         }
         OriginalSongRequest(**request_values)
-        return {
+        return _renderable_form_values({
             **common,
             "description": generation["prompt"],
             "lyrics": generation["lyrics"],
@@ -2191,7 +2191,7 @@ def _continuation_form(job: Job) -> dict[str, Any]:
             "time_signature": generation["time_signature"],
             "seed": generation["seed"],
             "output_format": generation["output_format"],
-        }
+        })
 
     required = {
         "target_style",
@@ -2231,7 +2231,7 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         "rights_confirmation": True,
     }
     CoverRequest(**request_values)
-    return {
+    return _renderable_form_values({
         **common,
         "youtube_url": job.source_url,
         "target_style": generation["target_style"],
@@ -2247,7 +2247,19 @@ def _continuation_form(job: Job) -> dict[str, Any]:
         ),
         "seed": generation["seed"],
         "output_format": generation["output_format"],
-    }
+    })
+
+
+def _renderable_form_values(form: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep absent optional values blank when a form is rendered.
+
+    Jinja renders Python ``None`` as the literal text ``None``. If that text
+    reaches an HTML input, the browser submits it as user input and strict
+    request validation rejects an otherwise valid continuation with an
+    optional field left at its default.
+    """
+
+    return {name: "" if value is None else value for name, value in form.items()}
 
 
 def _optional_number(value: str | None, *, default: float | None = None) -> float | None:
