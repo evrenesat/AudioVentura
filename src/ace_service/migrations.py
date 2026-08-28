@@ -463,7 +463,7 @@ def _cp8_ddl(connection: sqlite3.Connection) -> None:
     for table_name in ("jobs", "variation_attempts", "outputs"):
         unknown = connection.execute(
             f"SELECT COUNT(*) FROM {table_name} WHERE inference_provider IS NOT NULL "
-            "AND inference_provider NOT IN ('runpod', 'salad')"
+            "AND inference_provider NOT IN ('runpod', 'salad', 'fal', 'mock')"
         ).fetchone()
         if unknown is None or int(unknown[0]) != 0:
             raise MigrationError(f"backend migration found unsupported provider in {table_name}")

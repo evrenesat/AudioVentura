@@ -256,6 +256,71 @@ class TestUpgrade:
         assert "project_id" in _columns(legacy_database_path, "jobs")
         assert "ix_jobs_project_id" in _indexes(legacy_database_path, "jobs")
 
+    def test_upgrade_preserves_integrated_fal_and_mock_provider_records(
+        self, legacy_database_path: Path
+    ) -> None:
+        """The v8 backend migration must accept providers added after it."""
+
+        import ace_service.migrations as migrations_module
+
+        _prepare_v5_database(legacy_database_path)
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            connection.execute(
+                "INSERT INTO jobs (id, job_type, status, output_format, variation_count, "
+                "created_at, updated_at) VALUES "
+                "('fal-job', 'original', 'completed', 'mp3', 1, ?, ?), "
+                "('mock-job', 'original', 'failed', 'mp3', 1, ?, ?)",
+                ("2026-08-28T00:00:00Z", "2026-08-28T00:00:00Z") * 2,
+            )
+            migrations_module._cp6_ddl(connection)
+            migrations_module._cp7_ddl(connection)
+            connection.execute(
+                "UPDATE jobs SET inference_provider = ? WHERE id = ?",
+                ("fal", "fal-job"),
+            )
+            connection.execute(
+                "UPDATE jobs SET inference_provider = ? WHERE id = ?",
+                ("mock", "mock-job"),
+            )
+            connection.execute(
+                "INSERT INTO variation_attempts "
+                "(job_id, variation_index, status, inference_provider, provider_job_id, "
+                "created_at, updated_at) VALUES "
+                "('fal-job', 1, 'completed', 'fal', 'fal-1', ?, ?)",
+                ("2026-08-28T00:00:00Z", "2026-08-28T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO outputs "
+                "(job_id, variation_index, result_index, inference_provider, provider_job_id, "
+                "relative_path, mime_type, byte_size, "
+                "sha256, created_at) VALUES "
+                "('mock-job', 1, 0, 'mock', 'mock-1', "
+                "'result.mp3', 'audio/mpeg', 1, ?, ?)",
+                ("a" * 64, "2026-08-28T00:00:00Z"),
+            )
+            migrations_module._cp8_ddl(connection)
+            connection.commit()
+        finally:
+            connection.close()
+
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            assert connection.execute(
+                "SELECT inference_provider FROM jobs ORDER BY id"
+            ).fetchall() == [
+                ("fal",),
+                ("mock",),
+            ]
+            assert connection.execute(
+                "SELECT inference_provider FROM variation_attempts"
+            ).fetchone() == ("fal",)
+            assert connection.execute("SELECT inference_provider FROM outputs").fetchone() == (
+                "mock",
+            )
+        finally:
+            connection.close()
+
     def test_v5_to_v6_backfills_projects_and_preserves_historical_evidence(
         self, legacy_database_path: Path
     ) -> None:
