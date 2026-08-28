@@ -135,13 +135,15 @@ def test_service_worker_and_keep_warm_round_trip_at_beta_root(settings: ServiceS
             assert 'action="/beta/settings/keep-warm"' in page.text
             csrf = client.cookies.get("ace_csrf")
             assert csrf
-            worker = client.get("/beta/notification-worker.js", auth=_auth())
+            worker = client.get("/beta/notification-worker.js")
             assert worker.status_code == 200
             assert worker.headers["service-worker-allowed"] == "/beta/"
             assert worker.headers["cache-control"] == "no-cache"
             assert "self.registration.scope" in worker.text
             assert "new URL(path, self.location.origin)" in worker.text
             assert "https://" not in worker.text
+            assert client.get("/beta/", follow_redirects=False).status_code == 401
+            assert client.get("/beta/notifications/config").status_code == 401
             notifications_js = client.get("/beta/static/notifications.js", auth=_auth())
             assert notifications_js.status_code == 200
             assert "Uint8Array.from" in notifications_js.text

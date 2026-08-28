@@ -183,12 +183,15 @@ origin is in `WEB_PUSH_ALLOWED_ENDPOINT_ORIGINS`; this allow-list is the SSRF
 boundary for the server-side dispatcher. VAPID private keys stay in the
 protected environment file.
 
-The service worker is authenticated, served with `Service-Worker-Allowed` for
-the configured root path, and accepts only finite event kinds, bounded copy,
-and same-origin paths below that scope. Notification payloads contain no
-prompts, lyrics, provider identifiers, subscription data, or capability URLs.
-Push failure is isolated from job completion and capacity release. A 404/410
-disables only the affected subscription.
+The secret-free service-worker script is publicly fetchable so browser-internal
+worker installation does not depend on forwarding a Basic Auth challenge. Its
+configuration and subscription routes remain authenticated. The worker is
+served with `Service-Worker-Allowed` for the configured root path and accepts
+only finite event kinds, bounded copy, and same-origin paths below that scope.
+Notification payloads contain no prompts, lyrics, provider identifiers,
+subscription data, or capability URLs. Push failure is isolated from job
+completion and capacity release. A 404/410 disables only the affected
+subscription.
 
 Capacity fingerprints are spend-side guards, not secrets. The controller
 refuses resource identity, maximum-one, GPU, deployment, or queue drift and

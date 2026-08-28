@@ -240,9 +240,10 @@ The browser suite uses a disposable loopback server, real local
 ffmpeg/ffprobe, real v2 transfer streaming, and a non-paid provider stub. It
 checks the `/beta` root-path contract, source upload and playlist ordering, one
 global player across soft navigation, mobile target sizes, deletion, and
-cancellation. The protected beta mock acceptance script is separate and
-requires protected credentials plus a caller-approved YouTube URL; see
-[Operations](docs/OPERATIONS.md).
+cancellation. It also checks notification UI states and installs the real
+scoped service worker in Chromium and Firefox. The protected beta mock
+acceptance script is separate and requires protected credentials plus a
+caller-approved YouTube URL; see [Operations](docs/OPERATIONS.md).
 
 ## Verification
 

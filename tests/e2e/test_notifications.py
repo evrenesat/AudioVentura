@@ -81,6 +81,18 @@ def _prepare_page(
     page.goto(f"{server.base_url}/beta/", wait_until="domcontentloaded")
 
 
+def test_native_browser_registers_public_worker(page: Page, e2e_server: E2EServer) -> None:
+    credentials = f"{e2e_server.username}:{e2e_server.password}".encode()
+    token = base64.b64encode(credentials).decode("ascii")
+    page.context.set_extra_http_headers({"Authorization": f"Basic {token}"})
+    page.goto(f"{e2e_server.base_url}/beta/", wait_until="domcontentloaded")
+    scope = page.evaluate(
+        "navigator.serviceWorker.register('/beta/notification-worker.js', "
+        "{scope: '/beta/'}).then((registration) => registration.scope)"
+    )
+    assert scope == f"{e2e_server.base_url}/beta/"
+
+
 @pytest.mark.parametrize(
     ("configured", "permission", "subscribed", "control_visible", "button_visible", "status"),
     [

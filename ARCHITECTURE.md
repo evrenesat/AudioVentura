@@ -57,8 +57,11 @@ The boundaries are deliberate:
 - The sequential MIDI mock is a separate private backend. It receives bounded
   job metadata and source capability metadata, but never downloads or uses a
   source recording.
-- The transfer app is the only public application surface. It has no UI or
-  general API routes.
+- The transfer app is the only public data-bearing application surface. It has
+  no UI or general API routes. The controller exposes one secret-free static
+  bootstrap, `notification-worker.js`, publicly because browser-managed service
+  worker installation cannot depend on page-level Basic Auth; controller UI,
+  configuration, subscription, and user-data routes remain authenticated.
 - GPU workers receive generation metadata and short-lived transfer URLs. They
   do not receive controller, YouTube, SSH, SFTP, or home-network credentials.
 - Audio bytes never travel in a provider API request or result body.

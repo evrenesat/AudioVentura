@@ -10,6 +10,9 @@
   unavailable, unsubscribed, subscribed, denied, and enrollment-success paths.
 - Restored beta Web Push parity through protected VAPID configuration while
   retaining isolated beta subscriptions, notification state, and worker scope.
+- Made only the secret-free worker bootstrap publicly fetchable so Firefox can
+  install it independently of page-level Basic Auth; configuration,
+  subscription mutation, and user data remain authenticated.
 
 ## 2026-08-28 (source ingest, direct uploads, remix ranges, and derivatives)
 

@@ -1002,9 +1002,7 @@ def register_web_routes(app: FastAPI) -> None:
             status_code=200 if found else 404,
         )
 
-    @app.get(
-        "/notification-worker.js", dependencies=[Depends(authenticated)], name="notification_worker"
-    )
+    @app.get("/notification-worker.js", name="notification_worker")
     async def notification_worker(request: Request) -> Response:
         root_path = request.scope.get("root_path", "") or "/"
         scope = root_path if root_path.endswith("/") else f"{root_path}/"
