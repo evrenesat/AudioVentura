@@ -469,7 +469,8 @@ def test_mobile_direct_upload_real_source_pipeline_and_playlist_order(
     expect(entries.nth(1)).to_contain_text("Variation 1")
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     touch_sizes = page.locator(".button, .play-button").evaluate_all(
-        "nodes => nodes.map(node => { const box = node.getBoundingClientRect(); "
+        "nodes => nodes.filter(node => node.getClientRects().length).map(node => { "
+        "const box = node.getBoundingClientRect(); "
         "return [box.width, box.height]; })"
     )
     assert all(width >= 44 and height >= 44 for width, height in touch_sizes)

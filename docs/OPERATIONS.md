@@ -39,8 +39,11 @@ product commit is pinned in that playbook. It snapshots the beta database and
 runtime definitions once per deploy, runs the explicit migration, activates
 the immutable release atomically, and reloads nginx only after configuration
 validation. It never stops or rewrites the production services. Beta enables
-only the reviewed bounded Fal smoke path, disables capacity fingerprints and
-Web Push, and uses separate p100 Home Ingest and SFTP identities. The
+the same user-visible capabilities as production, including Web Push through
+the protected VAPID configuration, while keeping separate subscriptions and
+notification state. It disables capacity fingerprints and provider lifecycle
+management because those can create spend, and uses separate p100 Home Ingest
+and SFTP identities. The
 sequential MIDI mock is opt-in and does not become a default.
 
 ```text

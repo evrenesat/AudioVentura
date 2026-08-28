@@ -17,49 +17,65 @@
     const decoded = atob(padded);
     return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
   };
-  if (!supported) {
-    status.textContent = 'Unsupported';
-    button.disabled = true;
-    return;
-  }
-  const update = (value) => { status.textContent = value; };
-  const hideEnabledControl = () => {
+  const hideControl = () => {
     if (control) control.hidden = true;
   };
+  const showEnrollment = (message = '') => {
+    if (control) control.hidden = false;
+    button.hidden = false;
+    button.disabled = false;
+    status.textContent = message;
+    status.hidden = !message;
+  };
+  const showStatus = (message) => {
+    if (control) control.hidden = false;
+    button.hidden = true;
+    button.disabled = false;
+    status.textContent = message;
+    status.hidden = false;
+  };
+  if (!supported) {
+    hideControl();
+    return;
+  }
   const load = async () => {
     try {
       const response = await fetch(configUrl, { credentials: 'same-origin' });
+      if (!response.ok) { hideControl(); return false; }
       const config = await response.json();
-      if (!config.enabled) { update('Unavailable'); button.disabled = true; return; }
+      if (!config.enabled || !config.public_key) { hideControl(); return false; }
+      button.dataset.publicKey = config.public_key;
       const workerLocation = new URL(workerUrl, window.location.origin);
       registration = await navigator.serviceWorker.register(workerLocation, { scope: new URL('./', workerLocation).pathname });
       subscription = await registration.pushManager.getSubscription();
       if (subscription) subscription.__serverId = localStorage.getItem('ace_push_subscription_id') || '';
-      if (subscription) hideEnabledControl();
-      else if (Notification.permission === 'denied') update('Blocked in browser');
-      else update('Enable notifications');
-      button.dataset.publicKey = config.public_key || '';
-    } catch (_) { update('Unavailable'); }
+      if (subscription) hideControl();
+      else if (Notification.permission === 'denied') showStatus('Notifications blocked in browser');
+      else showEnrollment();
+      return true;
+    } catch (_) { hideControl(); return false; }
   };
   button.addEventListener('click', async () => {
-    if (Notification.permission === 'denied') { update('Blocked in browser'); return; }
+    if (Notification.permission === 'denied') { showStatus('Notifications blocked in browser'); return; }
     try {
-      if (!registration) await load();
+      if (!registration && !await load()) return;
       if (subscription) {
-        if (!subscription.__serverId) { update('Retry disable'); return; }
-        const response = await fetch(`${subscriptionUrl}/${encodeURIComponent(subscription.__serverId)}`, { method: 'DELETE', headers: { 'X-CSRF-Token': csrf() }, credentials: 'same-origin' });
-        if (!response.ok) { update('Retry disable'); return; }
-        await subscription.unsubscribe(); localStorage.removeItem('ace_push_subscription_id'); subscription = null; update('Enable notifications'); return;
+        hideControl();
+        return;
       }
       const permission = await Notification.requestPermission();
-      if (permission !== 'granted') { update('Blocked in browser'); return; }
+      if (permission !== 'granted') {
+        if (permission === 'denied') showStatus('Notifications blocked in browser');
+        else showEnrollment();
+        return;
+      }
       const key = button.dataset.publicKey;
       subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(key) });
       const serialized = subscription.toJSON();
       const response = await fetch(subscriptionUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() }, credentials: 'same-origin', body: JSON.stringify({ endpoint: serialized.endpoint, keys: serialized.keys, csrf_token: csrf() }) });
-      if (!response.ok) { update('Unavailable'); return; }
-      const result = await response.json(); subscription.__serverId = result.subscription_id; localStorage.setItem('ace_push_subscription_id', result.subscription_id); hideEnabledControl();
-    } catch (_) { update('Unavailable'); }
+      if (!response.ok) throw new Error('subscription rejected');
+      const result = await response.json(); subscription.__serverId = result.subscription_id; localStorage.setItem('ace_push_subscription_id', result.subscription_id); hideControl();
+    } catch (_) { showEnrollment('Try again'); }
   });
   load();
 })();

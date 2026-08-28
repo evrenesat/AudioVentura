@@ -23,6 +23,13 @@ After changing anything in this repository:
 Always state which environment and exact revision is currently deployed. Keep
 beta and production labels explicit in plans, progress updates, and handoffs.
 
+Beta, staging, and test environments must reproduce production behavior by
+default. Differences are allowed only when they prevent real cost, destructive
+external effects, or unsafe access to production state. Keep those exceptions
+narrow and preserve the same user-visible behavior with isolated resources or
+deterministic fakes. Ask the user before planning any other capability gap; do
+not silently treat a pre-production environment as a reduced product.
+
 Keep documentation ownership simple:
 
 - `README.md` is the operator and coding-agent entry point.

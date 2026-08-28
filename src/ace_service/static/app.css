@@ -34,6 +34,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .primary-nav a:hover, .primary-nav a[aria-current="page"] { background: var(--card-raised); color: var(--ink); }
 .notification-control { align-items: center; display: flex; flex-wrap: wrap; gap: .45rem; }
 .notification-control[hidden] { display: none; }
+.notification-control [hidden] { display: none; }
 .container { margin: 0 auto; max-width: 1100px; padding: 1.5rem 1rem 3rem; }
 
 .hero, .page-heading, .section-heading, .detail-status, .job-card-top, .actions { align-items: center; display: flex; justify-content: space-between; gap: 1rem; }

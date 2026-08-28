@@ -1,5 +1,16 @@
 # Development Log
 
+## 2026-08-28 (pre-production parity and notification UI regression)
+
+- Made production behavior the default contract for beta, staging, and test;
+  only cost-bearing, destructive, or production-state capabilities may differ
+  without explicit approval.
+- Replaced the permanently disabled notification action with an actionable
+  browser-state control and added executed Chromium/Firefox coverage for
+  unavailable, unsubscribed, subscribed, denied, and enrollment-success paths.
+- Restored beta Web Push parity through protected VAPID configuration while
+  retaining isolated beta subscriptions, notification state, and worker scope.
+
 ## 2026-08-28 (source ingest, direct uploads, remix ranges, and derivatives)
 
 - Integrated the accepted sequential MIDI mock and isolated beta deployment

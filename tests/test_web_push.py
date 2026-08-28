@@ -146,7 +146,7 @@ def test_service_worker_and_keep_warm_round_trip_at_beta_root(settings: ServiceS
             assert notifications_js.status_code == 200
             assert "Uint8Array.from" in notifications_js.text
             assert "applicationServerKey(key)" in notifications_js.text
-            assert "control.hidden = true" in notifications_js.text
+            assert '<div class="notification-control" hidden>' in page.text
             with factory() as session:
                 assert get_keep_warm_seconds(session) == 900
                 session.commit()
