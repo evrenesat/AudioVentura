@@ -10,7 +10,7 @@
   tracks, disable Play when none are ready, and retain completed retry work.
 - Cleanup and retry feedback is visible in both the authenticated Offline page
   and the public fallback shell. The shell cache revision is now `v2`.
-- Verification: focused server tests `65 passed`, offline E2E `8 passed` in
+- Verification: focused server tests `79 passed`, offline E2E `8 passed` in
   Chromium and Firefox, complete E2E `21 passed` in each browser, product full
   run `654 passed` with the known `96` expired quality-fixture failures, and
   Home Ingest/MIDI mock passed `33`/`12` tests.
