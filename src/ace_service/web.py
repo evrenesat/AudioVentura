@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -1903,8 +1903,8 @@ def register_web_routes(app: FastAPI) -> None:
                 session.commit()
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="playlist not found") from exc
-        return RedirectResponse(
-            _route_path(request, "playlists"), status_code=status.HTTP_303_SEE_OTHER
+        return _offline_invalidation_redirect(
+            request, "playlists", kind="playlist", identifier=playlist_id
         )
 
     @app.post(
@@ -2100,8 +2100,8 @@ def register_web_routes(app: FastAPI) -> None:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="audio deletion is pending and will be retried safely",
             ) from exc
-        return RedirectResponse(
-            _route_path(request, "library"), status_code=status.HTTP_303_SEE_OTHER
+        return _offline_invalidation_redirect(
+            request, "library", kind="media", identifier=media_item_id
         )
 
     @app.post(
@@ -2145,6 +2145,14 @@ def register_web_routes(app: FastAPI) -> None:
                 raise HTTPException(status_code=409, detail="project has active jobs")
             if fields.get("confirm_title", "") != project.title:
                 raise HTTPException(status_code=422, detail="type the current project title")
+            project_playlist_id = next(
+                (
+                    playlist.id
+                    for playlist in project.playlists
+                    if playlist.kind is PlaylistKind.PROJECT
+                ),
+                None,
+            )
             create_project_deletion_audit(session, project.id)
             session.commit()
         service = MediaLibraryService(app.state.settings, app.state.session_factory)
@@ -2156,8 +2164,12 @@ def register_web_routes(app: FastAPI) -> None:
                 detail="project audio deletion is pending; retry after cleanup converges",
             ) from exc
         _remove_empty_project_dirs(app.state.settings, project_id)
-        return RedirectResponse(
-            _route_path(request, "projects"), status_code=status.HTTP_303_SEE_OTHER
+        return _offline_invalidation_redirect(
+            request,
+            "projects",
+            kind="project",
+            identifier=project_id,
+            extra_markers=(("playlist", project_playlist_id),) if project_playlist_id else (),
         )
 
     @app.get(
@@ -2958,6 +2970,65 @@ def _route_path(request: Request, name: str, **path_params: Any) -> str:
     """Build one same-origin browser path through Starlette's named routes."""
 
     return request.url_for(name, **path_params).path
+
+
+def _offline_invalidation_path(
+    request: Request,
+    route_name: str,
+    *,
+    kind: str,
+    identifier: str,
+    extra_markers: tuple[tuple[str, str], ...] = (),
+) -> str:
+    markers = [("offline_invalidate", f"{kind}:{identifier}")]
+    markers.extend(
+        ("offline_invalidate", f"{extra_kind}:{extra_identifier}")
+        for extra_kind, extra_identifier in extra_markers
+        if extra_identifier
+    )
+    return f"{_route_path(request, route_name)}?{urlencode(markers)}"
+
+
+def _offline_invalidation_redirect(
+    request: Request,
+    route_name: str,
+    *,
+    kind: str,
+    identifier: str,
+    extra_markers: tuple[tuple[str, str], ...] = (),
+) -> RedirectResponse:
+    response = RedirectResponse(
+        _offline_invalidation_path(
+            request,
+            route_name,
+            kind=kind,
+            identifier=identifier,
+            extra_markers=extra_markers,
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    marker_values = [f"{kind}:{identifier}"] + [
+        f"{extra_kind}:{extra_identifier}"
+        for extra_kind, extra_identifier in extra_markers
+        if extra_identifier
+    ]
+    root_path = str(request.scope.get("root_path", "") or "")
+    scope_key = re.sub(r"[^A-Za-z0-9_-]+", "_", root_path.strip("/") or "root")
+    cookie_key = f"audioventura-offline-invalidate-{scope_key}"
+    previous = request.cookies.get(cookie_key, "")
+    pending = list(
+        dict.fromkeys([marker for marker in previous.split(",") if marker] + marker_values)
+    )
+    cookie_path = str(request.scope.get("root_path", "") or "/").rstrip("/") or "/"
+    response.set_cookie(
+        cookie_key,
+        ",".join(pending),
+        max_age=300,
+        path=cookie_path,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+    return response
 
 
 def _worker_scope(request: Request) -> str:

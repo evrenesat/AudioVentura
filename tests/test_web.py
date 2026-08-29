@@ -1895,6 +1895,9 @@ def test_project_delete_route_removes_unpublished_output_file(web_app) -> None:
             follow_redirects=False,
         )
         assert deleted.status_code == 303
+        assert deleted.headers["location"] == (
+            f"/projects?offline_invalidate=project%3A{project_id}"
+        )
 
     assert not output_path.exists()
     with factory() as session:

@@ -447,6 +447,66 @@
     return { freedBytes: affected.filter((hash) => !retained.has(hash)), retainedBytes: affected.filter((hash) => retained.has(hash)), hashes: affected };
   });
 
+  const invalidate = async (handle, type, identifier) => {
+    if (!["media", "project", "playlist"].includes(type)) throw boundedError("bad_metadata");
+    if (typeof identifier !== "string" || !identifier.trim() || identifier.length > 80 || /[\u0000-\u001f\u007f]/.test(identifier)) {
+      throw boundedError("bad_metadata");
+    }
+    return run(handle, ["playlists", "entries", "refs"], "readwrite", async (_tx, stores) => {
+      const owners = await getAll(stores.playlists);
+      const entries = await getAll(stores.entries);
+      const refs = await getAll(stores.refs);
+      const ownerById = new Map(owners.map((owner) => [owner.id, owner]));
+      const ownersToDelete = new Set();
+      if (type === "playlist" && ownerById.has(identifier)) ownersToDelete.add(identifier);
+
+      const matchingEntries = new Set();
+      if (type !== "playlist") {
+        for (const entry of entries) {
+          if ((type === "media" && entry.media_item_id === identifier) || (type === "project" && entry.project_id === identifier)) {
+            matchingEntries.add(`${entry.playlist_id}\u0000${entry.entry_key}`);
+          }
+        }
+        if (type === "project") {
+          for (const owner of owners) {
+            if (owner.kind === "project" && (owner.project_id === identifier || entries.some((entry) => entry.playlist_id === owner.id && entry.project_id === identifier))) {
+              ownersToDelete.add(owner.id);
+            }
+          }
+        }
+      }
+
+      const changedOwnerIds = new Set();
+      const entryIsRemoved = (entry) => ownersToDelete.has(entry.playlist_id) || matchingEntries.has(`${entry.playlist_id}\u0000${entry.entry_key}`);
+      for (const entry of entries) {
+        if (entryIsRemoved(entry)) {
+          stores.entries.delete([entry.playlist_id, entry.entry_key]);
+          changedOwnerIds.add(entry.playlist_id);
+        }
+      }
+      for (const ownerId of ownersToDelete) {
+        for (const ref of refs) if (ref.playlist_id === ownerId) stores.refs.delete([ownerId, ref.sha256]);
+        stores.playlists.delete(ownerId);
+      }
+      for (const owner of owners) {
+        if (ownersToDelete.has(owner.id) || !changedOwnerIds.has(owner.id)) continue;
+        const remainingHashes = new Set(entries
+          .filter((entry) => entry.playlist_id === owner.id && !entryIsRemoved(entry))
+          .map((entry) => entry.sha256));
+        for (const ref of refs) {
+          if (ref.playlist_id === owner.id && !remainingHashes.has(ref.sha256)) stores.refs.delete([owner.id, ref.sha256]);
+        }
+      }
+      return {
+        type,
+        identifier,
+        owner_ids: [...new Set([...changedOwnerIds, ...ownersToDelete])],
+        removed_owner_ids: [...ownersToDelete],
+        removed_entry_count: entries.filter(entryIsRemoved).length,
+      };
+    });
+  };
+
   const addPlayedTrack = async (handle, item) => {
     const validItem = validateQueueItem({ ...item, queue_entry_id: null, position: null }, handle.scope);
     const existing = await getOwner(handle, "played-tracks");
@@ -525,6 +585,7 @@
     recomputeOwner,
     setOwnerState,
     clearOwner,
+    invalidate,
     addPlayedTrack,
   };
 })();

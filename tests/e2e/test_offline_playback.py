@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, expect
 
@@ -125,6 +126,7 @@ def test_keep_offline_deduplicates_duplicate_entries_and_supports_offline_reload
     owners = snapshot["owners"]
     assert len(owners) == 1
     owner = owners[0]
+    owner_id = owner["id"]
     assert owner["state"] == "ready"
     assert owner["track_count"] == 3
     assert owner["ready_track_count"] == 3
@@ -136,7 +138,7 @@ def test_keep_offline_deduplicates_duplicate_entries_and_supports_offline_reload
     shell = e2e_page.evaluate(
         """
         async () => {
-          const cache = await caches.open("audioventura:beta:shell:v1");
+          const cache = await caches.open("audioventura:beta:shell:v2");
           const response = await cache.match("/beta/offline-shell");
           return response ? await response.text() : "";
         }
@@ -245,6 +247,11 @@ def test_keep_offline_deduplicates_duplicate_entries_and_supports_offline_reload
         e2e_page.evaluate("AudioventuraPlayer.getState().current.queue_entry_id")
         == expected_previous
     )
+    e2e_page.locator(f'[data-offline-owner-id="{owner_id}"]').get_by_role(
+        "button", name="Remove download"
+    ).click()
+    expect(e2e_page.locator(f'[data-offline-owner-id="{owner_id}"]')).to_have_count(0)
+    expect(e2e_page.locator("[data-offline-storage-message]")).to_be_visible()
 
 
 def test_auto_cache_assigns_playlist_and_played_track_owners(
@@ -277,6 +284,51 @@ def test_auto_cache_assigns_playlist_and_played_track_owners(
     assert len(snapshot["refs"]) == 2
 
 
+def test_media_delete_invalidates_local_entries_and_retains_shared_body(
+    e2e_page: Page, e2e_server: E2EServer
+) -> None:
+    _, shared_media_id = e2e_server.seed_track(
+        job_id="123e4567-e89b-12d3-a456-426614174106",
+        description="Retained shared ambient composition",
+        frequency=440,
+    )
+    playlist_id = _create_custom_playlist(
+        e2e_page, e2e_server, "Deleted media mix", [e2e_server.alpha_media_id]
+    )
+    e2e_page.get_by_role("button", name="Keep offline").click()
+    expect(e2e_page.locator("[data-offline-playlist-status]")).to_contain_text(
+        re.compile(r"ready|available offline"), timeout=30_000
+    )
+    _wait_for_owner(e2e_page, playlist_id)
+    retained_playlist_id = _create_custom_playlist(
+        e2e_page, e2e_server, "Retained media mix", [shared_media_id]
+    )
+    e2e_page.get_by_role("button", name="Keep offline").click()
+    expect(e2e_page.locator("[data-offline-playlist-status]")).to_contain_text(
+        re.compile(r"ready|available offline"), timeout=30_000
+    )
+    _wait_for_owner(e2e_page, retained_playlist_id)
+
+    e2e_page.goto(f"{e2e_server.base_url}/beta/library", wait_until="domcontentloaded")
+    e2e_page.locator(f'[data-media-id="{e2e_server.alpha_media_id}"]').get_by_role(
+        "button", name="Delete"
+    ).click()
+    expect(e2e_page.get_by_role("heading", name="Media library")).to_be_visible()
+
+    e2e_page.goto(f"{e2e_server.base_url}/beta/offline", wait_until="domcontentloaded")
+    card = e2e_page.locator(f'[data-offline-owner-id="{playlist_id}"]')
+    expect(card).to_be_visible()
+    assert _owner_entries_in_order(e2e_page, playlist_id) == []
+    expect(card.get_by_role("button", name="Play")).to_be_disabled()
+    retained_card = e2e_page.locator(f'[data-offline-owner-id="{retained_playlist_id}"]')
+    expect(retained_card).to_be_visible()
+    expect(retained_card.get_by_role("button", name="Play")).to_be_enabled()
+    snapshot = _offline_snapshot(e2e_page)
+    assert len(snapshot["refs"]) == 1
+    assert len(snapshot["blobs"]) == 1
+    assert len(snapshot["cacheKeys"]) == 1
+
+
 def test_project_playlist_can_be_kept_offline(e2e_page: Page, e2e_server: E2EServer) -> None:
     _open_playlists(e2e_page, e2e_server)
     project_card = e2e_page.locator(".playlist-card").filter(has_text="Beta ambient composition")
@@ -295,6 +347,17 @@ def test_project_playlist_can_be_kept_offline(e2e_page: Page, e2e_server: E2ESer
     owner = _offline_snapshot(e2e_page)["owners"][0]
     assert owner["id"] == playlist_id
     assert owner["kind"] == "project"
+
+    e2e_page.goto(
+        f"{e2e_server.base_url}/beta/projects/{e2e_server.beta_project_id}",
+        wait_until="domcontentloaded",
+    )
+    e2e_page.locator(".danger-zone summary").click()
+    e2e_page.locator("#confirm-project-title").fill("Beta ambient composition")
+    e2e_page.get_by_role("button", name="Delete project").click()
+    expect(e2e_page.get_by_role("heading", name="Your projects")).to_be_visible()
+    e2e_page.goto(f"{e2e_server.base_url}/beta/offline", wait_until="domcontentloaded")
+    expect(e2e_page.locator(f'[data-offline-owner-id="{playlist_id}"]')).to_have_count(0)
 
 
 def test_shared_hash_cleanup_retains_then_removes_one_cached_body(
@@ -333,6 +396,7 @@ def test_shared_hash_cleanup_retains_then_removes_one_cached_body(
     ).click()
     expect(e2e_page.locator(f'[data-offline-owner-id="{first_id}"]')).to_have_count(0)
     expect(e2e_page.locator("[data-offline-storage-message]")).to_contain_text("retained")
+    expect(e2e_page.locator("[data-offline-storage-message]")).to_be_visible()
     snapshot = _offline_snapshot(e2e_page)
     assert len(snapshot["blobs"]) == 1
     assert len(snapshot["refs"]) == 1
@@ -348,7 +412,7 @@ def test_shared_hash_cleanup_retains_then_removes_one_cached_body(
     assert snapshot["cacheKeys"] == []
 
 
-def test_interrupted_playlist_retry_reuses_completed_hashes(
+def test_partial_playlist_plays_later_cached_track_and_retry_reuses_completed_hashes(
     e2e_page: Page, e2e_server: E2EServer
 ) -> None:
     playlist_id = _create_custom_playlist(
@@ -359,16 +423,24 @@ def test_interrupted_playlist_retry_reuses_completed_hashes(
     )
     requests: dict[str, int] = {}
     interrupt = True
+    failed_path = e2e_page.locator("[data-playlist-entry]").first.get_attribute("data-player-src")
+    assert failed_path
 
-    def interrupt_second_media_request(route) -> None:
-        url = route.request.url
-        requests[url] = requests.get(url, 0) + 1
-        if interrupt and sum(requests.values()) == 2:
+    def interrupt_first_media_request(route) -> None:
+        nonlocal interrupt
+        headers = route.request.headers
+        if headers.get("range") or headers.get("cache-control") != "no-store":
+            route.continue_()
+            return
+        path = urlsplit(route.request.url).path
+        requests[path] = requests.get(path, 0) + 1
+        if interrupt and path == failed_path:
+            interrupt = False
             route.abort()
         else:
             route.continue_()
 
-    e2e_page.route("**/beta/media/library/*", interrupt_second_media_request)
+    e2e_page.route("**/beta/media/library/*", interrupt_first_media_request)
     e2e_page.get_by_role("button", name="Keep offline").click()
     _wait_for_owner(e2e_page, playlist_id, "partial")
     e2e_page.wait_for_timeout(300)
@@ -379,14 +451,26 @@ def test_interrupted_playlist_retry_reuses_completed_hashes(
     e2e_page.goto(f"{e2e_server.base_url}/beta/offline", wait_until="domcontentloaded")
     card = e2e_page.locator(f'[data-offline-owner-id="{playlist_id}"]')
     expect(card.get_by_role("button", name="Retry")).to_be_visible()
-    interrupt = False
+    expect(card.get_by_role("button", name="Play")).to_be_enabled()
+    card.get_by_role("button", name="Play").click()
+    expect(e2e_page.locator("[data-player-title]")).to_have_text(
+        "Beta ambient composition · Variation 1", timeout=10_000
+    )
+    assert (
+        e2e_page.evaluate("window.AudioventuraPlayer.getState().current.media_item_id")
+        == e2e_server.beta_media_id
+    )
+    before_retry = dict(requests)
     card.get_by_role("button", name="Retry").click()
     _wait_for_owner(e2e_page, playlist_id)
     snapshot = _offline_snapshot(e2e_page)
     assert len(snapshot["blobs"]) == 2
     assert all(blob["state"] == "ready" for blob in snapshot["blobs"])
-    assert sorted(requests.values()) == [1, 2]
-    e2e_page.unroute("**/beta/media/library/*", interrupt_second_media_request)
+    assert requests[failed_path] == before_retry[failed_path] + 1
+    assert {path: count for path, count in requests.items() if path != failed_path} == {
+        path: count for path, count in before_retry.items() if path != failed_path
+    }
+    e2e_page.unroute("**/beta/media/library/*", interrupt_first_media_request)
 
 
 def test_quota_failure_is_actionable_and_missing_body_is_retryable(
@@ -443,9 +527,10 @@ def test_quota_failure_is_actionable_and_missing_body_is_retryable(
     card = e2e_page.locator(f'[data-offline-owner-id="{playlist_id}"]')
     expect(card).to_contain_text(re.compile(r"partial|failed"))
     expect(card.get_by_role("button", name="Retry")).to_be_visible()
+    expect(card.get_by_role("button", name="Play")).to_be_disabled()
 
 
-def test_online_playlist_changes_refresh_atomically_and_deleted_server_owner_stays_local(
+def test_online_playlist_changes_refresh_atomically_and_deleted_server_owner_is_invalidated(
     e2e_page: Page, e2e_server: E2EServer
 ) -> None:
     playlist_id = _create_custom_playlist(
@@ -489,9 +574,4 @@ def test_online_playlist_changes_refresh_atomically_and_deleted_server_owner_sta
     e2e_page.get_by_role("button", name="Delete playlist").click()
     expect(e2e_page.get_by_role("heading", name="Playlists")).to_be_visible()
     e2e_page.goto(f"{e2e_server.base_url}/beta/offline", wait_until="domcontentloaded")
-    card = e2e_page.locator(f'[data-offline-owner-id="{playlist_id}"]')
-    expect(card).to_be_visible()
-    card.get_by_role("button", name="Refresh").click()
-    expect(card).to_be_visible()
-    card.get_by_role("button", name="Remove download").click()
     expect(e2e_page.locator(f'[data-offline-owner-id="{playlist_id}"]')).to_have_count(0)

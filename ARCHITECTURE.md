@@ -289,7 +289,11 @@ SHA-256 blob metadata, URL mappings, leases, and `[playlist, hash]` ownership
 references in IndexedDB. Complete verified `audio/mpeg` response bodies live
 once in Cache Storage at a synthetic SHA-256 key. A blob is removed only after
 its final owner reference is cleared and reconciliation confirms it is not
-shared by another playlist or `Played tracks`.
+shared by another playlist or `Played tracks`. Successful server media,
+project, and playlist deletions return a scoped invalidation marker; the browser
+consumes it before rendering the redirected page, removes only matching local
+entries and refs, and lets reconciliation collect unreferenced bodies while
+retaining shared ones.
 
 Queue schema v2 supplies only bounded MP3 metadata, exact size, verified hash,
 revision, and root-aware media/download paths. Online playback begins normally;

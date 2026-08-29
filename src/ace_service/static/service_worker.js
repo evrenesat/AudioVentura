@@ -1,7 +1,7 @@
 /* AudioVentura unified offline and notification worker. */
 "use strict";
 
-const APP_SHELL_VERSION = "v1";
+const APP_SHELL_VERSION = "v2";
 const MEDIA_CACHE_VERSION = "v1";
 const OFFLINE_DB_VERSION = 1;
 const MAX_OFFLINE_HASH = 64;

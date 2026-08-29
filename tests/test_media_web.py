@@ -137,6 +137,7 @@ def test_library_media_rename_and_delete_leave_job_tombstone(media_web_app, sett
             follow_redirects=False,
         )
         assert deleted.status_code == 303
+        assert deleted.headers["location"] == f"/library?offline_invalidate=media%3A{item.id}"
         assert client.get(f"/media/library/{media_file_id}", auth=_auth(client)).status_code == 404
         assert client.get("/player/queue/library", auth=_auth(client)).json()["items"] == []
 

@@ -340,7 +340,7 @@
     const offline = window.AudioventuraOffline;
     if (!offline) return;
     try {
-      const owner = await offline.getOwner(playlistId);
+      const owner = await (offline.getPlayableOwner ? offline.getPlayableOwner(playlistId) : offline.getOwner(playlistId));
       if (!owner?.playlist || !owner.entries?.length) {
         announce("No saved tracks are available");
         return;
@@ -369,10 +369,42 @@
       state.queue = state.shuffle ? [...tracks].sort(() => Math.random() - 0.5) : tracks;
       state.index = -1;
       playTrack(state.queue[0], false);
-      announce(`${owner.playlist.title} loaded from this device`);
+      const unavailable = Number(owner.playlist.track_count || 0) - tracks.length;
+      announce(`${owner.playlist.title} loaded from this device${unavailable > 0 ? ` · ${unavailable} unavailable tracks skipped` : ""}`);
     } catch (error) {
       announce(offline.message?.(error?.code) || "Saved tracks could not be opened");
     }
+  };
+
+  const invalidateTracks = (detail = {}) => {
+    const matches = (track) => {
+      if (detail.type === "playlist") return track?._offlineContext?.type === "playlist" && track._offlineContext.playlist_id === detail.identifier;
+      if (detail.type === "media") return String(track?.media_item_id || track?.id || "") === detail.identifier;
+      if (detail.type === "project") return String(track?.project_id || "") === detail.identifier;
+      return false;
+    };
+    const current = currentTrack();
+    const removedCurrent = matches(current);
+    state.queue = state.queue.filter((track) => !matches(track));
+    state.original = state.original.filter((track) => !matches(track));
+    state.history = state.history.filter((track) => !matches(track));
+    if (removedCurrent) {
+      programmaticPauseGeneration = generation;
+      audio.pause();
+      generation += 1;
+      metadataGeneration = generation;
+      manuallyPausedGeneration = null;
+      audio.removeAttribute("src");
+      audio.load();
+      state.index = -1;
+      state.position = 0;
+      restorePosition = 0;
+    } else if (current) {
+      state.index = state.queue.findIndex((track) => sameTrack(track, current));
+    }
+    saveState();
+    renderTrack();
+    updateButtons();
   };
 
   audio.addEventListener("loadedmetadata", () => {
@@ -476,6 +508,7 @@
     updateButtons();
   });
   window.addEventListener("audioventura:offline-play", (event) => loadOfflineOwner(event.detail?.playlistId));
+  window.addEventListener("audioventura:offline-invalidated", (event) => invalidateTracks(event.detail));
   window.addEventListener("audioventura:offline-unavailable", () => {
     if (audio.paused) announce("Offline storage is unavailable; online playback remains available");
   });

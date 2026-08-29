@@ -1,5 +1,20 @@
 # Development Log
 
+## 2026-08-29 (offline review fixes)
+
+- Successful media, project, and playlist deletion now carries a scoped browser
+  invalidation marker. IndexedDB removes only affected local entries and refs;
+  reconciliation preserves shared Cache Storage bodies and updates open tabs.
+- Offline owners validate each referenced ready blob and exact Cache Storage
+  response before constructing a queue. Partial snapshots can play later cached
+  tracks, disable Play when none are ready, and retain completed retry work.
+- Cleanup and retry feedback is visible in both the authenticated Offline page
+  and the public fallback shell. The shell cache revision is now `v2`.
+- Verification: focused server tests `65 passed`, offline E2E `8 passed` in
+  Chromium and Firefox, complete E2E `21 passed` in each browser, product full
+  run `654 passed` with the known `96` expired quality-fixture failures, and
+  Home Ingest/MIDI mock passed `33`/`12` tests.
+
 ## 2026-08-28 (offline player, playlist cache, and installable shell)
 
 - Integrated the offline browser slice on top of the accepted source-ingest

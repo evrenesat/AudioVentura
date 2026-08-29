@@ -266,10 +266,12 @@ bytes, and downloads each distinct MP3 once. Duplicate playlist entries remain
 distinct in playback order while sharing the stored body.
 
 Offline snapshots are read-only. Reconnect to refresh a server playlist after a
-rename, reorder, append, removal, or deletion. Remove one owner to release only
-its references; shared bytes remain until the final owner is removed. Browser
-site-data controls are the emergency full reset. Use only a trusted browser
-profile because cached titles and audio are not encrypted.
+rename, reorder, append, or removal. A successful server media, project, or
+playlist deletion invalidates matching local references as the browser returns
+to the app. Remove one owner to release only its references; shared bytes remain
+until the final owner is removed. Browser site-data controls are the emergency
+full reset. Use only a trusted browser profile because cached titles and audio
+are not encrypted.
 
 ## Verification
 

@@ -45,6 +45,7 @@ def test_public_offline_shell_has_no_private_state(media_web_app, settings) -> N
         assert job.project.title not in shell.text
         assert 'name="csrf-token"' not in shell.text
         assert "notifications-config" not in shell.text
+        assert "data-offline-storage-message" in shell.text
         assert 'rel="manifest"' in shell.text
         assert client.get("/offline").status_code == 401
         assert client.get("/offline", auth=_auth(client)).status_code == 200
@@ -124,6 +125,31 @@ def test_queue_v2_preserves_duplicate_entries_and_stable_revision(media_web_app,
         assert refreshed.json()["items"][0]["mime_type"] == "audio/mpeg"
 
 
+def test_playlist_delete_redirect_carries_offline_invalidation_marker(
+    media_web_app, settings
+) -> None:
+    app, factory, _ = media_web_app
+    with factory() as session:
+        _, _, item = _publish_track(session, settings, job_id="offline-delete-playlist")
+        playlist = create_custom_playlist(session, "Delete offline playlist")
+        add_playlist_entry(session, playlist.id, item.id)
+        session.commit()
+        playlist_id = playlist.id
+
+    with TestClient(app) as client:
+        token = _csrf(client, f"/playlists/{playlist_id}")
+        deleted = client.post(
+            f"/playlists/{playlist_id}/delete",
+            auth=_auth(client),
+            data={"csrf_token": token},
+            follow_redirects=False,
+        )
+        assert deleted.status_code == 303
+        assert deleted.headers["location"] == (
+            f"/playlists?offline_invalidate=playlist%3A{playlist_id}"
+        )
+
+
 def test_offline_queue_rejects_invalid_playback_metadata(media_web_app, settings) -> None:
     app, factory, _ = media_web_app
     with factory() as session:
@@ -175,7 +201,7 @@ def test_unified_worker_preserves_push_contract_and_scope_isolation(media_web_ap
         source = client.get("/notification-worker.js")
         assert source.status_code == 200
         body = source.text
-        assert 'const APP_SHELL_VERSION = "v1"' in body
+        assert 'const APP_SHELL_VERSION = "v2"' in body
         assert 'self.addEventListener("install"' in body
         assert 'self.addEventListener("activate"' in body
         assert 'self.addEventListener("fetch"' in body

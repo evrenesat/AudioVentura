@@ -9,6 +9,8 @@
   const scopeKey = Store.scopeKey(scope);
   const MEDIA_CACHE_NAME = `audioventura:${scopeKey}:media:v1`;
   const SHELL_CACHE_PREFIX = `audioventura:${scopeKey}:shell:`;
+  const PENDING_INVALIDATIONS_KEY = `audioventura:${scopeKey}:offline-invalidations:v1`;
+  const INVALIDATION_COOKIE = `audioventura-offline-invalidate-${scopeKey}`;
   const isOfflineShell = document.querySelector('meta[name="offline-shell"]')?.content === "true";
   const TAB_OWNER = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const LEASE_MS = 30_000;
@@ -18,6 +20,7 @@
   let mediaCache = null;
   let initialized = null;
   const activeOperations = new Map();
+  let ownersRenderSequence = 0;
   let lastStorageStatus = null;
   let sawOfflineSignal = navigator.onLine === false;
 
@@ -332,6 +335,29 @@
     return cachePlaylist(queuePayloadFromOwner(owner), options);
   };
 
+  const orderedEntries = (entries) => [...entries].sort((left, right) => (
+    (Number(left.position) || 0) - (Number(right.position) || 0)
+    || String(left.entry_key).localeCompare(String(right.entry_key))
+  ));
+
+  const getPlayableOwner = async (playlistId) => {
+    await openStorage();
+    const owner = await Store.getOwner(handle, playlistId);
+    if (!owner.playlist) return { playlist: null, entries: [] };
+    const validByHash = new Map();
+    const entries = [];
+    for (const entry of orderedEntries(owner.entries || [])) {
+      if (!validByHash.has(entry.sha256)) validByHash.set(entry.sha256, await cachedItem(entry));
+      if (validByHash.get(entry.sha256)) entries.push(entry);
+    }
+    if (entries.length !== Number(owner.playlist.ready_track_count || 0)) {
+      await Store.recomputeOwner(handle, playlistId);
+      owner.playlist = (await Store.getOwner(handle, playlistId)).playlist;
+    }
+    if (!owner.playlist) return { playlist: null, entries: [] };
+    return { playlist: owner.playlist, entries };
+  };
+
   const refreshPlaylist = async (queueUrl, options = {}) => {
     await openStorage();
     let parsedUrl;
@@ -453,6 +479,79 @@
     return { freedBytes, retainedBytes };
   };
 
+  const invalidateLocalReferences = async (type, identifier, { broadcast = true } = {}) => {
+    await openStorage();
+    const result = await Store.invalidate(handle, type, identifier);
+    await reconcile();
+    if (broadcast) channel?.postMessage({ type: "offline-invalidate", kind: type, identifier });
+    window.dispatchEvent(new CustomEvent("audioventura:offline-invalidated", {
+      detail: { type, identifier, result },
+    }));
+    return result;
+  };
+
+  const parseInvalidationMarker = (marker) => {
+    const separator = marker.indexOf(":");
+    const type = separator > 0 ? marker.slice(0, separator) : "";
+    const identifier = separator > 0 ? marker.slice(separator + 1) : "";
+    return ["media", "project", "playlist"].includes(type) && identifier
+      ? { marker, type, identifier }
+      : null;
+  };
+
+  const pendingInvalidationMarkers = () => {
+    try {
+      const value = JSON.parse(window.sessionStorage.getItem(PENDING_INVALIDATIONS_KEY) || "[]");
+      return Array.isArray(value) ? value.filter((marker) => typeof marker === "string") : [];
+    } catch (_) {
+      return [];
+    }
+  };
+
+  const cookieInvalidationMarkers = () => {
+    const cookie = document.cookie.split(";").map((part) => part.trim())
+      .find((part) => part.startsWith(`${INVALIDATION_COOKIE}=`));
+    if (!cookie) return [];
+    let value = cookie.slice(INVALIDATION_COOKIE.length + 1);
+    if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+    try { value = decodeURIComponent(value); } catch (_) {}
+    return value.split(",").filter(Boolean);
+  };
+
+  const setPendingInvalidationMarkers = (markers) => {
+    try { window.sessionStorage.setItem(PENDING_INVALIDATIONS_KEY, JSON.stringify(markers)); } catch (_) {}
+  };
+
+  const clearPendingInvalidationMarkers = () => {
+    try { window.sessionStorage.removeItem(PENDING_INVALIDATIONS_KEY); } catch (_) {}
+    const cookiePath = scope === "/" ? "/" : scope.slice(0, -1);
+    document.cookie = `${INVALIDATION_COOKIE}=; Max-Age=0; Path=${cookiePath}; SameSite=Lax`;
+  };
+
+  const processInvalidationMarkers = async () => {
+    const url = new URL(window.location.href);
+    const markers = [...new Set([
+      ...pendingInvalidationMarkers(),
+      ...cookieInvalidationMarkers(),
+      ...url.searchParams.getAll("offline_invalidate"),
+    ])];
+    if (!markers.length) return;
+    const parsed = markers.map(parseInvalidationMarker).filter(Boolean);
+    if (!parsed.length) {
+      clearPendingInvalidationMarkers();
+      url.searchParams.delete("offline_invalidate");
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+      return;
+    }
+    setPendingInvalidationMarkers(parsed.map(({ marker }) => marker));
+    for (const { type, identifier } of parsed) {
+      await invalidateLocalReferences(type, identifier);
+    }
+    clearPendingInvalidationMarkers();
+    url.searchParams.delete("offline_invalidate");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  };
+
   const formatBytes = (bytes) => {
     if (!Number.isFinite(bytes)) return "unknown";
     if (bytes < 1024) return `${bytes} B`;
@@ -461,7 +560,12 @@
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
   };
 
-  const setText = (selector, value) => { const node = document.querySelector(selector); if (node) node.textContent = value; };
+  const setText = (selector, value) => {
+    const node = document.querySelector(selector);
+    if (!node) return;
+    node.textContent = value;
+    if (selector === "[data-offline-storage-message]" && value) node.hidden = false;
+  };
   const informWorkerConnectivity = (enabled) => {
     try { navigator.serviceWorker?.controller?.postMessage({ type: "offline-mode", enabled }); } catch (_) {}
   };
@@ -506,29 +610,36 @@
   const renderOwners = async () => {
     const list = document.querySelector("[data-offline-owner-list]");
     if (!list || !handle) return;
+    const sequence = ++ownersRenderSequence;
     const owners = (await Store.listOwners(handle)).filter((owner) => owner.kind === "local-played" || owner.intent === "explicit" || owner.server_revision);
     const filter = document.querySelector("[data-offline-filter]")?.value.trim() || "";
-    list.replaceChildren();
     const visible = owners.filter((owner) => ownerMatchesFilter(owner, filter));
     if (!visible.length) {
+      if (sequence !== ownersRenderSequence) return;
       const empty = document.createElement("div"); empty.className = "empty";
-      const paragraph = document.createElement("p"); paragraph.textContent = "No saved playlists yet."; empty.append(paragraph); list.append(empty); return;
+      const paragraph = document.createElement("p"); paragraph.textContent = "No saved playlists yet."; empty.append(paragraph); list.replaceChildren(empty); return;
     }
+    const fragment = document.createDocumentFragment();
     for (const owner of visible) {
+      const playable = await getPlayableOwner(owner.id);
+      if (sequence !== ownersRenderSequence) return;
+      const displayOwner = playable.playlist || owner;
       const card = document.createElement("article"); card.className = "offline-owner-card"; card.dataset.offlineOwnerId = owner.id;
-      const heading = document.createElement("h3"); heading.textContent = owner.title; card.append(heading);
-      const status = document.createElement("p"); status.className = "muted"; status.textContent = `${owner.state} · ${owner.ready_track_count}/${owner.track_count} tracks · ${formatBytes(owner.ready_unique_bytes)} / ${formatBytes(owner.unique_bytes)}`; card.append(status);
-      const progress = document.createElement("progress"); progress.max = Math.max(1, owner.unique_bytes); progress.value = owner.ready_unique_bytes; progress.setAttribute("aria-label", `${owner.title} offline progress`); card.append(progress);
-      if (owner.last_synced_at) {
-        const synced = document.createElement("p"); synced.className = "hint"; synced.textContent = `Last refreshed ${new Date(owner.last_synced_at).toLocaleString()}`; card.append(synced);
+      const heading = document.createElement("h3"); heading.textContent = displayOwner.title; card.append(heading);
+      const status = document.createElement("p"); status.className = "muted"; status.textContent = `${displayOwner.state} · ${displayOwner.ready_track_count}/${displayOwner.track_count} tracks · ${formatBytes(displayOwner.ready_unique_bytes)} / ${formatBytes(displayOwner.unique_bytes)}`; card.append(status);
+      const progress = document.createElement("progress"); progress.max = Math.max(1, displayOwner.unique_bytes); progress.value = displayOwner.ready_unique_bytes; progress.setAttribute("aria-label", `${displayOwner.title} offline progress`); card.append(progress);
+      if (displayOwner.last_synced_at) {
+        const synced = document.createElement("p"); synced.className = "hint"; synced.textContent = `Last refreshed ${new Date(displayOwner.last_synced_at).toLocaleString()}`; card.append(synced);
       }
       const actions = document.createElement("div"); actions.className = "offline-owner-actions";
-      const play = document.createElement("button"); play.className = "button secondary"; play.type = "button"; play.textContent = "Play"; play.dataset.offlinePlay = owner.id; actions.append(play);
-      if (owner.state !== "ready") { const retry = document.createElement("button"); retry.className = "button secondary"; retry.type = "button"; retry.textContent = "Retry"; retry.dataset.offlineRetry = owner.id; actions.append(retry); }
-      if (owner.kind !== "local-played") { const refresh = document.createElement("button"); refresh.className = "button secondary"; refresh.type = "button"; refresh.textContent = "Refresh"; refresh.dataset.offlineRefreshOwner = owner.id; refresh.dataset.offlineQueueUrl = ownerQueueUrl(owner.id); actions.append(refresh); }
+      const play = document.createElement("button"); play.className = "button secondary"; play.type = "button"; play.textContent = "Play"; play.dataset.offlinePlay = owner.id; play.disabled = playable.entries.length === 0; actions.append(play);
+      if (displayOwner.state !== "ready") { const retry = document.createElement("button"); retry.className = "button secondary"; retry.type = "button"; retry.textContent = "Retry"; retry.dataset.offlineRetry = owner.id; actions.append(retry); }
+      if (displayOwner.kind !== "local-played") { const refresh = document.createElement("button"); refresh.className = "button secondary"; refresh.type = "button"; refresh.textContent = "Refresh"; refresh.dataset.offlineRefreshOwner = owner.id; refresh.dataset.offlineQueueUrl = ownerQueueUrl(owner.id); actions.append(refresh); }
       const remove = document.createElement("button"); remove.className = "button danger"; remove.type = "button"; remove.textContent = "Remove download"; remove.dataset.offlineRemove = owner.id; actions.append(remove);
-      card.append(actions); list.append(card);
+      card.append(actions); fragment.append(card);
     }
+    if (sequence !== ownersRenderSequence) return;
+    list.replaceChildren(fragment);
     await syncPlaylistTools();
   };
 
@@ -621,7 +732,7 @@
           const result = await removeOwner(remove.dataset.offlineRemove);
           setText("[data-offline-storage-message]", `Removed download: ${formatBytes(result.freedBytes)} freed; ${formatBytes(result.retainedBytes)} retained for another owner.`);
         }
-        if (play) window.dispatchEvent(new CustomEvent("audioventura:offline-play", { detail: { playlistId: play.dataset.offlinePlay } }));
+        if (play && !play.disabled) window.dispatchEvent(new CustomEvent("audioventura:offline-play", { detail: { playlistId: play.dataset.offlinePlay } }));
       } catch (error) {
         setText("[data-offline-storage-message]", message(errorCode(error)));
       } finally {
@@ -640,6 +751,7 @@
   const init = async () => {
     try {
       await openStorage();
+      await processInvalidationMarkers();
       bindUi();
       await refreshUi();
       setText("[data-offline-connectivity]", navigator.onLine ? "Online; saved snapshots can be refreshed." : "Offline; showing browser-local snapshots.");
@@ -665,11 +777,22 @@
     }
   };
 
-  window.addEventListener("audioventura:navigation", () => { void refreshUi(); });
+  window.addEventListener("audioventura:navigation", () => {
+    void processInvalidationMarkers().then(refreshUi).catch((error) => {
+      setText("[data-offline-storage-message]", message(errorCode(error)));
+    });
+  });
   window.addEventListener("audioventura:offline-updated", () => { void refreshUi(); });
 
   channel?.addEventListener("message", async (event) => {
     if (event.data?.type === "blob-ready" && handle) await renderOwners();
+    if (event.data?.type === "offline-invalidate" && handle) {
+      const { kind, identifier } = event.data;
+      if (["media", "project", "playlist"].includes(kind) && typeof identifier === "string") {
+        await invalidateLocalReferences(kind, identifier, { broadcast: false });
+        await refreshUi();
+      }
+    }
   });
 
   window.AudioventuraOffline = {
@@ -691,6 +814,8 @@
     reconcile,
     getOfflineQueue: async (playlistId) => { await openStorage(); const owner = await Store.getOwner(handle, playlistId); return owner.entries?.map(itemFromEntry) || []; },
     getOwner: async (playlistId) => { await openStorage(); return Store.getOwner(handle, playlistId); },
+    getPlayableOwner,
+    invalidate: invalidateLocalReferences,
     refreshUi,
     formatBytes,
     message,
