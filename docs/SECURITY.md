@@ -114,11 +114,39 @@ Project deletion requires all jobs to be terminal, records a bounded audit
 summary with allow-listed numeric cost fields and safe provider names, then
 removes dependent media/playlists/files without leaving a live capability.
 
-The player queue contains only safe IDs, titles, project labels, duration, and
-same-origin route URLs. It never returns audio bytes, prompts, lyrics,
-provider payloads, transfer capabilities, or source paths. The library has no
-source-upload endpoint and the browser stores playback preferences/position,
-not an offline audio cache.
+The player queue contains only safe IDs, titles, project labels, duration,
+verified MP3 identity, and same-origin route URLs. It never returns audio
+bytes, prompts, lyrics, provider payloads, transfer capabilities, or source
+paths. The library has no source-upload endpoint. Browser-local playback
+preferences, queue state, playlist snapshots, references, and complete MP3
+responses are separate from server persistence.
+
+## Browser offline boundary
+
+`/notification-worker.js`, `/offline-shell`, and `/manifest.webmanifest` are
+public fixed bootstrap routes so browser-managed installation and offline
+navigation do not depend on page-level Basic Auth. They must contain no CSRF
+token, credentials, playlist name, media metadata, provider configuration, or
+other rendered user state. `/offline` and all queue, media, playlist, and
+notification mutation routes remain authenticated. Normal authenticated HTML
+must never enter the shell cache.
+
+The worker and browser coordinator validate every offline identity: same
+origin, active worker scope, library media path, lowercase 64-character hash,
+`audio/mpeg`, exact positive size, exact strong ETag, and complete `200`
+response before a body becomes ready. IndexedDB stores untrusted browser
+metadata and ownership references; Cache Storage stores the body once under a
+scope-specific synthetic hash key. Cached media is never served across `/` and
+`/beta/`, even when hashes match, and the production worker explicitly ignores
+the reserved beta subtree.
+
+Offline titles and audio are readable to anyone who can use the same browser
+profile, so the UI requires a trusted-device warning. No client-side encryption
+or server cache inventory is provided. Clearing an owner removes only local
+references and unreferenced bodies; reconciliation must never delete a body
+that still has an owner. Connectivity state is advisory until an actual fetch
+succeeds, and explicit HTTP authorization errors are not hidden by stale local
+HTML.
 
 Home Ingest is the only component allowed to contact YouTube or run media
 tools. Uploaded/container inputs are probed locally, select only the first

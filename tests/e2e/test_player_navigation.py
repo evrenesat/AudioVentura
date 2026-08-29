@@ -76,6 +76,7 @@ def test_player_controls_and_soft_navigation_preserve_playback(
     expect(e2e_page.get_by_role("heading", name="Alpha ambient composition")).to_be_visible()
     assert e2e_page.locator("#global-audio").get_attribute("src") == source
 
+    e2e_page.wait_for_timeout(250)
     e2e_page.reload(wait_until="domcontentloaded")
     expect(e2e_page.locator("#global-audio")).to_have_attribute(
         "src", re.compile(r"/beta/media/library/"), timeout=10_000

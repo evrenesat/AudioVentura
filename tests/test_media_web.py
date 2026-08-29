@@ -5,7 +5,11 @@ from fastapi.testclient import TestClient
 
 from ace_service.app import create_app
 from ace_service.db import create_database_engine, create_session_factory, initialize_database
-from ace_service.repository import add_playlist_entry, create_custom_playlist
+from ace_service.repository import (
+    add_playlist_entry,
+    create_custom_playlist,
+    ensure_project_playlist,
+)
 from tests.test_media_library import _publish_track
 from tests.test_web import FakeHome, FakeRunpod, FakeWorker, _auth, _csrf
 
@@ -32,7 +36,7 @@ def test_library_queue_media_range_and_download_routes(media_web_app, settings) 
     with factory() as session:
         job, _, item = _publish_track(session, settings, job_id="web-library-job")
         playlist = create_custom_playlist(session, "Web mix")
-        add_playlist_entry(session, playlist.id, item.id)
+        playlist_entry = add_playlist_entry(session, playlist.id, item.id)
         session.commit()
         media_file_id = item.files[0].id
         payload = (settings.paths.outputs / item.files[0].relative_path).read_bytes()
@@ -47,20 +51,43 @@ def test_library_queue_media_range_and_download_routes(media_web_app, settings) 
         queue = client.get("/player/queue/library", auth=_auth(client))
         assert queue.status_code == 200
         assert queue.headers["cache-control"] == "no-store"
-        assert set(queue.json()) == {"items"}
-        assert queue.json()["items"][0] == {
+        queue_payload = queue.json()
+        assert set(queue_payload) == {"schema_version", "context", "items"}
+        assert queue_payload["schema_version"] == 2
+        assert queue_payload["context"]["type"] == "library"
+        queue_item = queue_payload["items"][0]
+        assert queue_item == {
             "id": item.id,
+            "queue_entry_id": None,
+            "position": None,
+            "media_item_id": item.id,
+            "media_file_id": media_file_id,
             "title": item.title,
             "project_id": job.project_id,
             "project_title": job.project.title,
             "duration_seconds": None,
+            "mime_type": "audio/mpeg",
+            "byte_size": len(payload),
+            "sha256": item.files[0].sha256,
+            "updated_at": item.updated_at.isoformat(),
+            "media_updated_at": item.updated_at.isoformat(),
             "media_url": f"/media/library/{media_file_id}",
             "download_url": f"/files/library/{media_file_id}/download",
         }
 
         playlist_queue = client.get(f"/player/queue/playlist/{playlist.id}", auth=_auth(client))
         assert playlist_queue.status_code == 200
-        assert [entry["id"] for entry in playlist_queue.json()["items"]] == [item.id]
+        playlist_payload = playlist_queue.json()
+        assert playlist_payload["schema_version"] == 2
+        assert playlist_payload["context"] == {
+            "type": "playlist",
+            "playlist_id": playlist.id,
+            "playlist_title": playlist.title,
+            "playlist_kind": "custom",
+            "revision": playlist_payload["context"]["revision"],
+        }
+        assert playlist_payload["items"][0]["queue_entry_id"] == playlist_entry.id
+        assert playlist_payload["items"][0]["media_item_id"] == item.id
 
         ranged = client.get(
             f"/media/library/{media_file_id}",
@@ -72,11 +99,16 @@ def test_library_queue_media_range_and_download_routes(media_web_app, settings) 
         assert ranged.headers["content-type"].startswith("audio/mpeg")
         assert ranged.headers["content-disposition"].startswith("inline")
         assert ranged.headers["content-range"] == f"bytes 0-0/{len(payload)}"
+        assert ranged.headers["content-length"] == "1"
+        assert ranged.headers["accept-ranges"] == "bytes"
+        assert ranged.headers["etag"] == f'"sha256-{item.files[0].sha256}"'
 
         download = client.get(f"/files/library/{media_file_id}/download", auth=_auth(client))
         assert download.status_code == 200
         assert download.content == payload
         assert download.headers["content-disposition"].startswith("attachment")
+        assert download.headers["content-length"] == str(len(payload))
+        assert download.headers["etag"] == f'"sha256-{item.files[0].sha256}"'
 
 
 def test_library_media_rename_and_delete_leave_job_tombstone(media_web_app, settings) -> None:
@@ -112,3 +144,18 @@ def test_library_media_rename_and_delete_leave_job_tombstone(media_web_app, sett
         assert detail.status_code == 200
         assert "Deleted audio" in detail.text
         assert f"/media/library/{media_file_id}" not in detail.text
+
+
+def test_project_playlist_exposes_rename_and_delete_controls(media_web_app, settings) -> None:
+    app, factory, _ = media_web_app
+    with factory() as session:
+        job, _, _ = _publish_track(session, settings, job_id="web-project-playlist")
+        playlist = ensure_project_playlist(session, job.project_id)
+        session.commit()
+        playlist_id = playlist.id
+
+    with TestClient(app) as client:
+        page = client.get(f"/playlists/{playlist_id}", auth=_auth(client))
+        assert page.status_code == 200
+        assert f'action="/playlists/{playlist_id}/rename"' in page.text
+        assert f'action="/playlists/{playlist_id}/delete"' in page.text

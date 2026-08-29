@@ -14,7 +14,7 @@
   <section class="source-card" aria-labelledby="source-playback-title">
     <h2 id="source-playback-title">Original source</h2>
     <p class="muted">{{ source.media.duration_seconds|round(1) }} seconds · available in the project playlist</p>
-    <button class="play-button" type="button" data-player-track data-media-id="{{ source.media.id }}" data-player-title="{{ source.media.title }}" data-player-project="{{ source.media.project_title }}" data-player-src="{{ source.media.media_url }}" data-player-download="{{ source.media.download_url }}" data-player-play aria-label="Play original source">▶ Play source</button>
+    <button class="play-button" type="button" data-player-track data-player-context-type="direct" data-media-id="{{ source.media.id }}" data-player-title="{{ source.media.title }}" data-player-project="{{ source.media.project_title }}" data-player-project-id="{{ source.media.project_id }}" data-player-src="{{ source.media.media_url }}" data-player-download="{{ source.media.download_url }}" data-player-media-file-id="{{ source.media.playback_media_file_id }}" data-player-byte-size="{{ source.media.playback_byte_size }}" data-player-sha256="{{ source.media.playback_sha256 }}" data-player-mime-type="{{ source.media.playback_mime_type }}" data-player-updated-at="{{ source.media.playback_updated_at }}" data-player-play aria-label="Play original source">▶ Play source</button>
   </section>
   {% endif %}
   <div class="source-actions">

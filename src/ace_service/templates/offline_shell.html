@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Offline · AudioVentura</title>
+    <meta name="description" content="AudioVentura offline player">
+    <meta name="offline-shell" content="true">
+    <meta name="offline-worker" content="{{ urls.offline_worker }}">
+    <link rel="manifest" href="{{ urls.manifest }}">
+    <link rel="stylesheet" href="{{ urls.app_css }}">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="{{ urls.offline }}">AudioVentura</a>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <a data-app-nav href="{{ urls.offline }}" aria-current="page">Offline</a>
+      </nav>
+    </header>
+    <main id="app-main" class="container">
+      <section class="page-heading">
+        <div>
+          <p class="eyebrow">Personal offline player</p>
+          <h1>Offline</h1>
+          <p class="lede">You are offline. This page can play only playlists and tracks saved in this trusted browser profile.</p>
+        </div>
+      </section>
+      <section class="offline-status-card" aria-labelledby="offline-shell-title">
+        <h2 id="offline-shell-title">Saved audio</h2>
+        <p data-offline-connectivity role="status">Offline navigation shell loaded.</p>
+        <p class="hint">Offline copies are readable by anyone who can use this browser profile. Reconnect to refresh server playlist snapshots.</p>
+      </section>
+      <section aria-labelledby="offline-shell-playlists-title">
+        <h2 id="offline-shell-playlists-title">Saved playlists</h2>
+        <label class="sr-only" for="offline-filter">Filter saved playlists</label>
+        <input id="offline-filter" data-offline-filter type="search" placeholder="Filter saved playlists">
+        <div class="offline-owner-list" data-offline-owner-list aria-live="polite"><div class="empty"><p>Loading saved playlists…</p></div></div>
+      </section>
+    </main>
+    {% include "_player.html" %}
+    <script src="{{ urls.player_js }}" defer></script>
+    <script src="{{ urls.app_shell_js }}" defer></script>
+    <script src="{{ urls.offline_store_js }}" defer></script>
+    <script src="{{ urls.offline_cache_js }}" defer></script>
+  </body>
+</html>

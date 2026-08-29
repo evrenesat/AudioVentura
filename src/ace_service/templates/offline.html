@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Offline · AudioVentura{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <p class="eyebrow">Personal offline player</p>
+    <h1>Offline</h1>
+    <p class="lede">Saved playlists stay available on this trusted browser profile. Offline copies are not synced to other devices.</p>
+  </div>
+</section>
+<section class="offline-status-card" aria-labelledby="offline-status-title">
+  <div class="section-heading"><div><h2 id="offline-status-title">Storage</h2><p class="muted" data-offline-connectivity>Checking connection…</p></div></div>
+  <div class="offline-storage-grid">
+    <p><span class="eyebrow">Persistence</span><strong data-offline-persistence>Checking…</strong></p>
+    <p><span class="eyebrow">Origin storage</span><strong data-offline-quota>Checking…</strong></p>
+    <p><span class="eyebrow">Saved MP3 bytes</span><strong data-offline-bytes>0 bytes</strong></p>
+  </div>
+  <p class="hint" data-offline-last-sync>No successful playlist refresh yet.</p>
+  <p class="hint">Only use offline copies on a trusted device. Anyone who can use this browser profile can play saved audio.</p>
+  <p class="banner warning" data-offline-storage-message hidden role="status"></p>
+</section>
+<section aria-labelledby="offline-playlists-title">
+  <div class="section-heading"><div><h2 id="offline-playlists-title">Saved playlists</h2><p class="muted">Snapshots are read-only while offline.</p></div></div>
+  <label class="sr-only" for="offline-filter">Filter saved playlists</label>
+  <input id="offline-filter" data-offline-filter type="search" placeholder="Filter saved playlists">
+  <div class="offline-owner-list" data-offline-owner-list aria-live="polite"><div class="empty"><p>Loading saved playlists…</p></div></div>
+</section>
+{% endblock %}

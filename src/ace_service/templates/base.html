@@ -8,6 +8,9 @@
     <meta name="notifications-config" content="{{ urls.notifications_config }}">
     <meta name="notifications-subscriptions" content="{{ urls.notifications_subscriptions }}">
     <meta name="notifications-worker" content="{{ urls.notifications_worker }}">
+    <meta name="offline-worker" content="{{ urls.notifications_worker }}">
+    <meta name="offline-route" content="{{ urls.offline }}">
+    <link rel="manifest" href="{{ urls.manifest }}">
     <link rel="stylesheet" href="{{ urls.app_css }}">
   </head>
   <body>
@@ -19,6 +22,7 @@
         <a data-app-nav href="{{ urls.library }}">Library</a>
         <a data-app-nav href="{{ urls.playlists }}">Playlists</a>
         <a data-app-nav href="{{ urls.projects }}">Projects</a>
+        <a data-app-nav href="{{ urls.offline }}">Offline</a>
       </nav>
       <div class="notification-control" hidden>
         <button class="button secondary" type="button" data-notifications-enable>Enable notifications</button>
@@ -32,5 +36,7 @@
     <script src="{{ urls.notifications_js }}" defer></script>
     <script src="{{ urls.player_js }}" defer></script>
     <script src="{{ urls.app_shell_js }}" defer></script>
+    <script src="{{ urls.offline_store_js }}" defer></script>
+    <script src="{{ urls.offline_cache_js }}" defer></script>
   </body>
 </html>

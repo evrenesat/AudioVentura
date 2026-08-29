@@ -60,8 +60,10 @@ The boundaries are deliberate:
 - The transfer app is the only public data-bearing application surface. It has
   no UI or general API routes. The controller exposes one secret-free static
   bootstrap, `notification-worker.js`, publicly because browser-managed service
-  worker installation cannot depend on page-level Basic Auth; controller UI,
-  configuration, subscription, and user-data routes remain authenticated.
+  worker installation cannot depend on page-level Basic Auth; the fixed
+  `/offline-shell` and `/manifest.webmanifest` are public for the same reason.
+  Controller UI, configuration, subscription, and user-data routes remain
+  authenticated.
 - GPU workers receive generation metadata and short-lived transfer URLs. They
   do not receive controller, YouTube, SSH, SFTP, or home-network credentials.
 - Audio bytes never travel in a provider API request or result body.
@@ -88,7 +90,9 @@ The controller:
 - publishes verified MP3 variations into the media library;
 - exposes completed audio only through authenticated media routes;
 - serves the library, playlist, player, and cancellation views without
-  exposing provider payloads or audio bytes in JSON.
+  exposing provider payloads or audio bytes in JSON;
+- serves bounded queue-v2 metadata and the fixed offline shell/manifest;
+- serves the unified push/offline worker without embedding user state.
 
 One process-level lock protects a data root from two controller workers. One
 in-process queue serializes jobs and variations. This is a personal service,
@@ -236,8 +240,9 @@ pending `mp3_playback` derivative task. The item enters library queries and
 playlists only after Home Ingest verifies the canonical MP3 at
 `library/generated/<uuid>/playback.mp3`. Repeated completion or derivative
 callbacks are idempotent. Existing v10 rows are not backfilled. Custom
-playlists preserve explicit positions, reject duplicate entries, and use a
-two-phase reorder when moving an item across positions.
+playlists preserve explicit positions, allow duplicate entries (each position
+has its own entry identity), and use a two-phase reorder when moving an item
+across positions.
 
 Library playback and download resolve a database media-file ID, verify the
 active file is below the configured library root, reject symlink components,
@@ -260,8 +265,46 @@ The browser shell keeps one `<audio>` element in the persistent layout. Its
 queue is filled from safe same-origin media metadata, not provider responses,
 and its state is held in browser storage across soft navigation and reload.
 Source upload starts at the authenticated source picker, not the library. The
-queue contains no audio bytes or capability URLs, and there is no offline
-media cache.
+queue contains no audio bytes or capability URLs.
+
+### Offline browser subsystem
+
+Offline playback is browser-local state, not a controller database feature. The
+existing public `/notification-worker.js` registration is the single unified
+service worker for push and offline behavior. It precaches only the fixed,
+secret-free `/offline-shell`, static assets, icons, and root-aware manifest.
+The authenticated `/offline` page uses the same markup and reconstructs saved
+playlists after load. Normal authenticated HTML is never placed in the shell
+cache.
+
+Every worker derives a normalized namespace from its registration scope. The
+production scope is `/` and explicitly excludes `/beta/`; the beta scope is
+`/beta/`. IndexedDB uses `audioventura-offline:<scope-key>:v1`, while Cache
+Storage uses `audioventura:<scope-key>:media:v1` and a separate versioned shell
+cache. A worker update replaces only old shell caches in its own scope and
+preserves compatible content-addressed media.
+
+The browser coordinator keeps playlist snapshots, ordered duplicate entries,
+SHA-256 blob metadata, URL mappings, leases, and `[playlist, hash]` ownership
+references in IndexedDB. Complete verified `audio/mpeg` response bodies live
+once in Cache Storage at a synthetic SHA-256 key. A blob is removed only after
+its final owner reference is cleared and reconciliation confirms it is not
+shared by another playlist or `Played tracks`.
+
+Queue schema v2 supplies only bounded MP3 metadata, exact size, verified hash,
+revision, and root-aware media/download paths. Online playback begins normally;
+the player separately caches a complete body in the background. Explicit
+playlist caching downloads each unique hash at bounded concurrency with quota,
+persistence, progress, cancellation, retry, and refresh states. Offline
+snapshots are read-only and use the same player controls and single global
+`<audio>` element.
+
+The worker serves mapped cached media as a full `200` or a synthesized single
+range `206`; invalid or multiple ranges return `416`. It validates origin,
+scope, mapping, MIME, size, and SHA identity before serving. Missing or
+corrupt bodies become retryable local state and fall through to the network
+only when connectivity is available. Cached titles and audio are readable to
+anyone with access to the trusted browser profile.
 
 ## Provider boundary
 

@@ -177,6 +177,7 @@ class E2EServer:
     cancellable_job_id: str
     too_late_job_id: str
     too_late_project_id: str
+    seed_track: Any
 
 
 def _free_port() -> int:
@@ -344,6 +345,13 @@ def e2e_server(tmp_path_factory: pytest.TempPathFactory) -> Any:
         cancellable_job_id,
         too_late_job_id,
         too_late_project_id,
+        lambda *, job_id, description, frequency: _seed_track(
+            factory,
+            settings,
+            job_id=job_id,
+            description=description,
+            frequency=frequency,
+        ),
     )
     try:
         yield result

@@ -1,5 +1,31 @@
 # Development Log
 
+## 2026-08-28 (offline player, playlist cache, and installable shell)
+
+- Integrated the offline browser slice on top of the accepted source-ingest
+  release. Both automatic project and custom playlists retain the same
+  duplicate-entry, reorder, rename, append, and delete semantics.
+- Added queue schema v2 with verified MP3 identity, exact byte size, stable
+  playlist revisions, authenticated media ETags/ranges, a public secret-free
+  shell/manifest, and one root-aware push/offline worker. The production worker
+  excludes `/beta/`; browser IndexedDB and Cache Storage namespaces are scope
+  isolated.
+- Added content-addressed MP3 storage with atomic snapshot/reference updates,
+  browser-local leases and reconciliation, automatic cache-on-play, explicit
+  playlist caching, quota/persistence reporting, cancellation/retry/refresh,
+  shared-body cleanup, offline queue reconstruction, and full/single-range
+  playback without whole-file `arrayBuffer()` buffering.
+- Added Chromium/Firefox coverage for duplicate entries, offline reload and
+  range responses, shared hashes and cleanup, automatic playlist/Played tracks
+  ownership, interrupted retry, quota/missing-body recovery, online refresh and
+  deletion, notifications, and 412x915 controls. The focused server set passed
+  `78` tests; the complete E2E set passed `20` Chromium and `20` Firefox tests;
+  Home Ingest passed `33` and the MIDI mock passed `12`.
+- The product full suite passed `651` tests. Its only failures were the known
+  `96` expired private-quality-fixture baseline cases; Ruff, format, mypy,
+  JavaScript syntax, and diff checks passed. Beta deployment and manual
+  acceptance remain the final handoff steps; production is unchanged.
+
 ## 2026-08-28 (pre-production parity and notification UI regression)
 
 - Made production behavior the default contract for beta, staging, and test;

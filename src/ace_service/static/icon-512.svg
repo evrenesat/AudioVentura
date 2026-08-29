@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="AudioVentura">
+  <rect width="512" height="512" rx="106" fill="#0c1110"/>
+  <circle cx="256" cy="256" r="154" fill="#2fc878"/>
+  <path d="M219 154v204l144-102z" fill="#07150d"/>
+  <path d="M112 125h80v21h-80zM112 366h80v21h-80z" fill="#b5ffd2"/>
+</svg>

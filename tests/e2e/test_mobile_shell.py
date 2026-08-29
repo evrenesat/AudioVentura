@@ -9,6 +9,12 @@ def test_mobile_shell_has_no_horizontal_overflow_and_touch_targets(
     e2e_page: Page, e2e_server: E2EServer
 ) -> None:
     e2e_page.set_viewport_size({"width": 412, "height": 915})
+    e2e_page.goto(f"{e2e_server.base_url}/beta/playlists", wait_until="domcontentloaded")
+    expect(e2e_page.get_by_role("heading", name="Playlists")).to_be_visible()
+    expect(e2e_page.get_by_role("button", name="Keep offline").first).to_be_visible()
+    expect(e2e_page.get_by_role("button", name="Refresh").first).to_be_visible()
+    e2e_page.get_by_role("link", name="Offline", exact=True).click()
+    expect(e2e_page.get_by_role("heading", name="Offline", exact=True)).to_be_visible()
     e2e_page.goto(f"{e2e_server.base_url}/beta/library", wait_until="domcontentloaded")
     expect(e2e_page.get_by_role("heading", name="Media library")).to_be_visible()
     assert e2e_page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")

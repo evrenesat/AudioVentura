@@ -66,6 +66,41 @@ verification result belong in the handoff record. Never call the beta result
 production approval; production requires a separate explicit approval after
 manual beta testing.
 
+## Offline worker and browser data
+
+The public `notification-worker.js` route is the single push/offline worker.
+Its install manifest contains only the fixed `/offline-shell`, static assets,
+icons, and manifest; it never caches authenticated HTML, CSRF tokens, or
+playlist data. `APP_SHELL_VERSION` changes when shell behavior or assets are
+incompatible. A user-confirmed update removes only old shell caches in the
+active scope and preserves compatible media caches.
+
+Browser storage is isolated by service-worker scope. Production uses `/` and
+excludes `/beta/`; beta uses `/beta/`. The corresponding IndexedDB and Cache
+Storage names contain the normalized scope key. Do not copy browser site data
+between environments or diagnose a beta issue with production storage.
+
+The Offline page is the normal cleanup path. It removes one playlist or
+`Played tracks` owner and reports freed versus retained shared bytes. If a
+browser was evicted or a download was interrupted, open Offline and use Retry;
+Refresh first obtains a new server snapshot. Reconciliation removes orphaned
+Cache Storage bodies and marks missing/corrupt bodies retryable. Never delete a
+referenced body manually and never remove server media to repair browser state.
+
+For a damaged local profile, record the browser, origin, scope, owner title,
+and visible error, then use the browser's site-data controls for that exact
+origin as a last resort. This clears local offline state only; it does not
+touch controller data. After a worker rollback, verify both a fresh profile and
+an existing controlled profile because worker activation and update timing are
+asynchronous. Inert media left by an incompatible rollback is recoverable with
+the same origin-scoped site-data reset.
+
+After each beta deploy, verify the public worker, manifest, and offline shell
+paths under `/beta/`, confirm their responses contain no rendered user state,
+and run the browser gate in a fresh disposable profile before asking for manual
+acceptance. The automated browser gate must cover both Chromium and Firefox;
+run the engines sequentially when using the synchronous Playwright fixture.
+
 ## Private home services and MIDI mock
 
 The companion evreniops playbook deploys the isolated beta Home Ingest,
@@ -452,7 +487,8 @@ protected non-paid live smoke:
 
 ```text
 uv run playwright install --with-deps chromium firefox
-uv run pytest -q tests/e2e --browser chromium --browser firefox
+uv run pytest -q tests/e2e --browser chromium
+uv run pytest -q tests/e2e --browser firefox
 ```
 
 Then run the protected beta mock smoke with the exact

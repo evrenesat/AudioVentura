@@ -45,8 +45,14 @@
       const config = await response.json();
       if (!config.enabled || !config.public_key) { hideControl(); return false; }
       button.dataset.publicKey = config.public_key;
-      const workerLocation = new URL(workerUrl, window.location.origin);
-      registration = await navigator.serviceWorker.register(workerLocation, { scope: new URL('./', workerLocation).pathname });
+      if (window.AudioventuraServiceWorkerRegistration) {
+        registration = await window.AudioventuraServiceWorkerRegistration;
+      } else {
+        const workerLocation = new URL(workerUrl, window.location.origin);
+        registration = await navigator.serviceWorker.register(workerLocation, { scope: new URL('./', workerLocation).pathname });
+        window.AudioventuraServiceWorkerRegistration = Promise.resolve(registration);
+      }
+      if (!registration?.pushManager) { hideControl(); return false; }
       subscription = await registration.pushManager.getSubscription();
       if (subscription) subscription.__serverId = localStorage.getItem('ace_push_subscription_id') || '';
       if (subscription) hideControl();

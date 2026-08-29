@@ -43,7 +43,14 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   after a verified MP3 playback derivative is ready.
 - The persistent player owns one global audio element and keeps its queue,
   playback position, shuffle, repeat, and rate across same-origin navigation.
-  It is online-only; offline caching is deferred.
+- A root-scoped unified service worker supports push and a browser-local offline
+  player. Complete verified MP3 bodies are content-addressed and shared across
+  duplicate entries, playlists, and the local `Played tracks` owner.
+- Online playback starts immediately and caches one complete MP3 in the
+  background. The Offline screen offers read-only saved snapshots, explicit
+  Keep/Refresh/Retry/Cancel/Remove controls, progress, quota/persistence state,
+  and the trusted-device warning. Root and `/beta/` browser storage namespaces
+  are separate.
 - Queued and in-flight jobs can be cancelled when the persisted provider state
   permits it. Project deletion is available only after every job is terminal;
   it records a bounded audit summary before path-verifying and removing the
@@ -240,10 +247,29 @@ The browser suite uses a disposable loopback server, real local
 ffmpeg/ffprobe, real v2 transfer streaming, and a non-paid provider stub. It
 checks the `/beta` root-path contract, source upload and playlist ordering, one
 global player across soft navigation, mobile target sizes, deletion, and
-cancellation. It also checks notification UI states and installs the real
-scoped service worker in Chromium and Firefox. The protected beta mock
-acceptance script is separate and requires protected credentials plus a
-caller-approved YouTube URL; see [Operations](docs/OPERATIONS.md).
+cancellation. It also checks notification UI states, the unified worker,
+content-addressed offline caching, exact full/range playback, cleanup, quota
+errors, refresh, and the offline shell in Chromium and Firefox. Use a secure
+context (HTTPS or localhost) for service workers; Firefox desktop supports
+offline playback but does not provide manifest-based installation. Chromium
+Android is the installation target. The protected beta mock acceptance script
+is separate and requires protected credentials plus a caller-approved YouTube
+URL; see [Operations](docs/OPERATIONS.md).
+
+## Offline playback
+
+Open the authenticated Offline page while online to inspect browser-local
+owners. Starting an eligible MP3 online saves it in the current playlist
+context, or in `Played tracks` when no playlist context exists. `Keep offline`
+fetches and validates the complete ordered playlist snapshot, estimates missing
+bytes, and downloads each distinct MP3 once. Duplicate playlist entries remain
+distinct in playback order while sharing the stored body.
+
+Offline snapshots are read-only. Reconnect to refresh a server playlist after a
+rename, reorder, append, removal, or deletion. Remove one owner to release only
+its references; shared bytes remain until the final owner is removed. Browser
+site-data controls are the emergency full reset. Use only a trusted browser
+profile because cached titles and audio are not encrypted.
 
 ## Verification
 

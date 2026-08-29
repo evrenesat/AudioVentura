@@ -65,6 +65,7 @@ from ace_service.models import (
     JobType,
     MediaDeletionState,
     MediaDerivativeTask,
+    MediaFile,
     MediaFileState,
     MediaItem,
     NotificationDelivery,
@@ -143,6 +144,7 @@ from ace_service.schemas import (
     CoverRequest,
     OriginalSongRequest,
     resolve_relative_path,
+    validate_sha256,
     validate_youtube_url,
 )
 
@@ -880,6 +882,9 @@ def register_web_routes(app: FastAPI) -> None:
                     "playlists": _route_path(request, "playlists"),
                     "projects": _route_path(request, "projects"),
                     "jobs": _route_path(request, "jobs"),
+                    "offline": _route_path(request, "offline"),
+                    "offline_shell": _route_path(request, "offline_shell"),
+                    "manifest": _route_path(request, "manifest"),
                     "app_css": _route_path(request, "static", path="app.css"),
                     "status_js": _route_path(request, "static", path="status.js"),
                     "estimate_selector_js": _route_path(
@@ -898,6 +903,8 @@ def register_web_routes(app: FastAPI) -> None:
                     "keep_warm": _route_path(request, "set_keep_warm"),
                     "player_js": _route_path(request, "static", path="player.js"),
                     "app_shell_js": _route_path(request, "static", path="app_shell.js"),
+                    "offline_store_js": _route_path(request, "static", path="offline_store.js"),
+                    "offline_cache_js": _route_path(request, "static", path="offline_cache.js"),
                     "media_library_js": _route_path(request, "static", path="media_library.js"),
                     "source_upload_js": _route_path(request, "static", path="source_upload.js"),
                     "source_range_js": _route_path(request, "static", path="source_range.js"),
@@ -907,6 +914,66 @@ def register_web_routes(app: FastAPI) -> None:
         )
         attach_csrf_cookie(request, response, token)
         return response
+
+    @app.get("/offline-shell", name="offline_shell")
+    async def offline_shell(request: Request) -> Response:
+        """Return the fixed, secret-free document used for offline navigation."""
+
+        response = templates.TemplateResponse(
+            request=request,
+            name="offline_shell.html",
+            context={
+                "urls": {
+                    "app_css": _route_path(request, "static", path="app.css"),
+                    "manifest": _route_path(request, "manifest"),
+                    "player_js": _route_path(request, "static", path="player.js"),
+                    "app_shell_js": _route_path(request, "static", path="app_shell.js"),
+                    "offline_store_js": _route_path(request, "static", path="offline_store.js"),
+                    "offline_cache_js": _route_path(request, "static", path="offline_cache.js"),
+                    "offline": _route_path(request, "offline"),
+                    "offline_worker": _route_path(request, "notification_worker"),
+                }
+            },
+        )
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    @app.get("/manifest.webmanifest", name="manifest")
+    async def manifest(request: Request) -> JSONResponse:
+        scope = _worker_scope(request)
+        return JSONResponse(
+            {
+                "name": "AudioVentura",
+                "short_name": "AudioVentura",
+                "description": "A personal music player.",
+                "start_url": scope,
+                "scope": scope,
+                "display": "standalone",
+                "background_color": "#0c1110",
+                "theme_color": "#0c1110",
+                "prefer_related_applications": False,
+                "icons": [
+                    {
+                        "src": _route_path(request, "static", path="icon-192.svg"),
+                        "sizes": "192x192",
+                        "type": "image/svg+xml",
+                        "purpose": "any maskable",
+                    },
+                    {
+                        "src": _route_path(request, "static", path="icon-512.svg"),
+                        "sizes": "512x512",
+                        "type": "image/svg+xml",
+                        "purpose": "any maskable",
+                    },
+                ],
+            },
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.get("/offline", dependencies=[Depends(authenticated)], name="offline")
+    async def offline(request: Request) -> Response:
+        return render(request, "offline.html", {})
 
     @app.get(
         "/backend-pricing",
@@ -1004,8 +1071,7 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.get("/notification-worker.js", name="notification_worker")
     async def notification_worker(request: Request) -> Response:
-        root_path = request.scope.get("root_path", "") or "/"
-        scope = root_path if root_path.endswith("/") else f"{root_path}/"
+        scope = _worker_scope(request)
         script = _notification_worker_script()
         return Response(
             script,
@@ -1930,13 +1996,28 @@ def register_web_routes(app: FastAPI) -> None:
             playlist = get_playlist(session, playlist_id)
             if playlist is None:
                 raise HTTPException(status_code=404, detail="playlist not found")
-            items = [
-                _safe_queue_media_view(request, entry.media_item)
-                for entry in list_playlist_entries(session, playlist_id)
-                if entry.media_item.deletion_state is MediaDeletionState.ACTIVE
-            ]
+            try:
+                items = [
+                    _safe_queue_media_view(request, entry.media_item, entry=entry)
+                    for entry in list_playlist_entries(session, playlist_id)
+                    if entry.media_item.deletion_state is MediaDeletionState.ACTIVE
+                ]
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            revision = _playlist_revision(playlist)
+            context = {
+                "type": "playlist",
+                "playlist_id": playlist.id,
+                "playlist_title": playlist.title,
+                "playlist_kind": playlist.kind.value,
+                "revision": revision,
+            }
         return JSONResponse(
-            {"playlist_id": playlist_id, "items": items},
+            {
+                "schema_version": 2,
+                "context": context,
+                "items": items,
+            },
             headers={"Cache-Control": "no-store"},
         )
 
@@ -1956,8 +2037,29 @@ def register_web_routes(app: FastAPI) -> None:
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-            payload = [_safe_queue_media_view(request, item) for item in items]
-        return JSONResponse({"items": payload}, headers={"Cache-Control": "no-store"})
+            try:
+                payload = [_safe_queue_media_view(request, item) for item in items]
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            query = {
+                "q": request.query_params.get("q", "").strip(),
+                "project": request.query_params.get("project") or None,
+                "sort": request.query_params.get("sort", "recent"),
+            }
+        return JSONResponse(
+            {
+                "schema_version": 2,
+                "context": {
+                    "type": "library",
+                    "playlist_id": None,
+                    "playlist_title": "Library",
+                    "playlist_kind": None,
+                    "revision": _library_revision(payload, query),
+                },
+                "items": payload,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post(
         "/media/{media_item_id}/rename",
@@ -2383,6 +2485,12 @@ def register_web_routes(app: FastAPI) -> None:
             media_file = get_media_file(session, media_file_id)
             if media_file is None:
                 raise HTTPException(status_code=404, detail="media file not found")
+            if (
+                media_file.format is not OutputFormat.MP3
+                or media_file.is_playback != 1
+                or media_file.mime_type != "audio/mpeg"
+            ):
+                raise HTTPException(status_code=404, detail="media file is not a playback MP3")
             try:
                 path = verify_media_file(app.state.settings, media_file)
             except MediaLibraryError as exc:
@@ -2390,7 +2498,9 @@ def register_web_routes(app: FastAPI) -> None:
             disposition = media_file_content_disposition(media_file, attachment=False)
             media_type = media_file.mime_type
         return FileResponse(
-            path, media_type=media_type, headers={"Content-Disposition": disposition}
+            path,
+            media_type=media_type,
+            headers=_media_response_headers(media_file, disposition),
         )
 
     @app.get(
@@ -2410,7 +2520,9 @@ def register_web_routes(app: FastAPI) -> None:
             disposition = media_file_content_disposition(media_file, attachment=True)
             media_type = media_file.mime_type
         return FileResponse(
-            path, media_type=media_type, headers={"Content-Disposition": disposition}
+            path,
+            media_type=media_type,
+            headers=_media_response_headers(media_file, disposition),
         )
 
     @app.post(
@@ -2544,51 +2656,9 @@ def _capacity_views(app: FastAPI, session: Any) -> list[dict[str, Any]]:
 
 
 def _notification_worker_script() -> str:
-    return r"""/* AudioVentura scoped notification worker. */
-self.addEventListener('push', (event) => {
-  event.waitUntil((async () => {
-    let payload;
-    try { payload = event.data ? event.data.json() : null; } catch (_) { return; }
-    const kinds = new Set([
-      'generation_completed', 'managed_generation_started',
-      'capacity_retained_reminder', 'capacity_release_warning',
-      'capacity_released', 'capacity_release_overdue'
-    ]);
-    if (!payload || !kinds.has(payload.kind) || typeof payload.event_key !== 'string' ||
-        typeof payload.title !== 'string' || typeof payload.body !== 'string' ||
-        typeof payload.path !== 'string' || !payload.path.startsWith('/') ||
-        payload.path.startsWith('//') || payload.path.includes('://') ||
-        payload.title.length > 128 || payload.body.length > 512 ||
-        payload.event_key.length > 256) return;
-    const target = new URL(payload.path.replace(/^\/+/, ''), self.registration.scope);
-    if (target.origin !== self.location.origin ||
-        !target.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
-    await self.registration.showNotification(payload.title, {
-      body: payload.body, tag: payload.event_key, data: { path: target.pathname + target.search }
-    });
-  })());
-});
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  event.waitUntil((async () => {
-    const path = event.notification.data && event.notification.data.path;
-    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//') ||
-        path.includes('://')) return;
-    const target = new URL(path, self.location.origin);
-    if (target.origin !== self.location.origin ||
-        !target.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
-    const windows = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const client of windows) {
-      if (client.url.startsWith(self.registration.scope) && 'focus' in client) {
-        await client.focus();
-        if ('navigate' in client) await client.navigate(target.href);
-        return;
-      }
-    }
-    await clients.openWindow(target.href);
-  })());
-});
-"""
+    """Return the checked-in unified service-worker source."""
+
+    return (_STATIC / "service_worker.js").read_text(encoding="utf-8")
 
 
 def _enqueue(app: FastAPI, job_id: str) -> None:
@@ -2888,6 +2958,13 @@ def _route_path(request: Request, name: str, **path_params: Any) -> str:
     """Build one same-origin browser path through Starlette's named routes."""
 
     return request.url_for(name, **path_params).path
+
+
+def _worker_scope(request: Request) -> str:
+    """Return the normalized public root controlled by the current app."""
+
+    root_path = str(request.scope.get("root_path", "") or "")
+    return f"{root_path}/" if root_path else "/"
 
 
 _SOURCE_STATUS_LABELS = {
@@ -3289,6 +3366,12 @@ def _output_view(request: Request, output: Output) -> dict[str, Any]:
         playable = active and playback_file is not None
         download_file = primary_file if primary_file is not None else playback_file
         derivative = media_item.derivative_task
+        playback_sha256 = None
+        if playback_file is not None:
+            try:
+                playback_sha256 = validate_sha256(playback_file.sha256)
+            except (TypeError, ValueError):
+                playback_sha256 = None
         return {
             "id": output.id,
             "variation_index": output.variation_index,
@@ -3315,6 +3398,19 @@ def _output_view(request: Request, output: Output) -> dict[str, Any]:
             "created_at": _iso(output.created_at),
             "title": media_item.title,
             "media_item_id": media_item.id,
+            "project_id": media_item.project_id,
+            "project_title": media_item.project.title if media_item.project is not None else "",
+            "playback_media_file_id": playback_file.id
+            if active and playback_file is not None
+            else None,
+            "playback_byte_size": playback_file.byte_size
+            if active and playback_file is not None
+            else None,
+            "playback_sha256": playback_sha256 if playable else None,
+            "playback_mime_type": playback_file.mime_type
+            if active and playback_file is not None
+            else None,
+            "playback_updated_at": _iso(media_item.updated_at) if playable else None,
             "deleted": not active,
             "playable": playable,
             "preparing_mp3": active and not playable and derivative is not None,
@@ -3339,6 +3435,13 @@ def _output_view(request: Request, output: Output) -> dict[str, Any]:
         "created_at": _iso(output.created_at),
         "title": None,
         "media_item_id": None,
+        "project_id": None,
+        "project_title": "",
+        "playback_media_file_id": None,
+        "playback_byte_size": None,
+        "playback_sha256": None,
+        "playback_mime_type": None,
+        "playback_updated_at": None,
         "deleted": False,
         "legacy": True,
     }
@@ -3368,6 +3471,12 @@ def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
     download_file = primary_file if primary_file is not None else playback_file
     derivative = item.derivative_task
     project = item.project
+    playback_sha256 = None
+    if playback_file is not None:
+        try:
+            playback_sha256 = validate_sha256(playback_file.sha256)
+        except (TypeError, ValueError):
+            playback_sha256 = None
     return {
         "id": item.id,
         "title": item.title if active else "Deleted audio",
@@ -3396,6 +3505,17 @@ def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
         "file_available": active and (primary_file is not None or playback_file is not None),
         "playable": playable,
         "media_file_id": playback_file.id if active and playback_file is not None else None,
+        "playback_media_file_id": playback_file.id
+        if active and playback_file is not None
+        else None,
+        "playback_byte_size": playback_file.byte_size
+        if active and playback_file is not None
+        else None,
+        "playback_sha256": playback_sha256 if playable else None,
+        "playback_mime_type": playback_file.mime_type
+        if active and playback_file is not None
+        else None,
+        "playback_updated_at": _iso(item.updated_at) if playable else None,
         "primary_media_file_id": primary_file.id if active and primary_file is not None else None,
         "media_url": (
             _route_path(request, "library_media", media_file_id=playback_file.id)
@@ -3425,6 +3545,7 @@ def _media_item_view(request: Request, item: MediaItem) -> dict[str, Any]:
             if derivative is not None and derivative.status == "failed"
             else None
         ),
+        "offline_context_type": "direct",
     }
 
 
@@ -3453,7 +3574,9 @@ def _playlist_view(
         "title": playlist.title,
         "kind": playlist.kind.value,
         "is_project": playlist.kind is PlaylistKind.PROJECT,
-        "editable": playlist.kind is PlaylistKind.CUSTOM,
+        # Automatic project playlists expose the same playlist operations as
+        # custom playlists. Automatic appends remain owned by publication.
+        "editable": True,
         "project_id": playlist.project_id,
         "project_url": (
             _route_path(request, "project_detail", project_id=playlist.project_id)
@@ -3466,20 +3589,122 @@ def _playlist_view(
         "delete_url": _route_path(request, "delete_playlist", playlist_id=playlist.id),
         "add_url": _route_path(request, "add_playlist_entry", playlist_id=playlist.id),
         "reorder_url": _route_path(request, "reorder_playlist_entries", playlist_id=playlist.id),
+        "queue_url": _route_path(request, "player_playlist_queue", playlist_id=playlist.id),
+        "revision": _playlist_revision(playlist),
+        "playlist_kind": playlist.kind.value,
         "entries": entry_views,
     }
 
 
-def _safe_queue_media_view(request: Request, item: MediaItem) -> dict[str, Any]:
-    view = _media_item_view(request, item)
+def _queue_playback_file(item: MediaItem) -> MediaFile:
+    """Return the active, server-verified MP3 representation for a queue item."""
+
+    for media_file in item.files:
+        format_value = (
+            media_file.format.value
+            if isinstance(media_file.format, OutputFormat)
+            else str(media_file.format)
+        )
+        if (
+            format_value == OutputFormat.MP3.value
+            and media_file.is_playback == 1
+            and media_file.state is MediaFileState.ACTIVE
+            and media_file.mime_type == "audio/mpeg"
+        ):
+            if (
+                isinstance(media_file.byte_size, bool)
+                or not isinstance(media_file.byte_size, int)
+                or media_file.byte_size <= 0
+            ):
+                break
+            try:
+                validate_sha256(media_file.sha256)
+            except (TypeError, ValueError):
+                break
+            return media_file
+    raise ValueError("queue item has no active verified MP3 playback file")
+
+
+def _safe_queue_media_view(
+    request: Request, item: MediaItem, *, entry: Any | None = None
+) -> dict[str, Any]:
+    media_file = _queue_playback_file(item)
     return {
-        "id": view["id"],
-        "title": view["title"],
-        "project_id": view["project_id"],
-        "project_title": view["project_title"],
-        "duration_seconds": view["duration_seconds"],
-        "media_url": view["media_url"],
-        "download_url": view["download_url"],
+        "id": item.id,
+        "queue_entry_id": entry.id if entry is not None else None,
+        "position": entry.position if entry is not None else None,
+        "media_item_id": item.id,
+        "media_file_id": media_file.id,
+        "title": item.title,
+        "project_id": item.project_id,
+        "project_title": item.project.title if item.project is not None else "Deleted project",
+        "duration_seconds": item.duration_seconds,
+        "mime_type": "audio/mpeg",
+        "byte_size": media_file.byte_size,
+        "sha256": validate_sha256(media_file.sha256),
+        "updated_at": _iso(item.updated_at),
+        "media_updated_at": _iso(item.updated_at),
+        "media_url": _route_path(request, "library_media", media_file_id=media_file.id),
+        "download_url": _route_path(request, "library_download", media_file_id=media_file.id),
+    }
+
+
+def _playlist_revision(playlist: Playlist) -> str:
+    """Hash all server-owned playlist metadata that affects an offline snapshot."""
+
+    entries: list[dict[str, Any]] = []
+    for entry in sorted(playlist.entries, key=lambda value: (value.position, value.id)):
+        item = entry.media_item
+        try:
+            media_file = _queue_playback_file(item)
+            file_view: dict[str, Any] | None = {
+                "id": media_file.id,
+                "sha256": validate_sha256(media_file.sha256),
+                "byte_size": media_file.byte_size,
+                "mime_type": media_file.mime_type,
+            }
+        except ValueError:
+            file_view = None
+        entries.append(
+            {
+                "entry_id": entry.id,
+                "position": entry.position,
+                "media_item_id": item.id,
+                "title": item.title,
+                "updated_at": _iso(item.updated_at),
+                "file": file_view,
+            }
+        )
+    canonical = {
+        "id": playlist.id,
+        "kind": playlist.kind.value,
+        "project_id": playlist.project_id,
+        "title": playlist.title,
+        "updated_at": _iso(playlist.updated_at),
+        "entries": entries,
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _library_revision(items: list[dict[str, Any]], query: Mapping[str, Any]) -> str:
+    canonical = {"query": dict(query), "items": items}
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _media_response_headers(media_file: MediaFile, disposition: str) -> dict[str, str]:
+    """Build identity and range headers for an authenticated verified file."""
+
+    digest = validate_sha256(media_file.sha256)
+    return {
+        "Content-Disposition": disposition,
+        "Content-Length": str(media_file.byte_size),
+        "Accept-Ranges": "bytes",
+        "ETag": f'"sha256-{digest}"',
+        "Cache-Control": "private, no-store",
     }
 
 
