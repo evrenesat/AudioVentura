@@ -28,6 +28,7 @@ fail() {
 command -v swift >/dev/null || fail "Swift is required"
 command -v codesign >/dev/null || fail "codesign is required"
 command -v plutil >/dev/null || fail "plutil is required"
+command -v strip >/dev/null || fail "strip is required"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "VERSION must be semantic"
 [[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]] || fail "working tree is dirty"
 application_revision=$(git -C "$repo_root" rev-parse HEAD)
@@ -52,6 +53,9 @@ rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources/receipt" "$app_dir/Contents/Frameworks"
 cp "$package_dir/.build/arm64-apple-macosx/release/AudioVenturaACEWorker" "$app_dir/Contents/MacOS/AudioVenturaACEWorker"
 chmod 755 "$app_dir/Contents/MacOS/AudioVenturaACEWorker"
+# Swift release binaries may retain absolute source paths in debug metadata.
+# Remove that metadata from the shipped executable before signing it.
+strip -S "$app_dir/Contents/MacOS/AudioVenturaACEWorker"
 ditto "$script_dir/Resources/Assets.xcassets" "$app_dir/Contents/Resources/Assets.xcassets"
 cp "$script_dir/Resources/ACEWorkerMenu.entitlements" "$app_dir/Contents/Resources/ACEWorkerMenu.entitlements"
 cp "$repo_root/deploy/node/uv.lock" "$app_dir/Contents/Resources/receipt/deploy-node-uv.lock"
