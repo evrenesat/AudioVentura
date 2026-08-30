@@ -216,9 +216,10 @@ uv run python -m ace_midi_mock serve
 ```
 
 Run an ACE Node only on its separately prepared target host using the launcher
-and service templates in [docs/ACE-NODE.md](docs/ACE-NODE.md). The normal
-controller `uv sync --frozen` environment does not install or import torch,
-ACE-Step, MLX, nano-vllm, media tools, or model weights.
+and service templates in [docs/ACE-NODE.md](docs/ACE-NODE.md). The node's
+heavyweight runtime is resolved only by the separate `deploy/node/` uv project
+and lock; the normal controller `uv sync --frozen` environment does not
+install or import torch, ACE-Step, MLX, nano-vllm, or node model weights.
 
 Default binds are:
 

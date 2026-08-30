@@ -5,9 +5,15 @@ managed, persistent ACE Node. It is not a GPU provisioner and must not contain
 credentials, model files, generated audio, or provider-management code.
 
 The launcher receives exactly one absolute environment-file path, verifies a
-clean checkout and an exact `ACE_NODE_APPLICATION_REVISION`, then executes the
+clean checkout and an exact `ACE_NODE_APPLICATION_REVISION`, checks that the
+runtime receipt lock is the tracked `deploy/node/uv.lock`, then executes the
 pre-created opt-in node virtual environment. Keep the node bound to loopback,
 a private interface, or the operator's exact Tailscale `.ts.net` address.
+
+The deployment project owns the heavyweight ACE-Step, CUDA, and Apple Silicon
+MLX dependency graph. Keep it in `deploy/node/pyproject.toml` and
+`deploy/node/uv.lock`; do not add those dependencies to the controller's root
+project or lockfile.
 
 Run the deployment checks from the repository root:
 

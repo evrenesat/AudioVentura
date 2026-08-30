@@ -100,6 +100,11 @@ def test_node_settings_reject_public_bind_and_placeholder_service_token(tmp_path
         NodeSettings(data_root=tmp_path, token="node-secret", transfer_allowed_host="example.com")
 
 
+def test_node_runtime_receipt_defaults_to_deployment_lock(tmp_path: Path) -> None:
+    settings = NodeSettings(data_root=tmp_path, token="node-secret")
+    assert settings.runtime_lock_path == Path("deploy/node/uv.lock")
+
+
 def test_node_runtime_requires_a_committed_application_receipt(tmp_path: Path) -> None:
     settings = NodeSettings(
         data_root=tmp_path,

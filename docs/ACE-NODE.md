@@ -21,6 +21,7 @@ host-specific value; do not copy secrets into this repository:
 ACE_NODE_CHECKOUT=/opt/audioventura
 ACE_NODE_VENV=/opt/audioventura-ace-node/venv
 ACE_NODE_APPLICATION_REVISION=<40-character-committed-revision>
+ACE_NODE_RUNTIME_LOCK_PATH=/opt/audioventura/deploy/node/uv.lock
 ACE_NODE_LISTEN_HOST=127.0.0.1
 ACE_NODE_LISTEN_PORT=8210
 ACE_NODE_TOKEN=<long-random-bearer-token>
@@ -45,17 +46,21 @@ acceptance gate. Node is disabled by default.
 
 The exact model bundle and ACE-Step source are fixed by the values above and
 by commit `dce621408bee8c31b4fcf4811682eb9359e1bc94`. The local deployment
-receipt is derived from the committed application revision and `uv.lock`; a
-dirty checkout, branch name, `latest` tag, or missing receipt is rejected.
+receipt is derived from the committed application revision and
+`deploy/node/uv.lock`; a dirty checkout, branch name, `latest` tag, or missing
+receipt is rejected. The controller's root `uv.lock` intentionally excludes
+the heavyweight node graph so its web/runtime dependencies remain isolated.
 
 ## Common preparation
 
 On the target machine, install the host driver/runtime first, create the
-external virtual environment, and install the opt-in dependency group:
+external virtual environment, and install the separate node deployment
+project:
 
 ```text
 cd /opt/audioventura
-UV_PROJECT_ENVIRONMENT=/opt/audioventura-ace-node/venv uv sync --group node --python 3.12
+UV_PROJECT_ENVIRONMENT=/opt/audioventura-ace-node/venv \
+  uv --project deploy/node sync --frozen --python 3.12
 ```
 
 Use the target environment's Python path as `ACE_NODE_VENV`; it must not be

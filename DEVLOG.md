@@ -9,10 +9,10 @@
   work `worker_restarted` without automatic duplicate submission.
 - Added fail-closed platform selection for exactly one Linux x86_64 CUDA GPU or
   Apple Silicon arm64 MPS/MLX, the exact ACE-Step commit and model bundle
-  receipt, opt-in node dependencies, deterministic no-GPU controller/provider/
-  node integration coverage, and Linux/macOS operator templates. RunPod and
-  Salad adapters remain available for recovery; no cloud provider or production
-  deployment was changed.
+  receipt, a separate `deploy/node/` dependency project and lock,
+  deterministic no-GPU controller/provider/node integration coverage, and
+  Linux/macOS operator templates. RunPod and Salad adapters remain available
+  for recovery; no cloud provider or production deployment was changed.
 
 ## 2026-08-30 (YouTube EJS runtime and durable source retry)
 

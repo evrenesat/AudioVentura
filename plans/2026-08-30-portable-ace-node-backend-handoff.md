@@ -436,7 +436,7 @@ Modify `runpod_worker/runtime.py` and focused runtime tests.
 - Extend bounded completion metadata with a platform/runtime kind if needed,
   while preserving every current schema-2 RunPod/Salad field and parser.
 - A local runtime receipt must be an immutable SHA-256 derived from the exact
-  application commit plus `uv.lock`; document that the legacy
+  application commit plus `deploy/node/uv.lock`; document that the legacy
   `image_digest` field carries this deployment receipt for a non-containerized
   node. Never use `latest`, a branch name, or the dirty working tree.
 
@@ -455,21 +455,29 @@ src/ace_node/app.py
 src/ace_node/worker.py
 src/ace_node/model_bundle.py
 src/ace_node/AGENTS.md
+deploy/node/pyproject.toml
+deploy/node/uv.lock
 tests/test_node_app.py
 tests/test_node_db.py
 tests/test_node_worker.py
 tests/test_node_runtime.py
+tests/test_node_packaging.py
 ```
 
 Add `src/ace_node` and the existing `runpod_worker` package to the Hatch wheel,
-plus an `ace-node` console script. Put heavyweight ACE-Step/platform packages in
-an opt-in `node` dependency group; the controller's normal environment must not
-install torch, ACE-Step, MLX, nano-vllm, audio tooling, or model weights.
+plus an `ace-node` console script. Keep the controller's root dependency graph
+provider-neutral: do not add heavyweight ACE-Step/platform packages to its
+dependency groups or lockfile. Create a separate `deploy/node/` uv project and
+lockfile with the repository package as a local editable dependency, and put
+the opt-in ACE-Step/CUDA/MLX graph there. The controller's normal environment
+must not install torch, ACE-Step, MLX, nano-vllm, node audio tooling, or model
+weights.
 
-Pin the upstream ACE-Step Git source to
-`dce621408bee8c31b4fcf4811682eb9359e1bc94`. Ensure `uv.lock` resolves both
-Linux x86_64 and Darwin arm64. Pin any git subdirectory dependency such as
-nano-vllm to the same upstream commit. Do not resolve from upstream `main`.
+Pin the upstream ACE-Step Git source in `deploy/node/pyproject.toml` to
+`dce621408bee8c31b4fcf4811682eb9359e1bc94`. Ensure
+`deploy/node/uv.lock` resolves both Linux x86_64 and Darwin arm64. Pin any git subdirectory
+dependency such as nano-vllm to the same upstream commit. Do not resolve from
+upstream `main`.
 
 Refactor `deploy/salad/download_model.py` only as needed to share the immutable
 bundle constants and manifest validation; do not change the deployed Salad
@@ -558,6 +566,8 @@ Create:
 
 ```text
 deploy/node/AGENTS.md
+deploy/node/pyproject.toml
+deploy/node/uv.lock
 deploy/node/run-node.sh
 deploy/node/linux/audioventura-ace-node.service
 deploy/node/macos/io.evren.audioventura.ace-node.plist
@@ -626,8 +636,10 @@ Also verify packaging without model initialization:
 
 ```text
 uv lock --check
+uv --project deploy/node lock --check
 uv build
-uv run --group node python -c "import ace_node, runpod_worker"
+uv --project deploy/node sync --frozen --python 3.12
+uv --project deploy/node run python -c "import ace_node, runpod_worker"
 shellcheck deploy/node/run-node.sh
 git diff --check
 ```

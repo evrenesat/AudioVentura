@@ -21,13 +21,19 @@ set +a
 : "${ACE_NODE_CHECKOUT:?ACE_NODE_CHECKOUT is required}"
 : "${ACE_NODE_VENV:?ACE_NODE_VENV is required}"
 : "${ACE_NODE_APPLICATION_REVISION:?ACE_NODE_APPLICATION_REVISION is required}"
+: "${ACE_NODE_RUNTIME_LOCK_PATH:?ACE_NODE_RUNTIME_LOCK_PATH is required}"
 
-if [[ "$ACE_NODE_CHECKOUT" != /* || "$ACE_NODE_VENV" != /* ]]; then
-    echo "ACE_NODE_CHECKOUT and ACE_NODE_VENV must be absolute paths" >&2
+if [[ "$ACE_NODE_CHECKOUT" != /* || "$ACE_NODE_VENV" != /* || "$ACE_NODE_RUNTIME_LOCK_PATH" != /* ]]; then
+    echo "ACE_NODE_CHECKOUT, ACE_NODE_VENV, and ACE_NODE_RUNTIME_LOCK_PATH must be absolute paths" >&2
     exit 64
 fi
 if [[ ! -d "$ACE_NODE_CHECKOUT/.git" || ! -x "$ACE_NODE_VENV/bin/python" ]]; then
     echo "ACE Node checkout or opt-in virtual environment is unavailable" >&2
+    exit 78
+fi
+expected_runtime_lock="$ACE_NODE_CHECKOUT/deploy/node/uv.lock"
+if [[ "$ACE_NODE_RUNTIME_LOCK_PATH" != "$expected_runtime_lock" || ! -f "$ACE_NODE_RUNTIME_LOCK_PATH" ]]; then
+    echo "ACE_NODE_RUNTIME_LOCK_PATH must point to the clean checkout's deploy/node/uv.lock" >&2
     exit 78
 fi
 

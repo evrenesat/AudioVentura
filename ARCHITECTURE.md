@@ -223,7 +223,9 @@ API has authenticated health, idempotent submit, status, result, and pending
 cancel routes; its SQLite schema intentionally has no payload, capability URL,
 audio, prompt, or lyrics columns. Runtime selection fails closed unless the
 host is exactly Linux x86_64 with one CUDA GPU or macOS arm64 with available
-MPS and the pinned MLX path. See [the ACE Node runbook](docs/ACE-NODE.md) for
+MPS and the pinned MLX path. The heavyweight runtime is isolated in the
+separate `deploy/node/` uv project and lock, while the controller root lock
+remains provider-neutral. See [the ACE Node runbook](docs/ACE-NODE.md) for
 host preparation and the hardware acceptance gate.
 
 ## Job model

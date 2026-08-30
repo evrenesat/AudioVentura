@@ -1,0 +1,21 @@
+[project]
+name = "audioventura-ace-node-deployment"
+version = "0.1.0"
+description = "External deployment environment for the persistent AudioVentura ACE Node"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "ace-service",
+  "ace-step @ git+https://github.com/ace-step/ACE-Step-1.5.git@dce621408bee8c31b4fcf4811682eb9359e1bc94; (platform_system == 'Linux' and platform_machine == 'x86_64') or (platform_system == 'Darwin' and platform_machine == 'arm64')",
+  "huggingface-hub>=0.30,<1",
+  "torch>=2.7; platform_system == 'Linux' and platform_machine == 'x86_64'",
+  "torch>=2.7; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx>=0.29; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx-lm>=0.29; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "lameenc==1.8.4",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+ace-service = { path = "../..", editable = true }

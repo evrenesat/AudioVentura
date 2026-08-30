@@ -109,7 +109,7 @@ class NodeSettings(BaseSettings):
         validation_alias=AliasChoices("ACE_NODE_RUNTIME_RECEIPT", "runtime_receipt"),
     )
     runtime_lock_path: Path = Field(
-        default=Path("uv.lock"),
+        default=Path("deploy/node/uv.lock"),
         validation_alias=AliasChoices("ACE_NODE_RUNTIME_LOCK_PATH", "runtime_lock_path"),
     )
     request_max_bytes: int = 65_536
