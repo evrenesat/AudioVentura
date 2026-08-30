@@ -1,5 +1,32 @@
 # Development Log
 
+## 2026-08-31 (native macOS ACE Node implementation baseline)
+
+- Created the clean Mac implementation checkout at
+  `/Users/evren/Documents/Codex/2026-08-31/audioventura-native-macos/AudioVentura`
+  from the verified bundle
+  `/tmp/audioventura-native-base.1RbolS/audioventura-native-base-9ba72eb.bundle`.
+  The bundle SHA-256 is
+  `e3a902a5d43fb71da2e715301f58a1c542d6ce8291ed33ef30b0370386181d67` and
+  `git bundle verify` reported a complete history containing
+  `9ba72eba30cb8abffd93000588050383c7a80994`.
+- Created branch `codex/native-macos-ace-node-app` at exact base
+  `9ba72eba30cb8abffd93000588050383c7a80994`. The origin fetch URL is the
+  public GitHub repository and its push URL is intentionally disabled pending
+  owner approval. The source checkout and the stale `/Users/evren/code/audioventura`
+  reference mirror were kept separate.
+- Base preflight: `Mac16,12`, arm64, macOS 15.7.9 build 24G830, 32 GiB
+  memory, Xcode 26.3, Swift 6.2.4, uv 0.8.2, Tailscale running at one valid
+  IPv4 address, 3.7 GiB free, and no valid code-signing identity. The
+  keep-awake helper was not enabled because local configuration lacks the
+  required `nosleeptilldone` process substring; configuration was not changed.
+- Base verification: focused node pytest `25 passed` (one existing
+  Starlette deprecation warning); Ruff check passed; Ruff format check reported
+  `89 files already formatted`; mypy passed for 67 files; node lock check
+  resolved 161 packages; `git diff --check` passed. The exact baseline
+  ShellCheck command could not run because the macOS builder scripts do not
+  exist at the base and the glob was unmatched.
+
 ## 2026-08-30 (portable persistent ACE Node backend)
 
 - Added the disabled-by-default `node/ace-step-v15-xl-turbo` provider and a
