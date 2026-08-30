@@ -15,8 +15,9 @@ and hardware requirements:
 - Home Ingest downloads, probes, and prepares YouTube or uploaded media on the
   home network;
 - the private sequential MIDI mock renders deterministic corpus entries on p100;
-- Runpod or SaladCloud runs the GPU worker; reviewed fal.ai Model APIs run as
-  controller-pulled managed backends.
+- Runpod or SaladCloud runs the optional cloud GPU worker; a manually managed
+  ACE Node can run the same worker persistently on one private local or rented
+  GPU; reviewed fal.ai Model APIs run as controller-pulled managed backends.
 
 The controller does not run media tools or inference. GPU providers never
 receive YouTube, SSH, SFTP, home-network, or controller credentials.
@@ -40,6 +41,10 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
 - `mock/midi-sequential` is an opt-in, MP3-only integration backend. It ignores
   creative parameters, consumes one MIDI cursor entry per variation, and never
   replaces a real-provider default or acts as fallback.
+- `node/ace-step-v15-xl-turbo` is an opt-in persistent ACE Node backend. It is
+  disabled by default and supports exactly one Linux x86_64/NVIDIA CUDA host
+  or one Apple Silicon arm64/MPS+MLX host. See [the ACE Node runbook](docs/ACE-NODE.md)
+  before supplying a private node URL and token.
 - A ready source is published as one canonical stereo 48 kHz 192 kbps MP3
   before remix submission and is added to its project playlist exactly once.
   Completed MP3 variations are published after output verification. FLAC/WAV
@@ -71,6 +76,7 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
 src/ace_service/       controller, transfer service, persistence, providers,
                        media library, templates, and player assets
 runpod_worker/         shared ACE-Step runtime and Runpod entry point
+src/ace_node/           separately deployed persistent ACE Node service
 home_ingest/           private YouTube/media preparation service
 midi_mock_backend/     private deterministic MIDI-to-MP3 test service
 deploy/salad/          Salad worker wrapper, image, and infrastructure tool
@@ -84,7 +90,8 @@ Start with:
 - [Architecture](ARCHITECTURE.md) for boundaries and invariants.
 - [Operations](docs/OPERATIONS.md) for setup, migration, backup, and recovery.
 - [Security](docs/SECURITY.md) for exposed surfaces and secret handling.
-- [Runpod](docs/RUNPOD.md) or [SaladCloud](docs/SALAD.md) for provider details.
+- [ACE Node](docs/ACE-NODE.md) for the persistent private GPU option.
+- [Runpod](docs/RUNPOD.md) or [SaladCloud](docs/SALAD.md) for optional cloud provider details.
 - [Development log](DEVLOG.md) for chronological implementation decisions.
 
 The quality campaign contract, historical baseline, research brief, incident
@@ -96,7 +103,8 @@ records, and plans are supporting evidence. They are not setup instructions.
 - [`uv`](https://docs.astral.sh/uv/)
 - SQLite on durable local storage
 - `yt-dlp`, `ffmpeg`, and `ffprobe` on the Home Ingest host only
-- a compatible NVIDIA GPU provider for ACE-Step inference
+- a compatible NVIDIA GPU provider for cloud ACE-Step inference, or the
+  optional ACE Node environment on one supported private GPU host
 - FluidSynth, the GM soundfont, and `lameenc` only on the optional mock host
 
 Install the controller environment from the repository root:
@@ -155,6 +163,10 @@ Important groups are:
   the private key stays only in deployment-managed configuration;
 - `ACESTEP_*` and `RUNPOD_WORKER_RUNTIME_IDENTITY`: pinned model and worker
   identity recorded with jobs and outputs.
+- `ACE_NODE_BASE_URL`, `ACE_NODE_TOKEN`, and
+  `ACE_NODE_*_TIMEOUT_SECONDS`: private ACE Node controller connection. Keep
+  `node/ace-step-v15-xl-turbo` out of `INFERENCE_ENABLED_BACKENDS` until a
+  real node passes the authenticated readiness and hardware acceptance gate.
 
 Keep-warm is not an environment setting. After schema v9 migration, the
 authenticated dashboard stores the exact global value in SQLite, defaulting to
@@ -202,6 +214,11 @@ immutable corpus archive and manifest:
 cd midi_mock_backend
 uv run python -m ace_midi_mock serve
 ```
+
+Run an ACE Node only on its separately prepared target host using the launcher
+and service templates in [docs/ACE-NODE.md](docs/ACE-NODE.md). The normal
+controller `uv sync --frozen` environment does not install or import torch,
+ACE-Step, MLX, nano-vllm, media tools, or model weights.
 
 Default binds are:
 

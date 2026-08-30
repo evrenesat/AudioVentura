@@ -415,6 +415,7 @@ def job_backend(job: Job) -> BackendId:
         ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
         ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
         ProviderName.MOCK: "mock/midi-sequential",
+        ProviderName.NODE: "node/ace-step-v15-xl-turbo",
     }
     return BackendId(builtins.get(job_provider(job), f"{job_provider(job).value}/default"))
 
@@ -1309,6 +1310,7 @@ def create_job(
                 ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
                 ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
                 ProviderName.MOCK: "mock/midi-sequential",
+                ProviderName.NODE: "node/ace-step-v15-xl-turbo",
             }.get(provider, f"{provider.value}/default")
         )
     )
@@ -1316,6 +1318,7 @@ def create_job(
         ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
         ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
         ProviderName.MOCK: "mock/midi-sequential",
+        ProviderName.NODE: "node/ace-step-v15-xl-turbo",
     }.get(provider)
     if expected_builtin is not None and str(backend) != expected_builtin:
         raise ValueError("built-in provider and backend do not match")

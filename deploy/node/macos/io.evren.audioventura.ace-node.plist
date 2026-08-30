@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.evren.audioventura.ace-node</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>&lt;replace-with-clean-checkout&gt;/deploy/node/run-node.sh</string>
+        <string>&lt;replace-with-absolute-env-file&gt;</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>&lt;replace-with-clean-checkout&gt;</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>&lt;replace-with-private-log-path&gt;/ace-node.log</string>
+    <key>StandardErrorPath</key>
+    <string>&lt;replace-with-private-log-path&gt;/ace-node.error.log</string>
+</dict>
+</plist>

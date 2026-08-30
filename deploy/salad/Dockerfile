@@ -20,6 +20,7 @@ LABEL org.opencontainers.image.title="AudioVentura ACE-Step Salad worker" \
       io.audioventura.model.bundle="av-v0.1.8-bundle-2"
 
 ENV ACE_WORKER_MODEL_REPO=evrenesat/audioventura-ace-step-v0.1.8 \
+    ACE_NODE_ACCELERATOR=cuda \
     ACE_WORKER_MODEL_REVISION=88b8c7fa089446b53382c1040037492463430bed \
     ACE_WORKER_MODEL_TAG=av-v0.1.8-bundle-2 \
     ACE_WORKER_MODEL_MANIFEST_SHA256=39a8180ef6852e2dfccb9088efa7231ca7de7e4c05c8d65e3ac5a3e7a5bfd0fc \

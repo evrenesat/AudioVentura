@@ -16,6 +16,7 @@ class ProviderName(StrEnum):
     SALAD = "salad"
     FAL = "fal"
     MOCK = "mock"
+    NODE = "node"
 
 
 class BackendId(str):
@@ -222,6 +223,7 @@ class ProviderJobRef:
                 ProviderName.RUNPOD: "runpod/ace-step-v15-xl-turbo",
                 ProviderName.SALAD: "salad/ace-step-v15-xl-turbo",
                 ProviderName.MOCK: "mock/midi-sequential",
+                ProviderName.NODE: "node/ace-step-v15-xl-turbo",
             }
             object.__setattr__(
                 self,

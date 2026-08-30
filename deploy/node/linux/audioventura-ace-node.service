@@ -1,0 +1,22 @@
+[Unit]
+Description=AudioVentura persistent ACE Node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=<replace-with-node-user>
+Group=<replace-with-node-group>
+WorkingDirectory=<replace-with-clean-checkout>
+EnvironmentFile=/etc/audioventura/ace-node.env
+ExecStart=<replace-with-clean-checkout>/deploy/node/run-node.sh /etc/audioventura/ace-node.env
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=<replace-with-node-data-root> <replace-with-huggingface-cache>
+
+[Install]
+WantedBy=multi-user.target

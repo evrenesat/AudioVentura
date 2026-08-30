@@ -31,6 +31,7 @@ from ace_service.providers.base import BackendOperation, ProviderName
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
 from ace_service.providers.mock import MockProvider
+from ace_service.providers.node import NodeProvider
 from ace_service.providers.registry import BackendRegistry
 from ace_service.providers.runpod import RunpodProvider
 from ace_service.providers.salad import SaladProvider
@@ -230,6 +231,18 @@ def create_app(
                     read_timeout=resolved_settings.mock_read_timeout_seconds,
                     write_timeout=resolved_settings.mock_write_timeout_seconds,
                     pool_timeout=resolved_settings.mock_pool_timeout_seconds,
+                )
+            )
+        if "node/ace-step-v15-xl-turbo" in configured:
+            resolved_settings.validate_node_runtime()
+            providers.append(
+                NodeProvider(
+                    resolved_settings.ace_node_base_url,
+                    resolved_settings.ace_node_token,
+                    connect_timeout=resolved_settings.ace_node_connect_timeout_seconds,
+                    read_timeout=resolved_settings.ace_node_read_timeout_seconds,
+                    write_timeout=resolved_settings.ace_node_write_timeout_seconds,
+                    pool_timeout=resolved_settings.ace_node_pool_timeout_seconds,
                 )
             )
         configured_provider_names = {provider.capabilities.name for provider in providers}

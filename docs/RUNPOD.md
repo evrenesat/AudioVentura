@@ -4,6 +4,12 @@ Runpod is one implementation of AudioVentura's inference-provider contract.
 `runpod_worker/` contains the isolated ACE-Step runtime and Runpod Serverless
 entry point.
 
+Runpod remains an optional scale-to-zero cloud adapter and the recovery path
+for persisted Runpod jobs. It is not the default interactive path when a
+private persistent ACE Node is available; see [ACE Node](ACE-NODE.md) for the
+separately managed local/rented GPU option. No Runpod endpoint or container is
+changed by ACE Node implementation work.
+
 ## Worker image
 
 Build the amd64 image from the repository root and push an immutable tag:

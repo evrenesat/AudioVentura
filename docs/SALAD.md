@@ -4,6 +4,12 @@ SaladCloud is the first alternate inference backend. The controller submits
 schema-2 metadata to a Salad Job Queue. A scale-to-zero container group runs
 the same ACE-Step handler used by Runpod.
 
+SaladCloud remains an optional scale-to-zero cloud adapter and the recovery
+path for persisted Salad jobs. It is not the default interactive path when a
+private persistent ACE Node is available; see [ACE Node](ACE-NODE.md) for the
+separately managed local/rented GPU option. No Salad resource is provisioned,
+mutated, or deleted by ACE Node implementation work.
+
 ## Current deployment status
 
 The image, queue, and container group are deployed. The earlier conclusion

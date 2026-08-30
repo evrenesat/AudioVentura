@@ -36,6 +36,23 @@ Private browser
                         +-----------------------------+
 ```
 
+One optional persistent ACE Node is a separate private process, either on a
+local Apple Silicon Mac or on a manually started Linux/NVIDIA rental:
+
+```text
+Controller/UI + Transfer :8000/:8001
+          | bearer-authenticated metadata + signed capabilities
+          v
+  ACE Node :8210 (private loopback, LAN, or exact Tailscale host)
+    - durable serial SQLite job state
+    - background model initialization
+    - shared runpod_worker ACE-Step handler
+    - CUDA on Linux x86_64 OR MPS/MLX on macOS arm64
+          | raw bytes only through player.evren.io signed transfer
+          v
+       controller output storage
+```
+
 The beta and production Home Ingest and sequential mock instances run on the
 private p100 home host, outside the Hetzner controller process:
 
@@ -67,6 +84,12 @@ The boundaries are deliberate:
 - GPU workers receive generation metadata and short-lived transfer URLs. They
   do not receive controller, YouTube, SSH, SFTP, or home-network credentials.
 - Audio bytes never travel in a provider API request or result body.
+- ACE Node is provider-neutral and disabled by default. It accepts work only
+  while its exact pinned runtime is ready, executes one job at a time, and
+  persists only identity, bounded terminal metadata, and safe error codes.
+  Full worker input, active capabilities, creative text, and audio bytes are
+  memory-only; queued/running work becomes `failed(worker_restarted)` after a
+  process restart rather than being resubmitted.
 
 ## Components
 
@@ -190,6 +213,18 @@ For each request the worker:
 
 MP3 output uses in-process LAME. The GPU image does not need `ffmpeg` or
 `ffprobe` for generated output.
+
+### ACE Node
+
+`src/ace_node/` is the separately deployed persistent wrapper around the same
+strict handler. `NodeProvider` speaks only the bounded bearer-authenticated
+HTTP contract and stores one external node job ID in the controller. The node
+API has authenticated health, idempotent submit, status, result, and pending
+cancel routes; its SQLite schema intentionally has no payload, capability URL,
+audio, prompt, or lyrics columns. Runtime selection fails closed unless the
+host is exactly Linux x86_64 with one CUDA GPU or macOS arm64 with available
+MPS and the pinned MLX path. See [the ACE Node runbook](docs/ACE-NODE.md) for
+host preparation and the hardware acceptance gate.
 
 ## Job model
 

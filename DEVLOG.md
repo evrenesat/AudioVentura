@@ -1,5 +1,19 @@
 # Development Log
 
+## 2026-08-30 (portable persistent ACE Node backend)
+
+- Added the disabled-by-default `node/ace-step-v15-xl-turbo` provider and a
+  separately deployed bearer-authenticated ACE Node service. The node reuses
+  the strict schema-2 `runpod_worker` handler, persists only bounded job
+  identity/result metadata in SQLite, serializes one job, and marks interrupted
+  work `worker_restarted` without automatic duplicate submission.
+- Added fail-closed platform selection for exactly one Linux x86_64 CUDA GPU or
+  Apple Silicon arm64 MPS/MLX, the exact ACE-Step commit and model bundle
+  receipt, opt-in node dependencies, deterministic no-GPU controller/provider/
+  node integration coverage, and Linux/macOS operator templates. RunPod and
+  Salad adapters remain available for recovery; no cloud provider or production
+  deployment was changed.
+
 ## 2026-08-30 (YouTube EJS runtime and durable source retry)
 
 - Updated Home Ingest to the current `yt-dlp[default]` stack so the companion

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import inspect
 import json
 import logging
 import os
+import platform
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,6 +52,178 @@ class WorkerInitializationError(RuntimeError):
     """Raised when the worker cannot initialize its pinned model set."""
 
 
+@dataclass(frozen=True, slots=True)
+class AcceleratorConfig:
+    """Immutable accelerator choices made before loading ACE-Step.
+
+    The worker intentionally has no implicit CPU fallback.  Keeping this
+    decision in a small value object makes the cloud CUDA and Apple Silicon
+    paths inspectable without importing the heavyweight runtime in the
+    controller process.
+    """
+
+    accelerator: str
+    device: str
+    lm_backend: str
+    use_mlx_dit: bool
+    compile_model: bool
+    offload_to_cpu: bool
+    offload_dit_to_cpu: bool
+    quantization: bool
+    memory_bytes: int
+    gpu_name: str
+
+    @property
+    def torch_compile(self) -> bool:
+        """Compatibility spelling used by node/runtime callers."""
+
+        return self.compile_model
+
+
+def _torch_module(torch_module: Any | None) -> Any:
+    if torch_module is not None:
+        return torch_module
+    try:
+        return importlib.import_module("torch")
+    except ImportError as exc:
+        raise WorkerInitializationError("pinned PyTorch runtime is not installed") from exc
+
+
+def _cuda_memory_bytes(torch_module: Any) -> int:
+    try:
+        properties = torch_module.cuda.get_device_properties(0)
+        value = getattr(properties, "total_memory", None)
+        if isinstance(value, int) and value > 0:
+            return value
+    except Exception:
+        pass
+    try:
+        available, total = torch_module.cuda.mem_get_info(0)
+        del available
+        if isinstance(total, int) and total > 0:
+            return total
+    except Exception:
+        pass
+    return 0
+
+
+def _mps_memory_bytes(torch_module: Any) -> int:
+    mps = getattr(torch_module, "mps", None)
+    for name in ("recommended_max_memory", "driver_allocated_memory", "current_allocated_memory"):
+        try:
+            value = getattr(mps, name)()
+        except Exception:
+            continue
+        if isinstance(value, int) and value > 0:
+            return value
+    return 0
+
+
+def select_accelerator(
+    accelerator: str | None = None,
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+    torch_module: Any | None = None,
+) -> AcceleratorConfig:
+    """Select exactly one supported CUDA or Apple Silicon MPS runtime.
+
+    ``torch`` is imported only when this function is called, which keeps the
+    normal controller environment free of GPU/runtime dependencies.
+    """
+
+    requested = (accelerator or os.environ.get("ACE_NODE_ACCELERATOR", "auto")).strip().lower()
+    if requested not in {"auto", "cuda", "mps"}:
+        raise WorkerInitializationError("ACE_NODE_ACCELERATOR must be auto, cuda, or mps")
+    detected_system = system or platform.system()
+    detected_machine = (machine or platform.machine()).lower()
+    if detected_system == "Linux" and detected_machine in {"x86_64", "amd64"}:
+        if requested == "mps":
+            raise WorkerInitializationError("MPS is supported only on macOS arm64")
+        torch = _torch_module(torch_module)
+        cuda = getattr(torch, "cuda", None)
+        if cuda is None or not bool(cuda.is_available()):
+            raise WorkerInitializationError("CUDA is required; refusing CPU inference")
+        try:
+            device_count = int(cuda.device_count())
+        except Exception as exc:
+            raise WorkerInitializationError("CUDA device count could not be measured") from exc
+        if device_count != 1:
+            raise WorkerInitializationError("exactly one CUDA GPU is required")
+        try:
+            gpu_name = str(cuda.get_device_name(0))
+        except Exception:
+            gpu_name = "NVIDIA CUDA"
+        return AcceleratorConfig(
+            accelerator="cuda",
+            device="cuda",
+            lm_backend="vllm",
+            use_mlx_dit=False,
+            compile_model=False,
+            offload_to_cpu=False,
+            offload_dit_to_cpu=False,
+            quantization=False,
+            memory_bytes=_cuda_memory_bytes(torch),
+            gpu_name=gpu_name,
+        )
+    if detected_system == "Darwin" and detected_machine in {"arm64", "aarch64"}:
+        if requested == "cuda":
+            raise WorkerInitializationError("CUDA is supported only on Linux x86_64")
+        torch = _torch_module(torch_module)
+        backends = getattr(torch, "backends", None)
+        mps_backend = getattr(backends, "mps", None)
+        if mps_backend is None or not bool(mps_backend.is_available()):
+            raise WorkerInitializationError(
+                "Apple Silicon MPS is unavailable; refusing CPU inference"
+            )
+        return AcceleratorConfig(
+            accelerator="mps",
+            device="mps",
+            lm_backend="mlx",
+            use_mlx_dit=True,
+            compile_model=False,
+            offload_to_cpu=False,
+            offload_dit_to_cpu=False,
+            quantization=False,
+            memory_bytes=_mps_memory_bytes(torch),
+            gpu_name="Apple Silicon MPS",
+        )
+    raise WorkerInitializationError(
+        "unsupported ACE Node platform; require Linux x86_64 or macOS arm64"
+    )
+
+
+# Descriptive alias for callers that prefer the longer name.
+AcceleratorConfiguration = AcceleratorConfig
+resolve_accelerator = select_accelerator
+
+
+def compute_local_runtime_receipt(
+    application_revision: str, lock_path: str | Path = "uv.lock"
+) -> str:
+    """Derive an immutable node deployment receipt from commit and lockfile."""
+
+    if not isinstance(application_revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", application_revision
+    ):
+        raise WorkerInitializationError("node application revision must be an exact commit SHA")
+    path = Path(lock_path)
+    if path.is_symlink() or not path.is_file():
+        raise WorkerInitializationError("node runtime lockfile is missing")
+    digest = hashlib.sha256()
+    digest.update(b"audioventura-ace-node-runtime-receipt-v1\0")
+    digest.update(application_revision.encode("ascii"))
+    digest.update(b"\0")
+    try:
+        digest.update(path.read_bytes())
+    except OSError as exc:
+        raise WorkerInitializationError("node runtime lockfile is unreadable") from exc
+    return "sha256:" + digest.hexdigest()
+
+
+runtime_receipt = compute_local_runtime_receipt
+
+
 class TransferClientLike(Protocol):
     """Minimal transfer surface needed by the handler and test doubles."""
 
@@ -89,6 +263,7 @@ class WorkerRuntime:
     worker_image_digest: str = field(
         default_factory=lambda: os.environ.get("ACE_WORKER_IMAGE_DIGEST", "")
     )
+    accelerator_config: AcceleratorConfig | None = None
     transfer_client_factory: Callable[[], TransferClientLike] = field(default=TransferClient)
 
     def __post_init__(self) -> None:
@@ -98,6 +273,23 @@ class WorkerRuntime:
         validate_model_revision(self.model_revision)
         validate_model_tag(self.model_tag)
         validate_model_manifest_sha256(self.model_manifest_sha256)
+        if self.accelerator_config is None:
+            object.__setattr__(
+                self,
+                "accelerator_config",
+                AcceleratorConfig(
+                    accelerator="cuda",
+                    device="cuda",
+                    lm_backend="vllm",
+                    use_mlx_dit=False,
+                    compile_model=False,
+                    offload_to_cpu=False,
+                    offload_dit_to_cpu=False,
+                    quantization=False,
+                    memory_bytes=self.gpu_vram_bytes,
+                    gpu_name=self.gpu_name,
+                ),
+            )
 
 
 _REQUIRED_GENERATION_PARAMS = frozenset(
@@ -272,26 +464,27 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
     """Initialize ACE-Step once before Runpod starts accepting jobs."""
 
     image_digest = validate_worker_image_digest(os.environ.get("ACE_WORKER_IMAGE_DIGEST"))
-    import torch  # type: ignore[import-not-found]
-
-    if not torch.cuda.is_available():
-        raise WorkerInitializationError("CUDA is required; refusing CPU inference")
-    device_name = str(torch.cuda.get_device_name(0))
-    device_properties = torch.cuda.get_device_properties(0)
-    vram_bytes = int(device_properties.total_memory)
-    LOGGER.info("CUDA worker GPU=%s vram_bytes=%d", device_name, vram_bytes)
+    accelerator = select_accelerator()
+    LOGGER.info(
+        "worker accelerator=%s device=%s gpu=%s memory_bytes=%d",
+        accelerator.accelerator,
+        accelerator.device,
+        accelerator.gpu_name,
+        accelerator.memory_bytes,
+    )
 
     paths = resolve_checkpoint_paths(cache_root)
     os.environ["ACESTEP_CHECKPOINTS_DIR"] = str(paths.root)
 
     try:
-        from acestep.handler import AceStepHandler  # type: ignore[import-not-found]
-        from acestep.inference import (  # type: ignore[import-not-found]
-            GenerationConfig,
-            GenerationParams,
-            generate_music,
-        )
-        from acestep.llm_inference import LLMHandler  # type: ignore[import-not-found]
+        handler_module = importlib.import_module("acestep.handler")
+        inference_module = importlib.import_module("acestep.inference")
+        llm_module = importlib.import_module("acestep.llm_inference")
+        AceStepHandler = handler_module.AceStepHandler
+        GenerationConfig = inference_module.GenerationConfig
+        GenerationParams = inference_module.GenerationParams
+        generate_music = inference_module.generate_music
+        LLMHandler = llm_module.LLMHandler
     except ImportError as exc:
         raise WorkerInitializationError("pinned ACE-Step runtime is not installed") from exc
 
@@ -301,12 +494,12 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
     dit_status, dit_ok = dit_handler.initialize_service(
         project_root=str(paths.root.parent),
         config_path=DIT_MODEL,
-        device="cuda",
+        device=accelerator.device,
         use_flash_attention=False,
-        compile_model=False,
-        offload_to_cpu=False,
-        offload_dit_to_cpu=False,
-        use_mlx_dit=False,
+        compile_model=accelerator.compile_model,
+        offload_to_cpu=accelerator.offload_to_cpu,
+        offload_dit_to_cpu=accelerator.offload_dit_to_cpu,
+        use_mlx_dit=accelerator.use_mlx_dit,
     )
     if not dit_ok:
         raise WorkerInitializationError("ACE-Step DiT initialization failed")
@@ -316,9 +509,9 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
     llm_status, llm_ok = llm_handler.initialize(
         checkpoint_dir=str(paths.root),
         lm_model_path=LM_MODEL,
-        backend="vllm",
-        device="cuda",
-        offload_to_cpu=False,
+        backend=accelerator.lm_backend,
+        device=accelerator.device,
+        offload_to_cpu=accelerator.offload_to_cpu,
     )
     if not llm_ok:
         raise WorkerInitializationError("ACE-Step 5Hz LM initialization failed")
@@ -331,8 +524,8 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
         generation_params_type=GenerationParams,
         generation_config_type=GenerationConfig,
         generate_music=generate_music,
-        gpu_name=device_name,
-        gpu_vram_bytes=vram_bytes,
+        gpu_name=accelerator.gpu_name,
+        gpu_vram_bytes=accelerator.memory_bytes,
         model_repo=validate_model_repo(os.environ.get("ACE_WORKER_MODEL_REPO")),
         model_revision=validate_model_revision(os.environ.get("ACE_WORKER_MODEL_REVISION")),
         model_tag=validate_model_tag(os.environ.get("ACE_WORKER_MODEL_TAG")),
@@ -342,6 +535,7 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
         ace_tag=os.environ.get("ACE_STEP_TAG", "v0.1.8"),
         ace_commit=os.environ.get("ACE_STEP_COMMIT", ""),
         worker_image_digest=image_digest,
+        accelerator_config=accelerator,
     )
 
 

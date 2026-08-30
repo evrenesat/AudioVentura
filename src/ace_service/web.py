@@ -575,6 +575,7 @@ def _backend_choices(
                 "runpod/ace-step-v15-xl-turbo": "Runpod · ACE-Step 1.5 XL Turbo",
                 "salad/ace-step-v15-xl-turbo": "Salad · ACE-Step 1.5 XL Turbo",
                 "mock/midi-sequential": "Mock · Sequential MIDI → MP3",
+                "node/ace-step-v15-xl-turbo": "ACE Node · ACE-Step 1.5 XL Turbo",
             }.get(backend_id, backend_id)
             actual_operation = (
                 capabilities.operation.value

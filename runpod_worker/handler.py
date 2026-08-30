@@ -495,6 +495,9 @@ def _result_metadata(
             "profile_id": request.profile_id,
             "dit_model": runtime.model_name,
             "lm_model": runtime.lm_model_name,
+            "runtime_kind": runtime.accelerator_config.accelerator
+            if runtime.accelerator_config is not None
+            else "cuda",
             "ace_tag": runtime.ace_tag,
             "ace_commit": runtime.ace_commit,
             "image_digest": image_digest,

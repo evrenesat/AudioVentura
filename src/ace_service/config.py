@@ -276,6 +276,44 @@ class ServiceSettings(BaseSettings):
         validation_alias=AliasChoices("MOCK_POOL_TIMEOUT_SECONDS", "mock_pool_timeout_seconds"),
         gt=0,
     )
+    ace_node_base_url: str = Field(
+        default="http://127.0.0.1:8210",
+        validation_alias=AliasChoices("ACE_NODE_BASE_URL", "ace_node_base_url"),
+        min_length=1,
+    )
+    ace_node_token: str = Field(
+        default="change-me",
+        validation_alias=AliasChoices("ACE_NODE_TOKEN", "ace_node_token"),
+        min_length=1,
+    )
+    ace_node_connect_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "ACE_NODE_CONNECT_TIMEOUT_SECONDS", "ace_node_connect_timeout_seconds"
+        ),
+        gt=0,
+    )
+    ace_node_read_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "ACE_NODE_READ_TIMEOUT_SECONDS", "ace_node_read_timeout_seconds"
+        ),
+        gt=0,
+    )
+    ace_node_write_timeout_seconds: float = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "ACE_NODE_WRITE_TIMEOUT_SECONDS", "ace_node_write_timeout_seconds"
+        ),
+        gt=0,
+    )
+    ace_node_pool_timeout_seconds: float = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "ACE_NODE_POOL_TIMEOUT_SECONDS", "ace_node_pool_timeout_seconds"
+        ),
+        gt=0,
+    )
     inference_enabled_backends: str = Field(
         default="runpod/ace-step-v15-xl-turbo,salad/ace-step-v15-xl-turbo",
         validation_alias=AliasChoices("INFERENCE_ENABLED_BACKENDS", "inference_enabled_backends"),
@@ -588,8 +626,8 @@ class ServiceSettings(BaseSettings):
     @classmethod
     def validate_inference_provider(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"runpod", "salad", "mock"}:
-            raise ValueError("inference provider must be runpod, salad, or mock")
+        if normalized not in {"runpod", "salad", "mock", "node"}:
+            raise ValueError("inference provider must be runpod, salad, mock, or node")
         return normalized
 
     @field_validator("inference_enabled_backends")
@@ -770,6 +808,33 @@ class ServiceSettings(BaseSettings):
                 raise ValueError("mock base URL must resolve to a private p100 endpoint")
         return value.rstrip("/")
 
+    @field_validator("ace_node_base_url")
+    @classmethod
+    def validate_ace_node_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("ACE_NODE_BASE_URL must be a private HTTP(S) endpoint")
+        hostname = parsed.hostname.rstrip(".").lower()
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            if hostname != "localhost" and not hostname.endswith(".ts.net"):
+                raise ValueError(
+                    "ACE_NODE_BASE_URL must be private or an exact .ts.net host"
+                ) from None
+        else:
+            if address.is_global:
+                raise ValueError("ACE_NODE_BASE_URL must not be globally routable")
+        return value.rstrip("/")
+
     @model_validator(mode="after")
     def validate_runtime_values(self) -> ServiceSettings:
         for field_name in _CREDENTIAL_FIELDS:
@@ -786,7 +851,7 @@ class ServiceSettings(BaseSettings):
         )
         if (
             not explicit_backend_selection
-            and self.inference_provider in {"runpod", "salad", "mock"}
+            and self.inference_provider in {"runpod", "salad", "mock", "node"}
             and self.inference_enabled_backends
             == "runpod/ace-step-v15-xl-turbo,salad/ace-step-v15-xl-turbo"
             and self.default_original_backend == "runpod/ace-step-v15-xl-turbo"
@@ -801,7 +866,7 @@ class ServiceSettings(BaseSettings):
             self.default_original_backend = enabled[0]
             self.default_cover_backend = enabled[0]
         elif (
-            self.inference_provider in {"runpod", "salad", "mock"}
+            self.inference_provider in {"runpod", "salad", "mock", "node"}
             and len(enabled) == 1
             and enabled[0].split("/", 1)[0] != self.inference_provider
             and enabled[0]
@@ -839,6 +904,9 @@ class ServiceSettings(BaseSettings):
 
         if any(item.startswith("mock/") for item in enabled):
             self.validate_mock_runtime()
+
+        if any(item.startswith("node/") for item in enabled):
+            self.validate_node_runtime()
 
         if any(item.startswith("fal/") for item in enabled):
             if self.fal_key is None or self.fal_key.lower() in _PLACEHOLDERS:
@@ -921,6 +989,14 @@ class ServiceSettings(BaseSettings):
         ):
             raise ValueError("mock_token is required when a mock backend is enabled")
         self.mock_base_url = self.validate_mock_base_url(self.mock_base_url)
+
+    def validate_node_runtime(self) -> None:
+        """Require private node credentials only when the backend is enabled."""
+
+        token = self.ace_node_token.strip().lower()
+        if token in _PLACEHOLDERS or token.endswith(".example.invalid") or not token:
+            raise ValueError("ace_node_token is required when the ACE Node backend is enabled")
+        self.ace_node_base_url = self.validate_ace_node_base_url(self.ace_node_base_url)
 
     @property
     def paths(self) -> DataPaths:
