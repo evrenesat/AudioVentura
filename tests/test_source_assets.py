@@ -42,6 +42,7 @@ from ace_service.repository import (
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest
 from ace_service.source_assets import (
+    SourceIngestCoordinator,
     _publish_ready_derivative,
     publish_ready_source,
     stage_source_job,
@@ -181,6 +182,54 @@ def test_source_preference_rejects_malformed_or_oversized_backend_ids(session) -
         rights_confirmation_at=utc_now(),
     )
     assert historical.preferred_remix_backend is None
+
+
+def test_source_coordinator_periodic_poll_selects_due_retry_only(session, settings) -> None:
+    future_project = create_project(session, job_type=JobType.COVER, title="Future retry")
+    future = create_source_asset(
+        session,
+        project=future_project,
+        origin=SourceAssetOrigin.YOUTUBE,
+        display_title="Future source",
+        youtube_url="https://www.youtube.com/watch?v=future1",
+        youtube_video_id="future1",
+        rights_confirmation_at=utc_now(),
+    )
+    future.status = SourceAssetStatus.FAILED
+    future.error_code = "youtube_download_failed"
+    future.user_facing_error = "YouTube audio could not be downloaded"
+    future.next_attempt_at = utc_now() + timedelta(minutes=5)
+
+    due_project = create_project(session, job_type=JobType.COVER, title="Due retry")
+    due = create_source_asset(
+        session,
+        project=due_project,
+        origin=SourceAssetOrigin.YOUTUBE,
+        display_title="Due source",
+        youtube_url="https://www.youtube.com/watch?v=due1234",
+        youtube_video_id="due1234",
+        rights_confirmation_at=utc_now(),
+    )
+    due.status = SourceAssetStatus.FAILED
+    due.error_code = "youtube_download_failed"
+    due.user_facing_error = "YouTube audio could not be downloaded"
+    due.next_attempt_at = utc_now() - timedelta(seconds=1)
+    session.commit()
+
+    coordinator = SourceIngestCoordinator(
+        settings,
+        create_session_factory(session.get_bind()),
+        object(),
+    )
+    selected: list[str] = []
+
+    async def record_source(source_asset_id: str) -> None:
+        selected.append(source_asset_id)
+
+    coordinator._process_source = record_source  # type: ignore[method-assign]
+
+    assert asyncio.run(coordinator.run_once()) is True
+    assert selected == [due.id]
 
 
 def test_source_range_is_frozen_and_active_source_delete_is_blocked(session, settings) -> None:

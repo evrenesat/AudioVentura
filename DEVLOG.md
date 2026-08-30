@@ -1,5 +1,18 @@
 # Development Log
 
+## 2026-08-30 (YouTube EJS runtime and durable source retry)
+
+- Updated Home Ingest to the current `yt-dlp[default]` stack so the companion
+  EJS challenge package is locked with the downloader. The paired beta deploy
+  provides checksum-pinned Deno from a beta-only runtime path; production is
+  not changed.
+- Fixed the source coordinator's periodic poll to select failed source rows
+  only when their retry deadline is due. Transient YouTube failures no longer
+  remain stuck until a controller restart.
+- The exact caller-approved YouTube source reproduced the old HTTP 403 and
+  downloaded successfully with `yt-dlp 2026.08.19`, `yt-dlp-ejs 0.8.0`, and
+  Deno 2.9.6. Paid beta remix evidence is recorded after deployment.
+
 ## 2026-08-30 (source backend selection and original navigation)
 
 - Added the required reviewed source-capable backend selector to initial

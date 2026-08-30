@@ -238,9 +238,12 @@ uv sync --frozen
 uv run python -m ace_home_ingest
 ```
 
-The host needs current `yt-dlp`, `ffmpeg`, and `ffprobe` binaries. Configure
-the values in `home_ingest/.env.example`, including the bearer token and the
-restricted SFTP identity.
+The host needs the locked `yt-dlp[default]` package, a supported JavaScript
+runtime, and current `ffmpeg` and `ffprobe` binaries. The managed beta deploy
+uses checksum-pinned Deno from its beta-only install tree so it cannot change
+the production Home Ingest runtime. Keep `yt-dlp`, its EJS package, and Deno
+current together. Configure the values in `home_ingest/.env.example`,
+including the bearer token and the restricted SFTP identity.
 
 The SFTP account should:
 

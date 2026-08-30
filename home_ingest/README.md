@@ -21,6 +21,11 @@ ingest has no generation-duration ceiling; byte, command, and network
 timeouts remain enforced. Temporary directories and partial files are removed
 on success, failure, timeout, and cancellation.
 
+YouTube extraction requires the locked `yt-dlp[default]` dependency and a
+supported JavaScript runtime. The managed beta deployment installs a
+checksum-pinned Deno binary in the beta-only Home Ingest tree; keep the EJS
+package and Deno version current together with `yt-dlp`.
+
 `/v1/prepare-youtube-cover` and the restricted SFTP uploader remain only for
 recovery of persisted legacy jobs. Keep this service on localhost or an
 explicitly private Tailscale interface, keep tokens and URLs out of logs, and

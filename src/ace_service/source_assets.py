@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from ace_service.config import ServiceSettings
 from ace_service.db import SessionFactory
@@ -749,7 +749,16 @@ class SourceIngestCoordinator:
             source = session.scalar(
                 select(SourceAsset)
                 .where(
-                    SourceAsset.status.in_((SourceAssetStatus.QUEUED, SourceAssetStatus.UPLOADED))
+                    or_(
+                        SourceAsset.status.in_(
+                            (SourceAssetStatus.QUEUED, SourceAssetStatus.UPLOADED)
+                        ),
+                        and_(
+                            SourceAsset.status == SourceAssetStatus.FAILED,
+                            SourceAsset.next_attempt_at.is_not(None),
+                            SourceAsset.next_attempt_at <= utc_now(),
+                        ),
+                    )
                 )
                 .order_by(SourceAsset.created_at, SourceAsset.id)
             )
