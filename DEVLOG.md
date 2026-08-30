@@ -11,10 +11,16 @@
   `source_assets.preferred_remix_backend` column. Historical sources remain
   `NULL`; no provider is called during source preparation and no paid job is
   submitted by this change.
-- Verification so far: focused migration/source/web tests and static checks
-  pass, including exact source inventory, stale-choice fallback, rollback, and
-  `/beta` navigation coverage. Beta revision: pending deployment. Acceptance:
-  local checks complete; manual beta acceptance pending.
+- Verification: the focused migration/source/web tests and static checks pass,
+  including exact source inventory, stale-choice fallback, rollback, and
+  `/beta` navigation coverage. Beta product revision
+  `2933135c7b3b88eb23d0fe38d520cc2e2432bd4e` is deployed through evreniops
+  pin commit `5f7836f232c1a478ce3cfb9ebaa360c5894c4123`; the beta database is
+  exact schema v12 with a retained rollback snapshot. Live checks passed for
+  Chromium/Firefox navigation and source-form inventory, bounded missing-backend
+  rejection, and a non-paid upload fixture through preparation and final-form
+  preference reload. No remix generation was submitted. Manual beta acceptance
+  remains pending; production is unchanged.
 
 ## 2026-08-29 (offline review fixes)
 
