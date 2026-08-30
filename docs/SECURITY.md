@@ -67,6 +67,31 @@ shell history, provider responses, and copied plan evidence. Do not print
 credentials in deployment commands when a protected environment variable or
 file descriptor is available.
 
+## Native macOS ACE Node
+
+The menu-bar app stores separate node and supervisor bearer tokens as generic
+passwords in the login Keychain. It never puts either token in a plist, app
+bundle, model directory, log, or release manifest. The Hugging Face token is
+accepted only by the nonpersisted setup `SecureField`, passed to the bounded
+preparation child, and cleared after the attempt; model preparation emits only
+rate-limited safe progress fields.
+
+The app launches the bundled Python worker with an explicit environment and
+working directory, without inheriting `PATH` or shell startup files. It binds
+only to the one discovered Tailscale `100.64.0.0/10` IPv4 address and uses
+fixed executable paths plus a five-second, 1 MiB-bounded `status --json`
+probe. Shutdown and stale-process recovery require the matching PID,
+executable path, start identity, and application revision; a process name or
+port is never enough.
+
+Models remain outside the app bundle under private, backup-excluded
+Application Support paths. Bundle verification rejects checkout paths,
+`.git`, model files, environment files, token-shaped files, x86 binaries, and
+escaping symlinks. Development artifacts are ad-hoc signed; releases require
+inside-out Developer ID hardened-runtime signing, secure timestamps,
+notarization, stapling, Gatekeeper assessment, and a checksum. No App Sandbox
+or runtime exception entitlement is added speculatively.
+
 ## Transfer capabilities
 
 Capability tokens are random 256-bit URL-safe values. SQLite stores only their

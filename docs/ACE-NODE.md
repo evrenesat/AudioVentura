@@ -25,6 +25,7 @@ ACE_NODE_RUNTIME_LOCK_PATH=/opt/audioventura/deploy/node/uv.lock
 ACE_NODE_LISTEN_HOST=127.0.0.1
 ACE_NODE_LISTEN_PORT=8210
 ACE_NODE_TOKEN=<long-random-bearer-token>
+ACE_NODE_SUPERVISOR_TOKEN=<different-long-random-drain-token>
 ACE_NODE_DATA_ROOT=/var/lib/audioventura/ace-node
 ACE_NODE_ACCELERATOR=auto
 ACE_TRANSFER_ALLOWED_HOST=player.evren.io
@@ -159,6 +160,71 @@ The commands above are operator instructions only; this repository change
 does not install or control launchd. Tailscale binding and rollback follow the
 Linux rules. A Mac may be unavailable or asleep, so controller readiness and
 job timeout settings must reflect the owner's operating schedule.
+
+### Native menu-bar app
+
+The preferred Apple Silicon path is the native app under
+`deploy/node/macos/`. It is an arm64-only menu-bar utility with product name
+`AudioVentura ACE Node`, bundle ID `io.evren.audioventura.ace-node`, executable
+`AudioVenturaACEWorker`, and minimum macOS 14.0. A development build is
+ad-hoc signed and local to this Mac. A downloadable release requires the
+Developer ID, notarization, and Gatekeeper checks described below.
+
+Build from a clean committed checkout:
+
+```text
+cd deploy/node/macos
+./build-runtime.sh --relocatable       # requires at least 30 GiB free
+./build-app.sh --release
+./build-dmg.sh --release
+./notarize-dmg.sh \
+  ../../../dist/macos/AudioVentura-ACE-Node-<version>-arm64.dmg
+./verify-release.sh \
+  ../../../dist/macos/AudioVentura-ACE-Node-<version>-arm64.dmg
+```
+
+For a source-only local smoke build, use `./build-app.sh --development`; it
+does not download the runtime. Install a completed notarized DMG by dragging
+`AudioVentura ACE Node.app` to `/Applications`. The DMG contains no model
+weights. The first launch opens Setup when no validated receipt exists. Enter
+the read-only Hugging Face token in the SecureField, keep at least 55 GiB free
+(70 GiB recommended), and choose Download and verify. Preparation is resumable
+and writes a setup receipt only after the pinned 29-file, 25,253,680,505-byte
+manifest validates. The token is cleared and never written to disk.
+
+The menu item and popover show `Setup required`, initialization phases,
+`Ready`, running/queued counts, `Draining`, `Remote unavailable`, or `Failed`.
+`Restart Worker (drain)` waits for the queue to empty before replacing the
+child. `Force Restart` is explicit and records queued/running work as
+`worker_restarted` through normal worker recovery; it is not an automatic
+resubmission. Launch at Login is opt-in and uses `SMAppService.mainApp`.
+
+The app derives these private paths with `FileManager`:
+
+```text
+~/Library/Application Support/AudioVentura/ACE Node/node.sqlite3
+~/Library/Application Support/AudioVentura/ACE Node/state/{setup,worker}.json
+~/Library/Application Support/AudioVentura/ACE Node/models/<revision>/
+~/Library/Caches/AudioVentura/ACE Node/model-download/
+~/Library/Logs/AudioVentura/ACE Node/ace-node.log
+```
+
+Tailscale discovery uses only the fixed executable locations in the source,
+requires `TAILSCALE_BE_CLI=1`, and accepts exactly one `100.64.0.0/10` IPv4
+address. The worker never falls back to loopback or a wildcard bind. If
+Tailscale is temporarily unavailable after launch, the app keeps the worker
+resident and shows Remote unavailable; a changed valid address is adopted only
+after the old worker drains successfully. Logs rotate at 10 MiB with five
+retained files and private permissions.
+
+For an update, finish or stop current work, install the newer app, and let it
+download into a new versioned model directory. The old validated directory is
+kept until the new one is ready; remove older versions only through the
+explicit Setup action. For rollback, disable the node backend in beta, stop
+the worker, reinstall the prior app, and retain the node database and model
+directories until controller jobs and output evidence are terminal. Uninstall
+removes only `/Applications/AudioVentura ACE Node.app`; state and models are
+separate explicit cleanup actions.
 
 ## Acceptance gate
 

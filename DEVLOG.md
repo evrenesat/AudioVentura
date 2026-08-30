@@ -48,6 +48,32 @@
   check resolved 161 packages; `shellcheck deploy/node/run-node.sh` and
   `git diff --check` passed.
 
+## 2026-08-31 (native macOS menu-bar ACE Node supervisor)
+
+- Added the arm64-only Swift `MenuBarExtra` app with Keychain-held node and
+  supervisor tokens, authenticated health/drain polling, Tailscale address
+  discovery, owned-process supervision, bounded crash recovery, memory-pressure
+  visibility, launch-at-login control, log rotation, model preparation, and
+  resumable cache activation into a versioned model directory.
+- Added the source-controlled runtime, app, DMG, notarization, and release
+  verification builders. Release manifests bind the app revision, dependency
+  lock hash, embedded runtime receipt, exact ACE-Step commit, and exact model
+  manifest; development builds may omit the embedded runtime but never include
+  model data or secrets.
+- Swift verification completed with strict format lint, `19 tests, 0 failures`,
+  and arm64 release compilation. Python verification completed with the focused
+  node suite (`28 passed`, one existing Starlette deprecation warning), Ruff
+  lint/format checks, mypy, the 161-package lock check, ShellCheck for all node
+  launch/build scripts, and `git diff --check`.
+- The broader repository matrix also completed: root and `runpod_worker`
+  tests `694 passed, 98 skipped` (the documented private quality fixture was
+  unavailable), Home Ingest `33 passed`, and MIDI mock `12 passed`; the
+  corresponding Ruff/format/mypy checks passed.
+- The embedded runtime build, model preparation, DMG build, notarization,
+  hardware acceptance, deployment, and public publication remain intentionally
+  unrun: this Mac has 3.7 GiB free against the 30 GiB runtime, 55 GiB model,
+  and 10 GiB DMG gates, and has no valid Developer ID identity.
+
 ## 2026-08-30 (portable persistent ACE Node backend)
 
 - Added the disabled-by-default `node/ace-step-v15-xl-turbo` provider and a

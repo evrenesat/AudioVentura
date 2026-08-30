@@ -228,6 +228,17 @@ separate `deploy/node/` uv project and lock, while the controller root lock
 remains provider-neutral. See [the ACE Node runbook](docs/ACE-NODE.md) for
 host preparation and the hardware acceptance gate.
 
+On macOS, `deploy/node/macos/app/` is a SwiftUI `MenuBarExtra` supervisor for
+the same Python `python -m ace_node` child. It owns process identity, bounded
+health polling, supervisor-only drain/restart, Keychain tokens, fixed-path
+Tailscale discovery, login-item registration, sleep assertions while busy, and
+rotating private logs. The Swift process sees only the authenticated health
+and drain metadata; prompts, lyrics, audio bytes, transfer capabilities, and
+model tensors remain outside the app boundary. The app bundle contains the
+arm64 executable, locked runtime receipts, and release manifest, while models
+live below the user's private Application Support directory and preparation
+cache.
+
 ## Job model
 
 A project groups jobs of one type for naming, continuation, and comparison. It

@@ -41,6 +41,7 @@ class _ProgressReporter:
     total_files: int = MODEL_BUNDLE_FILE_COUNT
     _last_emit: float = field(default=-float("inf"), init=False)
     _bars: dict[int, tuple[int, int | None, bool]] = field(default_factory=dict, init=False)
+    _completed_bars: set[int] = field(default_factory=set, init=False)
 
     def emit(self, stage: str, *, safe_error_code: str | None = None, force: bool = False) -> None:
         if stage not in _STAGES:
@@ -50,9 +51,9 @@ class _ProgressReporter:
             return
         event = {
             "stage": stage,
-            "downloaded_bytes": max(0, self.downloaded_bytes),
+            "downloaded_bytes": min(self.total_bytes, max(0, self.downloaded_bytes)),
             "total_bytes": self.total_bytes,
-            "completed_files": max(0, self.completed_files),
+            "completed_files": min(self.total_files, max(0, self.completed_files)),
             "total_files": self.total_files,
             "safe_error_code": safe_error_code,
         }
@@ -61,6 +62,7 @@ class _ProgressReporter:
         self._last_emit = now
 
     def register(self, bar: Any) -> None:
+        self._completed_bars.discard(id(bar))
         total = getattr(bar, "total", None)
         parsed_total = int(total) if isinstance(total, (int, float)) and total >= 0 else None
         unit = str(getattr(bar, "unit", ""))
@@ -83,10 +85,13 @@ class _ProgressReporter:
         self.emit("downloading")
 
     def finish(self, bar: Any) -> None:
+        if id(bar) in self._completed_bars:
+            return
         self.update(bar)
         previous, total, _ = self._bars.get(id(bar), (0, None, False))
         if total is None or previous >= total:
             self.completed_files = min(self.total_files, self.completed_files + 1)
+        self._completed_bars.add(id(bar))
         self.emit("downloading")
 
 
@@ -130,7 +135,15 @@ def prepare(
 
     resolved = settings or NodeSettings()
     _set_model_environment(resolved)
-    reporter = _ProgressReporter(emit or (lambda line: print(line, flush=True)))
+    sink: Callable[[str], None]
+    if ndjson:
+        sink = emit or (lambda line: print(line, flush=True))
+    else:
+
+        def sink(_line: str) -> None:
+            return None
+
+    reporter = _ProgressReporter(sink)
     if ndjson:
         reporter.emit("starting", force=True)
     try:

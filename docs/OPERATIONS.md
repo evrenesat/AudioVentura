@@ -18,6 +18,32 @@ The normal deployment uses:
 Application code and deployment configuration are separate. Do not store
 secrets, database files, generated audio, or logs in the checkout.
 
+## Native macOS ACE Node
+
+The native Apple Silicon app is a manually installed, separately operated
+worker. Build it from a clean committed product revision under
+`deploy/node/macos/`; do not use the stale macOS reference mirror as the build
+checkout. The runtime builder stops before downloading when free space is
+below 30 GiB. Setup stops below 55 GiB and recommends 70 GiB. The model is
+never packaged in the app or DMG.
+
+After installing a completed DMG, open `Model & Runtime Setup`, prepare the
+pinned model, confirm the authenticated worker reaches `ready`, and then
+enable Launch at Login only if the Mac is expected to stay powered. During
+initialization, queued work, or a running job, the app holds an idle-sleep
+assertion. Stop and restart use supervisor drain; Force Restart is reserved
+for explicitly accepted recovery loss. A disconnected Tailscale client keeps
+an already-launched worker resident but prevents a new loopback or wildcard
+bind.
+
+Record native-node acceptance evidence separately from controller deployment:
+app version and commit, DMG SHA-256, runtime/model receipts, macOS build,
+free disk, memory pressure/swap, authenticated health, output integrity, and
+the controlled restart result. Keep the node backend disabled in beta and
+production until the real M4 workload matrix passes and the owner manually
+tests the beta UI. This source change does not install, launch, publish, or
+enable a node on any environment.
+
 ## Isolated beta
 
 The media-library/player foundation is deployed first to the isolated beta

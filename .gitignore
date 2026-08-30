@@ -12,3 +12,9 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+# Native macOS build outputs.
+deploy/node/macos/.build/
+deploy/node/macos/app/.build/
+.build/macos-dmg-staging/
+dist/macos/

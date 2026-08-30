@@ -165,7 +165,10 @@ def test_controller_node_provider_to_real_node_api_and_db(tmp_path: Path) -> Non
         session.commit()
     transfer_app = create_transfer_app(controller_settings, session_factory=session_factory)
     settings = NodeSettings(
-        data_root=tmp_path, token="secret", runtime_receipt="sha256:" + "a" * 64
+        data_root=tmp_path,
+        token="secret",
+        supervisor_token="supervisor-secret",
+        runtime_receipt="sha256:" + "a" * 64,
     )
     node_app = create_app(settings, runtime_factory=lambda: FakeNodeRuntime(transfer_app))
     node_app.state.worker.start()

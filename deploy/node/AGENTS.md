@@ -9,6 +9,8 @@ clean checkout and an exact `ACE_NODE_APPLICATION_REVISION`, checks that the
 runtime receipt lock is the tracked `deploy/node/uv.lock`, then executes the
 pre-created opt-in node virtual environment. Keep the node bound to loopback,
 a private interface, or the operator's exact Tailscale `.ts.net` address.
+The node bearer token and supervisor drain token are separate deployment
+secrets; never reuse or print either one.
 
 The deployment project owns the heavyweight ACE-Step, CUDA, and Apple Silicon
 MLX dependency graph. Keep it in `deploy/node/pyproject.toml` and

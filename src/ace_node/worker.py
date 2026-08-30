@@ -179,6 +179,8 @@ class NodeWorker:
             self._running_job_id = None
             self._running_started_at = None
             self._queued_ids.clear()
+            self._payloads.clear()
+            self._queue = queue.Queue()
             self._status = "initializing"
             self._init_thread = threading.Thread(
                 target=self._initialize_in_background,

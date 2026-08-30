@@ -268,6 +268,15 @@ def main() -> None:
     receipt = _own_receipt(settings)
     receipt_path = settings.data_root / "state" / "worker.json"
     if receipt is not None:
+        try:
+            recover_stale_process(
+                receipt_path,
+                expected_executable_path=sys.executable,
+                expected_application_revision=settings.application_revision,
+            )
+        except RuntimeError as exc:
+            raise SystemExit("worker receipt is malformed") from exc
+    if receipt is not None:
         write_worker_receipt(receipt_path, receipt)
     watchdog.start()
     try:

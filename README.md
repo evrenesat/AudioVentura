@@ -80,6 +80,7 @@ src/ace_node/           separately deployed persistent ACE Node service
 home_ingest/           private YouTube/media preparation service
 midi_mock_backend/     private deterministic MIDI-to-MP3 test service
 deploy/salad/          Salad worker wrapper, image, and infrastructure tool
+deploy/node/macos/     native arm64 menu-bar app and release builders
 docs/                  operator and provider runbooks
 plans/                 completed and active implementation plans
 tests/                 controller and integration-style contract tests
@@ -105,6 +106,8 @@ records, and plans are supporting evidence. They are not setup instructions.
 - `yt-dlp`, `ffmpeg`, and `ffprobe` on the Home Ingest host only
 - a compatible NVIDIA GPU provider for cloud ACE-Step inference, or the
   optional ACE Node environment on one supported private GPU host
+- Xcode command-line tools and an Apple Silicon Mac for the optional native
+  menu-bar app
 - FluidSynth, the GM soundfont, and `lameenc` only on the optional mock host
 
 Install the controller environment from the repository root:
@@ -220,6 +223,19 @@ and service templates in [docs/ACE-NODE.md](docs/ACE-NODE.md). The node's
 heavyweight runtime is resolved only by the separate `deploy/node/` uv project
 and lock; the normal controller `uv sync --frozen` environment does not
 install or import torch, ACE-Step, MLX, nano-vllm, or node model weights.
+
+The native Apple Silicon menu-bar supervisor is built from a clean committed
+checkout. A development app can be assembled without downloading the runtime:
+
+```text
+cd deploy/node/macos
+./build-app.sh --development
+```
+
+The embedded runtime needs at least 30 GiB free before its download/build, and
+first-run model preparation needs at least 55 GiB free (70 GiB recommended).
+Models are never included in the app or DMG. See [the ACE Node runbook](docs/ACE-NODE.md)
+for the runtime, setup, signing, and acceptance gates.
 
 Default binds are:
 

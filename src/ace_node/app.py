@@ -169,6 +169,7 @@ def create_app(
     # Model-bundle preparation may reuse settings without a node bearer
     # secret; an HTTP service may never start in that state.
     resolved_settings.require_token()
+    resolved_settings.require_supervisor_token()
     resolved_database = database
     resolved_worker = worker or NodeWorker(
         resolved_settings,
