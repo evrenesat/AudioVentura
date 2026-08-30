@@ -151,3 +151,37 @@ def test_upload_failure_is_terminal_and_safe(tmp_path: Path) -> None:
     assert current is not None and current.state == "failed"
     assert current.error_code == "upload_failed"
     worker.stop()
+
+
+def test_health_exposes_monotonic_running_elapsed_and_drain_state(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    now = [100.0]
+
+    class SlowRuntime(_Runtime):
+        def execute(self, payload: dict[str, Any], job_id: str) -> dict[str, Any]:
+            entered.set()
+            release.wait(2)
+            return super().execute(payload, job_id)
+
+    worker = NodeWorker(_settings(tmp_path), runtime_factory=SlowRuntime, clock=lambda: now[0])
+    worker.start()
+    assert worker.wait_ready() == "ready"
+    job, _ = worker.submit(_payload("22222222-2222-4222-8222-222222222222"))
+    assert entered.wait(1)
+    now[0] = 107.25
+    health = worker.health()
+    assert health["running"] is True
+    assert health["running_elapsed_seconds"] == 7.25
+    assert health["queue_depth"] == 0
+    drained = worker.drain()
+    assert drained == {"accepting": False, "running": True, "queue_depth": 0}
+    assert worker.health()["phase"] == "draining"
+    release.set()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if worker.get(job.job_id).state == "succeeded":  # type: ignore[union-attr]
+            break
+        time.sleep(0.01)
+    assert worker.health()["running"] is False
+    worker.stop()

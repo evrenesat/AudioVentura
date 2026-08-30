@@ -26,6 +26,7 @@ VAE_MODEL = "vae"
 DEFAULT_HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
 MODEL_BUNDLE_ID = "audioventura-ace-step-v0.1.8"
 MODEL_BUNDLE_TOTAL_BYTES = 25_253_680_505
+MODEL_BUNDLE_FILE_COUNT = 29
 MODEL_BUNDLE_MANIFEST = "bundle-manifest.json"
 MAX_MODEL_MANIFEST_BYTES = 1_048_576
 ACE_SOURCE_REPOSITORY = "https://github.com/ace-step/ACE-Step-1.5.git"
@@ -176,6 +177,7 @@ def select_accelerator(
             raise WorkerInitializationError(
                 "Apple Silicon MPS is unavailable; refusing CPU inference"
             )
+        os.environ.setdefault("ACESTEP_MLX_VAE_CHUNK", "512")
         return AcceleratorConfig(
             accelerator="mps",
             device="mps",
@@ -460,9 +462,15 @@ def resolve_checkpoint_paths(cache_root: str | Path | None = None) -> Checkpoint
     return paths
 
 
-def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
+def initialize_runtime(
+    cache_root: str | Path | None = None,
+    *,
+    progress_callback: Callable[[str], None] | None = None,
+) -> WorkerRuntime:
     """Initialize ACE-Step once before Runpod starts accepting jobs."""
 
+    if progress_callback is not None:
+        progress_callback("validating_runtime")
     image_digest = validate_worker_image_digest(os.environ.get("ACE_WORKER_IMAGE_DIGEST"))
     accelerator = select_accelerator()
     LOGGER.info(
@@ -473,6 +481,8 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
         accelerator.memory_bytes,
     )
 
+    if progress_callback is not None:
+        progress_callback("validating_model")
     paths = resolve_checkpoint_paths(cache_root)
     os.environ["ACESTEP_CHECKPOINTS_DIR"] = str(paths.root)
 
@@ -490,6 +500,8 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
 
     validate_runtime_signatures(GenerationParams, GenerationConfig)
 
+    if progress_callback is not None:
+        progress_callback("loading_dit")
     dit_handler = AceStepHandler()
     dit_status, dit_ok = dit_handler.initialize_service(
         project_root=str(paths.root.parent),
@@ -505,6 +517,8 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
         raise WorkerInitializationError("ACE-Step DiT initialization failed")
     LOGGER.info("ACE-Step DiT initialized model=%s", DIT_MODEL)
 
+    if progress_callback is not None:
+        progress_callback("loading_lm")
     llm_handler = LLMHandler()
     llm_status, llm_ok = llm_handler.initialize(
         checkpoint_dir=str(paths.root),
@@ -515,10 +529,10 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
     )
     if not llm_ok:
         raise WorkerInitializationError("ACE-Step 5Hz LM initialization failed")
-    LOGGER.info("ACE-Step LM initialized model=%s backend=vllm", LM_MODEL)
+    LOGGER.info("ACE-Step LM initialized model=%s backend=%s", LM_MODEL, accelerator.lm_backend)
     del dit_status, llm_status
 
-    return WorkerRuntime(
+    runtime = WorkerRuntime(
         dit_handler=dit_handler,
         llm_handler=llm_handler,
         generation_params_type=GenerationParams,
@@ -537,6 +551,9 @@ def initialize_runtime(cache_root: str | Path | None = None) -> WorkerRuntime:
         worker_image_digest=image_digest,
         accelerator_config=accelerator,
     )
+    if progress_callback is not None:
+        progress_callback("ready")
+    return runtime
 
 
 def _validate_model_manifest(snapshot: Path, model_cache_root: Path, expected_sha256: str) -> None:
@@ -680,7 +697,7 @@ def _validate_manifest_components(value: Any) -> None:
 
 
 def _validate_manifest_files(value: Any) -> dict[str, int]:
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or len(value) != MODEL_BUNDLE_FILE_COUNT:
         raise WorkerInitializationError("cached model file inventory is malformed")
     result: dict[str, int] = {}
     for entry in value:

@@ -54,6 +54,11 @@ class NodeSettings(BaseSettings):
         validation_alias=AliasChoices("ACE_NODE_TOKEN", "token"),
         min_length=1,
     )
+    supervisor_token: str = Field(
+        default="change-me",
+        validation_alias=AliasChoices("ACE_NODE_SUPERVISOR_TOKEN", "supervisor_token"),
+        min_length=1,
+    )
     data_root: Path = Field(
         default=Path("/var/lib/audioventura/ace-node"),
         validation_alias=AliasChoices("ACE_NODE_DATA_ROOT", "data_root"),
@@ -146,6 +151,14 @@ class NodeSettings(BaseSettings):
         normalized = value.strip()
         if not normalized:
             raise ValueError("ACE_NODE_TOKEN must not be empty")
+        return normalized
+
+    @field_validator("supervisor_token")
+    @classmethod
+    def validate_supervisor_token(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("ACE_NODE_SUPERVISOR_TOKEN must not be empty")
         return normalized
 
     @field_validator("transfer_allowed_host")
@@ -257,6 +270,17 @@ class NodeSettings(BaseSettings):
             raise ValueError("ACE_NODE_TOKEN must be a non-placeholder bearer token")
         return self.token
 
+    def require_supervisor_token(self) -> str:
+        """Return the separate drain token only when it is a real secret."""
+
+        if self.supervisor_token.lower() in _PLACEHOLDERS or self.supervisor_token.lower().endswith(
+            ".example.invalid"
+        ):
+            raise ValueError("ACE_NODE_SUPERVISOR_TOKEN must be a non-placeholder bearer token")
+        if self.supervisor_token == self.token:
+            raise ValueError("ACE_NODE_SUPERVISOR_TOKEN must be separate from ACE_NODE_TOKEN")
+        return self.supervisor_token
+
     def ensure_data_layout(self) -> Path:
         self.data_root = self.data_root.expanduser().resolve()
         self.data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -277,8 +301,17 @@ class NodeSettings(BaseSettings):
             "ACE_WORKER_HF_CACHE_ROOT": str(self.worker_hf_cache_root),
             "ACE_TRANSFER_ALLOWED_HOST": self.transfer_allowed_host,
             "ACE_NODE_ACCELERATOR": self.accelerator,
+            "ACE_NODE_TOKEN": self.token,
+            "ACE_NODE_SUPERVISOR_TOKEN": self.supervisor_token,
+            "ACE_NODE_APPLICATION_REVISION": self.application_revision,
+            "ACE_NODE_RUNTIME_LOCK_PATH": str(self.runtime_lock_path),
+            "ACE_NODE_RUNTIME_RECEIPT": self.runtime_receipt or "",
             "ACE_STEP_COMMIT": ACE_SOURCE_COMMIT,
             "ACE_STEP_TAG": "v0.1.8",
+            "ACESTEP_MLX_VAE_CHUNK": "512",
+            "TOKENIZERS_PARALLELISM": "false",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "ACESTEP_CHECKPOINTS_DIR": str(
                 self.worker_hf_cache_root
                 / f"models--{self.worker_model_repo.replace('/', '--')}"

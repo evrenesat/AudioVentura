@@ -27,6 +27,27 @@
   ShellCheck command could not run because the macOS builder scripts do not
   exist at the base and the glob was unmatched.
 
+## 2026-08-31 (Python supervisor contract)
+
+- Extended the authenticated node health object with the closed initialization
+  phases, bounded provider-neutral model identity, accepting flag, pending
+  queue count, and monotonic running elapsed time. Added the separate
+  supervisor bearer token and empty-body `POST /v1/supervisor/drain`; the
+  worker lock covers database admission and queue insertion so drain and
+  submission cannot partially race.
+- Added initialization callbacks through the existing ACE-Step runtime,
+  strict 29-file model inventory validation, MPS VAE chunk default `512`,
+  redacted/rate-limited model-preparation NDJSON, and a private worker receipt
+  with parent watchdog and exact executable/start-identity stale recovery.
+  The existing Linux/CUDA selection, handler, payload boundary, and SQLite
+  recovery semantics remain unchanged.
+- Focused verification after the change: node tests (including new drain,
+  elapsed, progress, and receipt coverage) `30 passed` with one existing
+  Starlette deprecation warning; Ruff check passed; Ruff format check reported
+  `91 files already formatted`; mypy passed for 67 files; the deployment lock
+  check resolved 161 packages; `shellcheck deploy/node/run-node.sh` and
+  `git diff --check` passed.
+
 ## 2026-08-30 (portable persistent ACE Node backend)
 
 - Added the disabled-by-default `node/ace-step-v15-xl-turbo` provider and a

@@ -31,6 +31,21 @@ def _authorize(request: Request, settings: NodeSettings) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
 
 
+def _authorize_supervisor(request: Request, settings: NodeSettings) -> None:
+    """Authorize lifecycle operations with a token the controller cannot use."""
+
+    try:
+        expected = "Bearer " + settings.require_supervisor_token()
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="supervisor authorization is unavailable",
+        ) from None
+    actual = request.headers.get("authorization", "")
+    if not hmac.compare_digest(actual, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="unauthorized")
+
+
 def _canonical_uuid(value: Any, field: str) -> str:
     if not isinstance(value, str) or not _UUID_RE.fullmatch(value.lower()):
         raise ValueError(f"{field} must be a UUID")
@@ -186,6 +201,13 @@ def create_app(
         _authorize(request, resolved_settings)
         return _response(resolved_worker.health())
 
+    @app.post("/v1/supervisor/drain")
+    async def drain(request: Request) -> JSONResponse:
+        _authorize_supervisor(request, resolved_settings)
+        if await _read_bounded_body(request) != b"":
+            raise HTTPException(status_code=400, detail="drain request body must be empty")
+        return _response(resolved_worker.drain())
+
     @app.post("/v1/jobs", status_code=202)
     async def submit(request: Request) -> JSONResponse:
         _authorize(request, resolved_settings)
@@ -203,7 +225,7 @@ def create_app(
         except SubmissionConflict:
             raise HTTPException(status_code=409, detail="submission nonce conflicts") from None
         except RuntimeError as exc:
-            if str(exc) == "node runtime is not ready":
+            if str(exc) in {"node runtime is not ready", "node runtime is draining"}:
                 raise HTTPException(status_code=503, detail="node runtime is not ready") from None
             raise HTTPException(status_code=400, detail="invalid submission") from None
         except (json.JSONDecodeError, ValueError, NodeDatabaseError):

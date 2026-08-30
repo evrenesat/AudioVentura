@@ -47,6 +47,7 @@ def _settings(tmp_path: Path, **kwargs: Any) -> NodeSettings:
     return NodeSettings(
         data_root=tmp_path,
         token="node-secret",
+        supervisor_token="supervisor-secret",
         runtime_receipt="sha256:" + "a" * 64,
         **kwargs,
     )
@@ -56,7 +57,23 @@ def test_node_api_authentication_idempotency_and_result(tmp_path: Path) -> None:
     with TestClient(create_app(_settings(tmp_path), runtime_factory=lambda: _Runtime())) as client:
         assert client.get("/healthz").status_code == 401
         headers = {"Authorization": "Bearer node-secret"}
-        assert client.get("/healthz", headers=headers).json()["status"] == "ready"
+        health = client.get("/healthz", headers=headers).json()
+        assert health["status"] == "ready"
+        assert set(health) == {
+            "status",
+            "phase",
+            "error_code",
+            "queue_depth",
+            "running",
+            "running_elapsed_seconds",
+            "max_concurrency",
+            "accepting",
+            "accelerator",
+            "model",
+            "lm_model",
+        }
+        assert health["phase"] == "ready"
+        assert health["accepting"] is True
         response = client.post("/v1/jobs", headers=headers, json=_body())
         assert response.status_code == 202
         duplicate = client.post("/v1/jobs", headers=headers, json=_body())
@@ -78,6 +95,25 @@ def test_node_api_authentication_idempotency_and_result(tmp_path: Path) -> None:
         result = client.get(f"/v1/jobs/{job_id}/result", headers=headers)
         assert result.status_code == 200
         assert "transfer/v1" not in result.text
+
+
+def test_supervisor_drain_is_separate_and_requires_an_empty_body(tmp_path: Path) -> None:
+    with TestClient(create_app(_settings(tmp_path), runtime_factory=lambda: _Runtime())) as client:
+        controller_headers = {"Authorization": "Bearer node-secret"}
+        supervisor_headers = {"Authorization": "Bearer supervisor-secret"}
+        assert client.post("/v1/supervisor/drain", headers=controller_headers).status_code == 401
+        assert (
+            client.post(
+                "/v1/supervisor/drain",
+                headers=supervisor_headers,
+                content=b"not-empty",
+            ).status_code
+            == 400
+        )
+        response = client.post("/v1/supervisor/drain", headers=supervisor_headers)
+        assert response.status_code == 200
+        assert response.json() == {"accepting": False, "running": False, "queue_depth": 0}
+        assert client.post("/v1/jobs", headers=controller_headers, json=_body()).status_code == 503
 
 
 def test_node_api_stays_alive_when_runtime_initialization_fails(tmp_path: Path) -> None:

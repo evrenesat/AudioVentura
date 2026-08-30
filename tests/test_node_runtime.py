@@ -60,6 +60,16 @@ def test_macos_arm64_selects_mlx_without_cpu_fallback() -> None:
     assert config.memory_bytes == 16 * 1024**3
 
 
+def test_macos_mps_selection_defaults_to_safe_vae_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ACESTEP_MLX_VAE_CHUNK", raising=False)
+    torch = types.SimpleNamespace(
+        backends=types.SimpleNamespace(mps=_Mps()),
+        mps=types.SimpleNamespace(recommended_max_memory=lambda: 16 * 1024**3),
+    )
+    select_accelerator(system="Darwin", machine="arm64", torch_module=torch)
+    assert __import__("os").environ["ACESTEP_MLX_VAE_CHUNK"] == "512"
+
+
 @pytest.mark.parametrize(
     ("system", "machine"),
     [("Windows", "AMD64"), ("Linux", "aarch64"), ("Darwin", "x86_64")],
