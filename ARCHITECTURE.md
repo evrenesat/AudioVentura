@@ -81,6 +81,8 @@ The controller:
 - validates original and cover forms;
 - creates projects, source assets, jobs, variation attempts, outputs, and
   capabilities;
+- records a reviewed source backend as durable user intent without binding a
+  provider job during source preparation;
 - stores state in SQLite through `repository.py`;
 - publishes verified canonical source MP3s before any remix submission;
 - validates and stages backend-bounded source clips without running media tools;
@@ -209,6 +211,10 @@ Source assets have their own durable flow (`awaiting_upload`, `uploaded`,
 `queued`, `preparing`, `ready`, `failed`, or `cancelled`). A source reaches
 `ready` only after Home Ingest's canonical MP3 has been received and verified;
 the project playlist gets that source before a remix job can be submitted.
+Each source may retain one nullable, stable `preferred_remix_backend` ID. This
+is source intent only: source preparation does not call or snapshot a provider,
+and a stale preference is replaced only after the user reviews and submits a
+currently selectable backend on the final remix form.
 Each remix stores the active source media ID, full-source offsets, selected
 clip duration, and an immutable backend capability snapshot. Full-range clips
 use a verified local copy; subranges are prepared by Home Ingest. Provider
@@ -470,6 +476,13 @@ historical outputs. SQLite constraints/triggers plus repository validation
 protect provenance, capability ownership, and derivative readiness;
 publication remains an application-level seam because it requires verified
 file evidence and idempotent source/output keys.
+
+Schema v12 adds one nullable `source_assets.preferred_remix_backend` column.
+Historical v11 sources remain usable with `NULL`; new source creation stores
+only the validated `BackendId` string. The value is a selectable source-form
+preference, not provider ownership. Final remix POST validation resolves the
+current backend and atomically stores its preference alongside the new job's
+immutable provider, backend, and capability snapshot.
 
 The quality campaign uses a separate private database and fixture. Its CLI and
 ordinary-submission maintenance gate are currently quarantined. The campaign

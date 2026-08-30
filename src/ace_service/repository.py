@@ -726,6 +726,7 @@ def create_source_asset(
     youtube_video_id: str | None = None,
     original_filename: str | None = None,
     declared_byte_size: int | None = None,
+    preferred_remix_backend: BackendId | str | None = None,
     source_asset_id: str | UUID | None = None,
 ) -> SourceAsset:
     """Create the one primary source asset for an existing project."""
@@ -738,6 +739,11 @@ def create_source_asset(
     normalized_origin = SourceAssetOrigin(origin)
     title = _media_title(display_title)
     confirmation = _utc_timestamp(rights_confirmation_at)
+    normalized_backend = (
+        str(BackendId(str(preferred_remix_backend)))
+        if preferred_remix_backend is not None
+        else None
+    )
     if normalized_origin is SourceAssetOrigin.YOUTUBE:
         if not youtube_url or not youtube_video_id:
             raise ValueError("YouTube sources require URL and video identity")
@@ -777,6 +783,7 @@ def create_source_asset(
         origin=normalized_origin,
         status=upload_status,
         display_title=title,
+        preferred_remix_backend=normalized_backend,
         youtube_url=normalized_url,
         youtube_video_id=youtube_video_id.strip() if youtube_video_id else None,
         original_filename=original_filename.strip() if original_filename else None,

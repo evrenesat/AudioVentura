@@ -249,6 +249,7 @@ class SourceAsset(Base):
         _enum_type(SourceAssetStatus), nullable=False, default=SourceAssetStatus.QUEUED
     )
     display_title: Mapped[str] = mapped_column(String(MEDIA_TITLE_MAX_LENGTH), nullable=False)
+    preferred_remix_backend: Mapped[str | None] = mapped_column(String(256))
     youtube_url: Mapped[str | None] = mapped_column(String(2048))
     youtube_video_id: Mapped[str | None] = mapped_column(String(128))
     original_filename: Mapped[str | None] = mapped_column(String(300))

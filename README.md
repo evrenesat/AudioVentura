@@ -33,6 +33,10 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   The Original form lists reviewed text-to-music backends; Cover / Remix lists
   compatible audio transform, inpaint, and outpaint backends. See [the Fal
   runbook](docs/FAL.md) before enabling paid endpoints.
+- Create remix first asks for one reviewed source-capable backend and stores it
+  as source intent while Home Ingest prepares the media. The final remix form
+  revalidates the choice and is the only place that binds a job to an immutable
+  provider/backend snapshot.
 - `mock/midi-sequential` is an opt-in, MP3-only integration backend. It ignores
   creative parameters, consumes one MIDI cursor entry per variation, and never
   replaces a real-provider default or acts as fallback.
@@ -227,11 +231,12 @@ uv run python -m ace_service migrate-upgrade \
 Do not retry an incomplete migration. Restore the verified backup and
 investigate first.
 
-Schema v11 adds source assets, v2 asset capabilities, source provenance,
-backend-frozen clip bounds, and MP3 derivative tasks on top of the v10 media
-library. The migration is additive and does not backfill historical source or
-media rows. See the [operations runbook](docs/OPERATIONS.md) for backup,
-rehearsal, and rollback sequencing.
+Schema v12 adds the nullable source backend preference to the v11 source
+assets, alongside the existing v2 capabilities, provenance, backend-frozen
+clip bounds, and MP3 derivative tasks. The migration is additive; v11 source
+rows retain a `NULL` preference and no source, media, job, or provider state is
+backfilled. See the [operations runbook](docs/OPERATIONS.md) for backup,
+rehearsal, and rollback sequencing. The current expected schema is v12.
 
 ## Browser verification
 
@@ -245,11 +250,12 @@ uv run pytest -q tests/e2e --browser chromium --browser firefox
 
 The browser suite uses a disposable loopback server, real local
 ffmpeg/ffprobe, real v2 transfer streaming, and a non-paid provider stub. It
-checks the `/beta` root-path contract, source upload and playlist ordering, one
-global player across soft navigation, mobile target sizes, deletion, and
-cancellation. It also checks notification UI states, the unified worker,
-content-addressed offline caching, exact full/range playback, cleanup, quota
-errors, refresh, and the offline shell in Chromium and Firefox. Use a secure
+checks the `/beta` root-path contract, source backend selection and persistence,
+source upload and playlist ordering, one global player across soft navigation,
+mobile target sizes, deletion, and cancellation. It also checks notification
+UI states, the unified worker, content-addressed offline caching, exact
+full/range playback, cleanup, quota errors, refresh, and the offline shell in
+Chromium and Firefox. Use a secure
 context (HTTPS or localhost) for service workers; Firefox desktop supports
 offline playback but does not provide manifest-based installation. Chromium
 Android is the installation target. The protected beta mock acceptance script

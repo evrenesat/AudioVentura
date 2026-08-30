@@ -21,8 +21,9 @@
   <input type="hidden" name="source_media_item_id" value="{{ source.media.id }}">
   <label for="backend">Backend <span class="required">required</span></label>
   <select id="backend" name="backend" required data-backend-capabilities='{{ backend_choices|tojson }}'>
-    {% for provider_name in backend_choices|map(attribute='provider')|unique|list %}<optgroup label="{{ provider_name }}">{% for backend in backend_choices if backend.provider == provider_name %}<option value="{{ backend.backend_id }}"{% if (form.get('backend', selected_backend) or selected_backend) == backend.backend_id %} selected{% endif %}>{{ backend.label }}</option>{% endfor %}</optgroup>{% endfor %}
+    {% for provider_name in backend_choices|map(attribute='provider')|unique|list %}<optgroup label="{{ provider_name }}">{% for backend in backend_choices if backend.provider == provider_name %}<option value="{{ backend.backend_id }}"{% if selected_backend == backend.backend_id %} selected{% endif %}>{{ backend.label }}</option>{% endfor %}</optgroup>{% endfor %}
   </select>
+  {% if backend_note %}<p class="hint" id="backend-stale-note" role="status">{{ backend_note }}</p>{% endif %}
   <p class="hint" id="backend-note">The accepted source range is frozen into this job when submitted.</p>
   <label for="target_style">Target style <span class="required">required</span></label>
   <textarea id="target_style" name="target_style" required maxlength="4000" rows="4">{{ form.get('target_style', '') }}</textarea>

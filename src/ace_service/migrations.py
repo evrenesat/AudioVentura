@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -802,6 +802,7 @@ def _cp11_ddl(connection: sqlite3.Connection) -> None:
         "ON asset_transfer_capabilities (derivative_task_id)",
     ):
         connection.execute(statement)
+
     for statement in (
         "CREATE TRIGGER IF NOT EXISTS trg_media_items_provenance_insert "
         "BEFORE INSERT ON media_items FOR EACH ROW WHEN NOT "
@@ -825,6 +826,18 @@ def _cp11_ddl(connection: sqlite3.Connection) -> None:
         "BEGIN SELECT RAISE(ABORT, 'ready derivative has no output'); END",
     ):
         connection.execute(statement)
+
+
+def _cp12_ddl(connection: sqlite3.Connection) -> None:
+    """Add the nullable source-first remix backend preference."""
+
+    source_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(source_assets)").fetchall()
+    }
+    if "preferred_remix_backend" not in source_columns:
+        connection.execute(
+            "ALTER TABLE source_assets ADD COLUMN preferred_remix_backend VARCHAR(256)"
+        )
 
 
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
@@ -971,6 +984,7 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
                 "origin",
                 "status",
                 "display_title",
+                "preferred_remix_backend",
                 "youtube_url",
                 "youtube_video_id",
                 "original_filename",
@@ -1282,7 +1296,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9, 10}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9, 10, 11}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -1328,7 +1342,17 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             _cp8_ddl(connection)
             _cp9_ddl(connection)
             _cp10_ddl(connection)
-            _cp11_ddl(connection)
+            if state == _STATE_UNVERSIONED_LEGACY or report["version"] in {
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+            }:
+                _cp11_ddl(connection)
+            _cp12_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

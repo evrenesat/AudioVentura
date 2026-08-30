@@ -8,12 +8,19 @@
 </section>
 {% if errors %}<div class="banner error" role="alert"><strong>Check your source:</strong><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul></div>{% endif %}
 <section class="source-picker" data-source-picker>
+  <div class="form-card source-backend-card">
+    <label for="backend">Intended remix provider/model <span class="required">required</span></label>
+    <select id="backend" name="backend" form="youtube-source-form" required data-backend-capabilities='{{ backend_choices|tojson }}'>
+      {% for provider_name in backend_choices|map(attribute='provider')|unique|list %}<optgroup label="{{ provider_name }}">{% for backend in backend_choices if backend.provider == provider_name %}<option value="{{ backend.backend_id }}"{% if selected_backend == backend.backend_id %} selected{% endif %}>{{ backend.label }}</option>{% endfor %}</optgroup>{% endfor %}
+    </select>
+    <p class="hint">This is the intended remix provider/model. Source preparation stays at Home Ingest, and you can review the choice again before generation.</p>
+  </div>
   <div class="source-tabs" role="tablist" aria-label="Source type">
     <button class="button" type="button" role="tab" aria-selected="true" aria-controls="youtube-panel" data-source-tab="youtube">YouTube URL</button>
     <button class="button secondary" type="button" role="tab" aria-selected="false" aria-controls="upload-panel" data-source-tab="upload">Upload file</button>
   </div>
   <section id="youtube-panel" role="tabpanel" data-source-panel="youtube">
-    <form method="post" action="{{ urls.source_youtube }}" class="form-card">
+    <form id="youtube-source-form" method="post" action="{{ urls.source_youtube }}" class="form-card">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label for="youtube-project-title">Project title <span class="required">required</span></label>
       <input id="youtube-project-title" name="project_title" required maxlength="160" value="{{ form.get('project_title', '') }}" autocomplete="off">
@@ -45,5 +52,6 @@
     </form>
   </section>
 </section>
+<script src="{{ urls.backend_selector_js }}" defer></script>
 <script src="{{ urls.source_upload_js }}" defer></script>
 {% endblock %}

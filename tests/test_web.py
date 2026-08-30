@@ -105,10 +105,46 @@ COVER_BACKEND_INVENTORY = (
     ("runpod", (("runpod/ace-step-v15-xl-turbo", "Runpod · ACE-Step 1.5 XL Turbo", False),)),
     ("salad", (("salad/ace-step-v15-xl-turbo", "Salad · ACE-Step 1.5 XL Turbo", True),)),
 )
+SOURCE_BACKEND_INVENTORY = (
+    (
+        "fal.ai",
+        (
+            (
+                "fal/fal-ai/stable-audio-3/medium/audio-to-audio",
+                "fal.ai · Stable Audio 3 Medium Audio to Audio",
+                False,
+            ),
+            (
+                "fal/fal-ai/stable-audio-3/medium/base/audio-to-audio",
+                "fal.ai · Stable Audio 3 Medium Base Audio to Audio",
+                False,
+            ),
+            (
+                "fal/fal-ai/stable-audio-3/small/music/audio-to-audio",
+                "fal.ai · Stable Audio 3 Small Music Audio to Audio",
+                False,
+            ),
+            (
+                "fal/fal-ai/stable-audio-3/small/music/base/audio-to-audio",
+                "fal.ai · Stable Audio 3 Small Music Base Audio to Audio",
+                False,
+            ),
+        ),
+    ),
+    ("mock", (("mock/midi-sequential", "Mock · Sequential MIDI → MP3", False),)),
+    ("runpod", (("runpod/ace-step-v15-xl-turbo", "Runpod · ACE-Step 1.5 XL Turbo", True),)),
+    ("salad", (("salad/ace-step-v15-xl-turbo", "Salad · ACE-Step 1.5 XL Turbo", False),)),
+)
 
 
 class _InventoryProvider:
-    def __init__(self, name: ProviderName, backend_id: str) -> None:
+    def __init__(
+        self,
+        name: ProviderName,
+        backend_id: str,
+        *,
+        source_capable: bool = False,
+    ) -> None:
         self.capabilities = ProviderCapabilities(
             name=name,
             modes=frozenset(InferenceMode),
@@ -118,6 +154,10 @@ class _InventoryProvider:
             supports_running_cancel=False,
             not_found_after_deadline_is_terminal=True,
             backend_id=backend_id,
+            source_duration_min_seconds=1 if source_capable else None,
+            source_duration_max_seconds=600 if source_capable else None,
+            output_duration_min_seconds=1 if source_capable else None,
+            output_duration_max_seconds=600 if source_capable else None,
         )
 
 
@@ -201,9 +241,9 @@ def _inventory_registry() -> ProviderRegistry:
         "fal/fal-ai/stable-audio-3/small/music/base/audio-to-audio",
     ]
     providers: list[Any] = [
-        _InventoryProvider(ProviderName.RUNPOD, real_ids[0]),
-        _InventoryProvider(ProviderName.SALAD, real_ids[1]),
-        _InventoryProvider(ProviderName.MOCK, "mock/midi-sequential"),
+        _InventoryProvider(ProviderName.RUNPOD, real_ids[0], source_capable=True),
+        _InventoryProvider(ProviderName.SALAD, real_ids[1], source_capable=True),
+        _InventoryProvider(ProviderName.MOCK, "mock/midi-sequential", source_capable=True),
     ]
     providers.extend(
         _InventoryFalProvider(catalog.by_backend_id(backend_id)) for backend_id in real_ids[2:]
@@ -216,6 +256,20 @@ def _inventory_registry() -> ProviderRegistry:
         },
         selectable_backends=[*real_ids, "mock/midi-sequential"],
     )
+
+
+def _source_inventory_registry() -> ProviderRegistry:
+    base = _inventory_registry()
+    disabled_backend = "runpod/disabled-source"
+    unreviewed_backend = "mock/unreviewed-source"
+    providers = [
+        *base.providers,
+        _InventoryProvider(ProviderName.RUNPOD, disabled_backend, source_capable=True),
+        _InventoryProvider(ProviderName.MOCK, unreviewed_backend),
+    ]
+    selectable = [str(provider.capabilities.backend_id) for provider in base.providers]
+    selectable.append(unreviewed_backend)
+    return ProviderRegistry(providers, selectable_backends=selectable)
 
 
 def test_rendered_backend_selector_inventories_are_exact(web_app) -> None:
@@ -247,6 +301,15 @@ def test_rendered_backend_selector_negative_cases_cannot_pass(web_app) -> None:
         _assert_selector_inventory(original, COVER_BACKEND_INVENTORY)
     with pytest.raises(AssertionError):
         _assert_selector_inventory(cover, ORIGINAL_BACKEND_INVENTORY)
+
+
+def test_rendered_source_backend_selector_inventory_is_exact(web_app) -> None:
+    app, _, _ = web_app
+    app.state.provider_registry = _source_inventory_registry()
+    with TestClient(app) as client:
+        response = client.get("/sources/new", auth=_auth(client))
+    assert response.status_code == 200
+    _assert_selector_inventory(_selector_inventory(response.text), SOURCE_BACKEND_INVENTORY)
 
 
 def test_builtin_backend_choices_expose_only_relevant_form_fields(web_app) -> None:
@@ -1758,6 +1821,17 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
             assert dashboard.headers["cache-control"] == "no-store"
             assert "default-src 'self'" in dashboard.headers["content-security-policy"]
             assert_prefixed_browser_attributes(dashboard.text)
+            assert re.findall(r'<a data-app-nav href="([^"]+)">([^<]+)</a>', dashboard.text) == [
+                ("/beta/", "Home"),
+                ("/beta/create", "Create original"),
+                ("/beta/sources/new", "Create remix"),
+                ("/beta/library", "Library"),
+                ("/beta/playlists", "Playlists"),
+                ("/beta/projects", "Projects"),
+                ("/beta/offline", "Offline"),
+            ]
+            assert dashboard.text.count('data-app-nav href="/beta/create"') == 1
+            assert dashboard.text.count('data-app-nav href="/beta/sources/new"') == 1
             history = client.get("/jobs", auth=_auth(client))
             assert history.status_code == 200
             assert_prefixed_browser_attributes(history.text)

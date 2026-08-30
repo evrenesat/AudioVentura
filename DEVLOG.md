@@ -1,5 +1,21 @@
 # Development Log
 
+## 2026-08-30 (source backend selection and original navigation)
+
+- Added the required reviewed source-capable backend selector to initial
+  Create remix, persisted source intent through YouTube/upload preparation and
+  retry, and made the final remix form authoritative for preference updates and
+  immutable job snapshots. Added `Create original` to the shared online header;
+  the offline shell remains creation-free.
+- Advanced the controller schema from v11 to v12 with one nullable
+  `source_assets.preferred_remix_backend` column. Historical sources remain
+  `NULL`; no provider is called during source preparation and no paid job is
+  submitted by this change.
+- Verification so far: focused migration/source/web tests and static checks
+  pass, including exact source inventory, stale-choice fallback, rollback, and
+  `/beta` navigation coverage. Beta revision: pending deployment. Acceptance:
+  local checks complete; manual beta acceptance pending.
+
 ## 2026-08-29 (offline review fixes)
 
 - Successful media, project, and playlist deletion now carries a scoped browser

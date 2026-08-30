@@ -656,6 +656,68 @@ def _source_backend_choices(app: FastAPI) -> list[dict[str, Any]]:
     ]
 
 
+_SOURCE_BACKEND_STALE_NOTE = (
+    "The previous remix backend is no longer available; review the replacement before generating."
+)
+
+
+def _source_backend_id(choices: list[dict[str, Any]], value: Any) -> str | None:
+    """Return an exact, syntactically valid source backend ID from choices."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        normalized = str(BackendId(value))
+    except ValueError:
+        return None
+    if normalized != value:
+        return None
+    return next(
+        (str(choice["backend_id"]) for choice in choices if choice["backend_id"] == normalized),
+        None,
+    )
+
+
+def _valid_backend_syntax(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(BackendId(value)) == value
+    except ValueError:
+        return False
+
+
+def _resolve_source_backend(
+    app: FastAPI,
+    choices: list[dict[str, Any]],
+    *,
+    explicit_backend: Any = None,
+    preferred_backend: Any = None,
+) -> tuple[str, str | None]:
+    """Resolve source-form selection without looking up untrusted IDs."""
+
+    stale = False
+    if explicit_backend:
+        selected = _source_backend_id(choices, explicit_backend)
+        if selected is not None:
+            return selected, None
+        stale = _valid_backend_syntax(explicit_backend)
+
+    if preferred_backend:
+        selected = _source_backend_id(choices, preferred_backend)
+        if selected is not None:
+            return selected, _SOURCE_BACKEND_STALE_NOTE if stale else None
+        stale = stale or _valid_backend_syntax(preferred_backend)
+
+    configured_default = getattr(app.state.settings, "default_cover_backend", None)
+    selected = _source_backend_id(choices, configured_default)
+    if selected is not None:
+        return selected, _SOURCE_BACKEND_STALE_NOTE if stale else None
+    if choices:
+        return str(choices[0]["backend_id"]), _SOURCE_BACKEND_STALE_NOTE if stale else None
+    return "", _SOURCE_BACKEND_STALE_NOTE if stale else None
+
+
 async def _refresh_fal_health(app: FastAPI, *, force: bool = False) -> None:
     """Refresh endpoint-scoped Fal health into the selection cache."""
 
@@ -1128,12 +1190,21 @@ def register_web_routes(app: FastAPI) -> None:
 
     @app.get("/sources/new", dependencies=[Depends(authenticated)], name="sources_new")
     async def sources_new(request: Request) -> Response:
+        await _refresh_fal_health(app)
+        choices = _source_backend_choices(app)
+        if not choices:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no reviewed remix backend is available",
+            )
+        form = {"project_title": "", "youtube_url": ""}
         return render(
             request,
             "source_new.html",
             {
-                "form": {"project_title": "", "youtube_url": ""},
+                "form": form,
                 "errors": [],
+                **_source_backend_form_context(app, choices, form),
             },
         )
 
@@ -1141,8 +1212,18 @@ def register_web_routes(app: FastAPI) -> None:
     async def source_youtube(request: Request) -> Response:
         fields = await parse_form(request)
         require_csrf(request, fields)
+        await _refresh_fal_health(app)
+        choices = _source_backend_choices(app)
+        if not choices:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no reviewed remix backend is available",
+            )
         form = dict(fields)
         errors: list[str] = []
+        selected_backend = _source_backend_id(choices, fields.get("backend"))
+        if selected_backend is None:
+            errors.append("Select a reviewed remix backend for this source.")
         project_title = fields.get("project_title", "").strip()
         youtube_url = fields.get("youtube_url", "").strip()
         if not _truthy_form_value(fields.get("rights_confirmation")):
@@ -1160,7 +1241,11 @@ def register_web_routes(app: FastAPI) -> None:
             return render(
                 request,
                 "source_new.html",
-                {"form": form, "errors": errors},
+                {
+                    "form": form,
+                    "errors": errors,
+                    **_source_backend_form_context(app, choices, form),
+                },
                 response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         try:
@@ -1174,6 +1259,7 @@ def register_web_routes(app: FastAPI) -> None:
                     youtube_url=validated_url,
                     youtube_video_id=video_id,
                     rights_confirmation_at=utc_now(),
+                    preferred_remix_backend=selected_backend,
                 )
                 session.commit()
                 source_asset_id = asset.id
@@ -1181,7 +1267,11 @@ def register_web_routes(app: FastAPI) -> None:
             return render(
                 request,
                 "source_new.html",
-                {"form": form, "errors": [str(exc)]},
+                {
+                    "form": form,
+                    "errors": [str(exc)],
+                    **_source_backend_form_context(app, choices, form),
+                },
                 response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
         app.state.source_coordinator.enqueue_source(source_asset_id)
@@ -1194,12 +1284,22 @@ def register_web_routes(app: FastAPI) -> None:
     async def source_uploads(request: Request) -> JSONResponse:
         fields = await _parse_source_init(request)
         require_csrf(request, fields)
+        await _refresh_fal_health(app)
+        choices = _source_backend_choices(app)
+        if not choices:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="no reviewed remix backend is available",
+            )
         project_title = fields.get("project_title", "").strip()
         filename = fields.get("filename", "").strip()
         source_title = fields.get("source_title", "").strip() or _source_filename_title(filename)
         raw_size_value = _required_int(fields.get("byte_size", ""))
         raw_size = raw_size_value if isinstance(raw_size_value, int) else None
         errors: list[str] = []
+        selected_backend = _source_backend_id(choices, fields.get("backend"))
+        if selected_backend is None:
+            errors.append("Select a reviewed remix backend for this source.")
         if not project_title or len(project_title) > PROJECT_TITLE_MAX_LENGTH:
             errors.append(f"Project title must contain 1-{PROJECT_TITLE_MAX_LENGTH} characters.")
         if (
@@ -1231,6 +1331,7 @@ def register_web_routes(app: FastAPI) -> None:
                     original_filename=filename,
                     declared_byte_size=raw_size,
                     rights_confirmation_at=utc_now(),
+                    preferred_remix_backend=selected_backend,
                 )
                 capability = issue_asset_transfer_capability(
                     session,
@@ -2233,7 +2334,12 @@ def register_web_routes(app: FastAPI) -> None:
                 "errors": [],
                 "source_duration_seconds": source.duration_seconds,
                 "remix_url": _route_path(request, "create_source_remix", project_id=project.id),
-                **_source_backend_form_context(choices, form),
+                **_source_backend_form_context(
+                    app,
+                    choices,
+                    form,
+                    preferred_backend=source.preferred_remix_backend,
+                ),
             },
         )
 
@@ -2309,6 +2415,7 @@ def register_web_routes(app: FastAPI) -> None:
                     inference_provider=selected_provider.capabilities.name,
                     inference_backend=selected_provider.capabilities.backend_id,
                 )
+                source.preferred_remix_backend = str(selected_provider.capabilities.backend_id)
                 job_id = job.id
                 session.commit()
             except (ValidationError, ValueError, KeyError) as exc:
@@ -2326,7 +2433,12 @@ def register_web_routes(app: FastAPI) -> None:
                         "remix_url": _route_path(
                             request, "create_source_remix", project_id=project.id
                         ),
-                        **_source_backend_form_context(choices, form),
+                        **_source_backend_form_context(
+                            app,
+                            choices,
+                            form,
+                            preferred_backend=source.preferred_remix_backend,
+                        ),
                     },
                     response_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
@@ -3099,14 +3211,24 @@ def _source_asset_view(request: Request, asset: SourceAsset) -> dict[str, Any]:
 
 
 def _source_backend_form_context(
-    choices: list[dict[str, Any]], form: Mapping[str, Any]
+    app: FastAPI,
+    choices: list[dict[str, Any]],
+    form: Mapping[str, Any],
+    *,
+    preferred_backend: Any = None,
 ) -> dict[str, Any]:
-    selected = str(form.get("backend") or (choices[0]["backend_id"] if choices else ""))
+    selected, backend_note = _resolve_source_backend(
+        app,
+        choices,
+        explicit_backend=form.get("backend"),
+        preferred_backend=preferred_backend,
+    )
     choice = next((item for item in choices if item["backend_id"] == selected), None)
     native_formats = choice["native_formats"] if choice is not None else ["mp3"]
     return {
         "backend_choices": choices,
         "selected_backend": selected,
+        "backend_note": backend_note,
         "selected_backend_is_fal": choice is not None and choice["provider"] == "fal.ai",
         "selected_backend_is_mock": choice is not None
         and choice["provider"] == ProviderName.MOCK.value,

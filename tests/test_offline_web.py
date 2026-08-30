@@ -47,6 +47,8 @@ def test_public_offline_shell_has_no_private_state(media_web_app, settings) -> N
         assert "notifications-config" not in shell.text
         assert "data-offline-storage-message" in shell.text
         assert 'rel="manifest"' in shell.text
+        assert "Create original" not in shell.text
+        assert "Create remix" not in shell.text
         assert client.get("/offline").status_code == 401
         assert client.get("/offline", auth=_auth(client)).status_code == 200
 

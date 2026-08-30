@@ -314,6 +314,13 @@ When changing the default:
 The controller never uses one provider as an implicit fallback for a persisted
 job. A temporary status error is not permission to resubmit.
 
+Source creation has a separate intent step. The initial Create remix form
+offers only currently selectable backends with a reviewed source-duration
+contract and stores the selected stable ID on the source asset. YouTube and
+upload preparation remain provider-independent at Home Ingest. The final remix
+form revalidates the current selection; an unavailable stored choice is shown
+with a review warning and never submits a fallback automatically.
+
 ## Database migration
 
 Normal startup never upgrades an existing database. Inspect it first:
@@ -340,14 +347,20 @@ uv run python -m ace_service migrate-upgrade \
 The upgrade uses a sidecar lock and durable attempt marker. If it reports an
 incomplete or failed migration, do not retry it. Restore the verified backup.
 
-Schema v11 adds source assets, signed asset-transfer capabilities, source
-provenance, backend-frozen clip fields, and derivative tasks to the v10 media
-library. The migration is additive: existing v10 output/media/playlists remain
-unchanged, and an existing experimental `kind='source'` row fails closed
-instead of being guessed into the new ownership model. Run the explicit
-v10-to-v11 rehearsal and confirm `older_version` → upgrade →
-`exact_expected` before deployment. Keep the backup and database on the same
-recovery record. Never start a v10 release against a v11 database.
+Schema v12 adds one nullable
+`source_assets.preferred_remix_backend` column to the v11 source model. It is
+additive: existing source, media, job, transfer, and provider rows are
+preserved, and historical preferences remain `NULL`. Before a v11-to-v12
+upgrade, use the isolated beta SQLite backup API, verify `PRAGMA integrity_check`
+on both source and backup, and confirm status is `older_version`. Run the
+explicit upgrade, then verify `exact_expected`, exactly one nullable preference
+column, preserved source rows, and a clean integrity check. A failed upgrade
+leaves the durable `migration_failed` marker; do not retry it. Restore the
+verified backup and investigate before starting the service. Keep the backup,
+schema result, and deployment revision on the same recovery record.
+
+The v10-to-v11 source ownership rehearsal remains required for v10 databases;
+never start a v10 release against a v11 or v12 database.
 
 New data is stored below the configured root as `uploads/<source-uuid>/`,
 `library/sources/<source-uuid>/source.mp3`,
@@ -490,6 +503,14 @@ uv run playwright install --with-deps chromium firefox
 uv run pytest -q tests/e2e --browser chromium
 uv run pytest -q tests/e2e --browser firefox
 ```
+
+The source-selection beta gate must use fresh Chromium and Firefox profiles.
+Verify the exact reviewed source inventory, the required selector and label
+association, source preference through upload/preparation/project navigation,
+the final-form warning and query precedence, and the `Home`, `Create original`,
+`Create remix` order under `/beta/`. Do not submit a paid generation for this
+UI/data change; record the exact product and deployment revisions with the
+manual acceptance result.
 
 Then run the protected beta mock smoke with the exact
 `mock/midi-sequential` backend. It must verify the beta URL, authenticated

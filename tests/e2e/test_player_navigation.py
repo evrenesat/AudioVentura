@@ -15,6 +15,33 @@ def _play_first_track(page: Page, server: E2EServer) -> None:
     )
 
 
+def test_online_navigation_exposes_prefixed_creation_links(
+    e2e_page: Page, e2e_server: E2EServer
+) -> None:
+    nav = e2e_page.locator("nav.primary-nav a[data-app-nav]")
+    assert nav.all_text_contents() == [
+        "Home",
+        "Create original",
+        "Create remix",
+        "Library",
+        "Playlists",
+        "Projects",
+        "Offline",
+    ]
+    assert nav.evaluate_all("nodes => nodes.map(node => node.getAttribute('href'))") == [
+        "/beta/",
+        "/beta/create",
+        "/beta/sources/new",
+        "/beta/library",
+        "/beta/playlists",
+        "/beta/projects",
+        "/beta/offline",
+    ]
+    e2e_page.get_by_role("link", name="Create original", exact=True).click()
+    expect(e2e_page).to_have_url(re.compile(r"/beta/create$"))
+    expect(e2e_page.locator("#description")).to_be_visible()
+
+
 def test_player_controls_and_soft_navigation_preserve_playback(
     e2e_page: Page, e2e_server: E2EServer
 ) -> None:

@@ -130,6 +130,33 @@ def _prepare_v5_database(path: Path) -> None:
         connection.close()
 
 
+def _prepare_v11_database(path: Path) -> None:
+    """Apply the production-shaped v11 DDL and ready marker."""
+
+    import ace_service.migrations as migrations_module
+
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        migrations_module._create_schema_version_table(connection)
+        migrations_module._cp4_ddl(connection)
+        migrations_module._cp5_ddl(connection)
+        migrations_module._cp6_ddl(connection)
+        migrations_module._cp7_ddl(connection)
+        migrations_module._cp8_ddl(connection)
+        migrations_module._cp9_ddl(connection)
+        migrations_module._cp10_ddl(connection)
+        migrations_module._cp11_ddl(connection)
+        connection.execute(
+            "INSERT INTO schema_version "
+            "(singleton, version, status, started_at, completed_at) "
+            "VALUES (1, 11, 'ready', '2026-08-28T00:00:00Z', '2026-08-28T00:00:00Z')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class TestStatusClassification:
     def test_status_is_read_only_for_legacy_database(self, legacy_database_path: Path) -> None:
         report = migration_status(str(legacy_database_path))
@@ -250,6 +277,7 @@ class TestUpgrade:
         assert "conservative_margin" in _columns(legacy_database_path, "runtime_calibrations")
         assert "evidence_checksum" in _columns(legacy_database_path, "billing_observations")
         assert "latest_evidence_checksum" in _columns(legacy_database_path, "billing_projections")
+        assert "preferred_remix_backend" in _columns(legacy_database_path, "source_assets")
         assert "ix_billing_observations_evidence_checksum" in _indexes(
             legacy_database_path, "billing_observations"
         )
@@ -722,6 +750,84 @@ class TestUpgrade:
             CURRENT_SCHEMA_VERSION,
             "ready",
         )
+
+    def test_v11_to_v12_adds_one_nullable_preference_and_preserves_sources(
+        self, legacy_database_path: Path
+    ) -> None:
+        _prepare_v11_database(legacy_database_path)
+        source_id = "123e4567-e89b-12d3-a456-426614174801"
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            connection.execute(
+                "INSERT INTO projects (id, job_type, title, created_at, updated_at) "
+                "VALUES (?, 'cover', 'Historical source project', ?, ?)",
+                (source_id, "2026-08-28T00:00:00Z", "2026-08-28T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO source_assets "
+                "(id, project_id, origin, status, display_title, youtube_url, youtube_video_id, "
+                "rights_confirmation_at, created_at, updated_at) VALUES "
+                "(?, ?, 'youtube', 'queued', 'Historical source', ?, 'abc123', ?, ?, ?)",
+                (
+                    source_id,
+                    source_id,
+                    "https://www.youtube.com/watch?v=abc123",
+                    "2026-08-28T00:00:00Z",
+                    "2026-08-28T00:00:00Z",
+                    "2026-08-28T00:00:00Z",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        assert migration_status(str(legacy_database_path))["state"] == "older_version"
+        result = migration_upgrade(str(legacy_database_path))
+        assert result["changed"] is True
+        assert migration_status(str(legacy_database_path))["state"] == "exact_expected"
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            source_columns = [
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(source_assets)").fetchall()
+            ]
+            assert source_columns.count("preferred_remix_backend") == 1
+            assert connection.execute(
+                "SELECT project_id, display_title, preferred_remix_backend "
+                "FROM source_assets WHERE id = ?",
+                (source_id,),
+            ).fetchone() == (source_id, "Historical source", None)
+            assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        finally:
+            connection.close()
+
+        second = migration_upgrade(str(legacy_database_path))
+        assert second["changed"] is False
+        assert _schema_version_row(legacy_database_path) == (CURRENT_SCHEMA_VERSION, "ready")
+
+    def test_v11_to_v12_failure_rolls_back_column_and_marks_failed(
+        self, legacy_database_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ace_service.migrations as migrations_module
+
+        _prepare_v11_database(legacy_database_path)
+
+        def injected_failure(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "ALTER TABLE source_assets ADD COLUMN preferred_remix_backend VARCHAR(256)"
+            )
+            raise sqlite3.OperationalError("injected v12 migration failure")
+
+        monkeypatch.setattr(migrations_module, "_cp12_ddl", injected_failure)
+        with pytest.raises(MigrationError, match="rolled back"):
+            migration_upgrade(str(legacy_database_path))
+        assert "preferred_remix_backend" not in _columns(legacy_database_path, "source_assets")
+        assert _schema_version_row(legacy_database_path) == (
+            CURRENT_SCHEMA_VERSION,
+            "migration_failed",
+        )
+        with pytest.raises(MigrationError, match="durably incomplete"):
+            migration_upgrade(str(legacy_database_path))
 
     def test_upgrade_refuses_missing_path(self, tmp_path: Path) -> None:
         with pytest.raises(MigrationError, match="does not exist"):

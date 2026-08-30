@@ -17,6 +17,7 @@ from ace_service.models import (
     MediaItemKind,
     OutputFormat,
     PlaylistEntry,
+    SourceAsset,
     SourceAssetOrigin,
     SourceAssetStatus,
     utc_now,
@@ -36,6 +37,7 @@ from ace_service.repository import (
     prepare_variation_submission,
     publish_completed_variation_media,
     query_media_library,
+    retry_source_asset,
     transition_variation_attempt,
 )
 from ace_service.schemas import CoverRequest, OriginalSongRequest
@@ -121,6 +123,64 @@ def test_source_publication_is_idempotent_and_allows_long_sources(session, setti
     assert again.id == item.id
     assert session.scalar(select(PlaylistEntry).where(PlaylistEntry.media_item_id == item.id))
     assert session.query(MediaFile).filter(MediaFile.media_item_id == item.id).count() == 1
+
+
+def test_source_preference_normalizes_and_survives_failure_retry_and_cascade(session) -> None:
+    project = create_project(session, job_type=JobType.COVER, title="Preference project")
+    asset = create_source_asset(
+        session,
+        project=project,
+        origin=SourceAssetOrigin.YOUTUBE,
+        display_title="Preferred source",
+        youtube_url="https://www.youtube.com/watch?v=abc123",
+        youtube_video_id="abc123",
+        rights_confirmation_at=utc_now(),
+        preferred_remix_backend="mock/midi-sequential",
+    )
+    assert asset.preferred_remix_backend == "mock/midi-sequential"
+
+    for status in (SourceAssetStatus.FAILED, SourceAssetStatus.CANCELLED):
+        asset.status = status
+        asset.error_code = "test_failure"
+        asset.user_facing_error = "Retryable source state"
+        session.flush()
+        assert retry_source_asset(session, asset.id).preferred_remix_backend == (
+            "mock/midi-sequential"
+        )
+
+    source_id = asset.id
+    session.delete(project)
+    session.commit()
+    assert session.scalar(select(SourceAsset.id).where(SourceAsset.id == source_id)) is None
+
+
+def test_source_preference_rejects_malformed_or_oversized_backend_ids(session) -> None:
+    for index, backend in enumerate(("bad\nbackend", "x" * 257), start=1):
+        project = create_project(session, job_type=JobType.COVER, title=f"Invalid {index}")
+        with pytest.raises(ValueError, match="backend ID"):
+            create_source_asset(
+                session,
+                project=project,
+                origin=SourceAssetOrigin.YOUTUBE,
+                display_title="Invalid source",
+                youtube_url="https://www.youtube.com/watch?v=abc123",
+                youtube_video_id="abc123",
+                rights_confirmation_at=utc_now(),
+                preferred_remix_backend=backend,
+            )
+        session.rollback()
+
+    project = create_project(session, job_type=JobType.COVER, title="Historical source")
+    historical = create_source_asset(
+        session,
+        project=project,
+        origin=SourceAssetOrigin.YOUTUBE,
+        display_title="Historical source",
+        youtube_url="https://www.youtube.com/watch?v=abc123",
+        youtube_video_id="abc123",
+        rights_confirmation_at=utc_now(),
+    )
+    assert historical.preferred_remix_backend is None
 
 
 def test_source_range_is_frozen_and_active_source_delete_is_blocked(session, settings) -> None:

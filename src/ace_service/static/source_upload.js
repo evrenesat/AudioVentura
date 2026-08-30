@@ -32,6 +32,7 @@
   const retryButton = uploadForm?.querySelector("[data-upload-retry]");
   const startButton = uploadForm?.querySelector("[data-upload-start]");
   const fileInput = uploadForm?.querySelector("[data-source-file]");
+  const backendSelect = document.querySelector("#backend");
 
   const setText = (node, value) => { if (node) node.textContent = value; };
   const show = (node, visible) => { if (node) node.hidden = !visible; };
@@ -133,6 +134,7 @@
       showUploadError(sourceFile.size ? "This file is larger than the 512 MiB limit." : "Empty files cannot be uploaded.");
       return;
     }
+    if (backendSelect && !backendSelect.reportValidity()) return;
     if (!uploadForm.reportValidity()) return;
     show(uploadStatus, true);
     if (fileLabel) fileLabel.textContent = `${sourceFile.name} · ${formatBytes(sourceFile.size)}`;
@@ -143,7 +145,7 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", "Accept": "application/json", "X-CSRF-Token": csrf },
-        body: JSON.stringify({ csrf_token: csrf, project_title: uploadForm.elements.project_title.value, filename: sourceFile.name, byte_size: sourceFile.size, rights_confirmation: uploadForm.elements.rights_confirmation.checked }),
+        body: JSON.stringify({ csrf_token: csrf, backend: backendSelect?.value || "", project_title: uploadForm.elements.project_title.value, filename: sourceFile.name, byte_size: sourceFile.size, rights_confirmation: uploadForm.elements.rights_confirmation.checked }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !body.upload_url) throw new Error("Upload initialization failed. Check the project title and rights confirmation.");
