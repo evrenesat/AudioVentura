@@ -7,6 +7,7 @@ import pytest
 
 from ace_node.config import NodeSettings
 from ace_node.worker import AceStepNodeRuntime
+from runpod_worker import runtime as worker_runtime
 from runpod_worker.runtime import (
     WorkerInitializationError,
     compute_local_runtime_receipt,
@@ -70,6 +71,27 @@ def test_macos_mps_selection_defaults_to_safe_vae_chunk(monkeypatch: pytest.Monk
     assert __import__("os").environ["ACESTEP_MLX_VAE_CHUNK"] == "512"
 
 
+def test_pinned_bundle_replaces_upstream_default_dit(monkeypatch: pytest.MonkeyPatch) -> None:
+    downloader = types.SimpleNamespace(
+        MAIN_MODEL_COMPONENTS=[
+            "acestep-v15-turbo",
+            "vae",
+            "Qwen3-Embedding-0.6B",
+            "acestep-5Hz-lm-1.7B",
+        ]
+    )
+    monkeypatch.setattr(worker_runtime.importlib, "import_module", lambda _name: downloader)
+
+    worker_runtime._configure_pinned_main_model_components()
+
+    assert downloader.MAIN_MODEL_COMPONENTS == [
+        "acestep-v15-xl-turbo",
+        "vae",
+        "Qwen3-Embedding-0.6B",
+        "acestep-5Hz-lm-1.7B",
+    ]
+
+
 @pytest.mark.parametrize(
     ("system", "machine"),
     [("Windows", "AMD64"), ("Linux", "aarch64"), ("Darwin", "x86_64")],
@@ -113,6 +135,11 @@ def test_node_settings_reject_public_bind_and_placeholder_service_token(tmp_path
 def test_node_runtime_receipt_defaults_to_deployment_lock(tmp_path: Path) -> None:
     settings = NodeSettings(data_root=tmp_path, token="node-secret")
     assert settings.runtime_lock_path == Path("deploy/node/uv.lock")
+    assert settings.idle_unload_seconds == 900
+    with pytest.raises(ValueError):
+        NodeSettings(data_root=tmp_path, token="node-secret", idle_unload_seconds=59)
+    with pytest.raises(ValueError):
+        NodeSettings(data_root=tmp_path, token="node-secret", idle_unload_seconds=14_401)
 
 
 def test_node_runtime_requires_a_committed_application_receipt(tmp_path: Path) -> None:

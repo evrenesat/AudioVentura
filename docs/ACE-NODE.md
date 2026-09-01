@@ -193,11 +193,15 @@ and writes a setup receipt only after the pinned 29-file, 25,253,680,505-byte
 manifest validates. The token is cleared and never written to disk.
 
 The menu item and popover show `Setup required`, initialization phases,
-`Ready`, running/queued counts, `Draining`, `Remote unavailable`, or `Failed`.
+`Ready`, running/queued counts, `Model unloaded`, `Draining`, `Remote
+unavailable`, or `Failed`.
 `Restart Worker (drain)` waits for the queue to empty before replacing the
 child. `Force Restart` is explicit and records queued/running work as
 `worker_restarted` through normal worker recovery; it is not an automatic
-resubmission. Launch at Login is opt-in and uses `SMAppService.mainApp`.
+resubmission. Settings can select a 1-240 minute model idle timeout, defaulting
+to 15 minutes. Applying it drains active work before restarting the child; the
+node then unloads model memory after that idle period and reloads automatically
+for the next job. Launch at Login is opt-in and uses `SMAppService.mainApp`.
 
 The app derives these private paths with `FileManager`:
 

@@ -185,6 +185,8 @@ public final class WorkerSupervisor: ObservableObject {
     public static let modelManifestSHA256 =
         "39a8180ef6852e2dfccb9088efa7231ca7de7e4c05c8d65e3ac5a3e7a5bfd0fc"
     public static let aceStepCommit = "dce621408bee8c31b4fcf4811682eb9359e1bc94"
+    public static let defaultModelIdleUnloadMinutes = 15
+    private static let modelIdleUnloadMinutesKey = "modelIdleUnloadMinutes"
 
     @Published public private(set) var menuState: MenuState = .unconfigured
     @Published public private(set) var health: WorkerHealth?
@@ -201,6 +203,7 @@ public final class WorkerSupervisor: ObservableObject {
     private let loginItem: LoginItemManaging
     private let sleepActivity: SleepActivityManaging
     private let identityProvider: ProcessIdentityProviding
+    private let defaults: UserDefaults
     private let modelReadyOverride: Bool?
     private let clock: () -> Date
     private var client: (any WorkerClienting)?
@@ -233,6 +236,7 @@ public final class WorkerSupervisor: ObservableObject {
         loginItem: LoginItemManaging? = nil,
         sleepActivity: SleepActivityManaging = SystemSleepActivity(),
         identityProvider: ProcessIdentityProviding = SystemProcessIdentityProvider(),
+        defaults: UserDefaults = .standard,
         modelReady: Bool? = nil,
         clock: @escaping () -> Date = Date.init
     ) {
@@ -244,6 +248,7 @@ public final class WorkerSupervisor: ObservableObject {
         self.loginItem = loginItem ?? MainAppLoginItemManager()
         self.sleepActivity = sleepActivity
         self.identityProvider = identityProvider
+        self.defaults = defaults
         modelReadyOverride = modelReady
         self.clock = clock
         self.process.terminationHandler = { [weak self] in
@@ -273,6 +278,11 @@ public final class WorkerSupervisor: ObservableObject {
     }
 
     public var loginAtLogin: Bool { loginItem.isEnabled }
+
+    public var modelIdleUnloadMinutes: Int {
+        let value = defaults.integer(forKey: Self.modelIdleUnloadMinutesKey)
+        return (1...240).contains(value) ? value : Self.defaultModelIdleUnloadMinutes
+    }
 
     public func setPopoverVisible(_ visible: Bool) {
         guard popoverVisible != visible else { return }
@@ -413,6 +423,17 @@ public final class WorkerSupervisor: ObservableObject {
         }
     }
 
+    public func setModelIdleUnloadMinutes(_ minutes: Int) {
+        let value = min(240, max(1, minutes))
+        guard value != modelIdleUnloadMinutes else { return }
+        defaults.set(value, forKey: Self.modelIdleUnloadMinutesKey)
+        objectWillChange.send()
+        guard wantsWorker else { return }
+        Task { @MainActor [weak self] in
+            await self?.restart()
+        }
+    }
+
     public func controllerConfiguration() -> String? {
         guard let address = tailscaleAddress, let token = nodeToken else { return nil }
         return "ACE_NODE_BASE_URL=http://\(address):8210\nACE_NODE_TOKEN=\(token)"
@@ -441,16 +462,30 @@ public final class WorkerSupervisor: ObservableObject {
         if let modelReadyOverride { return modelReadyOverride }
         guard let data = try? Data(contentsOf: paths.setupReceiptURL), data.count <= 65_536,
             let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            Set(value.keys) == [
-                "schema_version", "model_repo", "model_revision", "model_manifest_sha256",
-            ],
             value["schema_version"] as? Int == 1,
-            value["model_repo"] as? String == Self.modelRepo,
             value["model_revision"] as? String == Self.modelRevision,
             value["model_manifest_sha256"] as? String == Self.modelManifestSHA256
         else {
             return false
         }
+        let keys = Set(value.keys)
+        let currentReceipt =
+            keys
+            == [
+                "schema_version", "model_repo", "model_revision", "model_manifest_sha256",
+            ] && value["model_repo"] as? String == Self.modelRepo
+        let legacyRevision = value["application_revision"] as? String
+        let legacyCompletedAt = value["completed_at_utc"] as? String
+        let legacyReceipt =
+            keys
+            == [
+                "schema_version", "application_revision", "completed_at_utc",
+                "model_revision", "model_manifest_sha256",
+            ]
+            && legacyRevision?.range(
+                of: "^[0-9a-f]{40}$", options: .regularExpression) != nil
+            && legacyCompletedAt.flatMap { ISO8601DateFormatter().date(from: $0) } != nil
+        guard currentReceipt || legacyReceipt else { return false }
         return FileManager.default.fileExists(
             atPath: paths.modelCacheRoot(revision: Self.modelRevision).path
         )
@@ -597,6 +632,7 @@ public final class WorkerSupervisor: ObservableObject {
             "ACE_NODE_APPLICATION_REVISION": applicationRevision,
             "ACE_NODE_RUNTIME_LOCK_PATH": paths.bundledLockURL.path,
             "ACE_NODE_RUNTIME_RECEIPT": runtimeReceipt,
+            "ACE_NODE_IDLE_UNLOAD_SECONDS": String(modelIdleUnloadMinutes * 60),
             "ACE_STEP_COMMIT": Self.aceStepCommit,
             "ACE_STEP_TAG": "v0.1.8",
             "ACE_TRANSFER_ALLOWED_HOST": "player.evren.io",

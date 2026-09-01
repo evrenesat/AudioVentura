@@ -36,6 +36,7 @@ final class SupervisorTests: XCTestCase {
         XCTAssertEqual(process.environment["ACE_NODE_ACCELERATOR"], "mps")
         XCTAssertEqual(process.environment["ACE_NODE_LISTEN_HOST"], "100.99.150.44")
         XCTAssertEqual(process.environment["ACE_NODE_LISTEN_PORT"], "8210")
+        XCTAssertEqual(process.environment["ACE_NODE_IDLE_UNLOAD_SECONDS"], "900")
         XCTAssertEqual(process.environment["ACE_NODE_MODEL_REPO"], nil)
         XCTAssertEqual(process.environment["ACESTEP_MLX_VAE_CHUNK"], "512")
         XCTAssertEqual(process.environment["PYTHONNOUSERSITE"], "1")
@@ -57,6 +58,68 @@ final class SupervisorTests: XCTestCase {
         XCTAssertEqual(supervisor.menuState, .stopped)
         XCTAssertEqual(sleep.acquireCount, 0)
         XCTAssertGreaterThanOrEqual(login.setCount, 0)
+    }
+
+    func testIdleUnloadSettingPersistsAndReachesWorkerEnvironment() async throws {
+        let suite = "ace-supervisor-idle-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let process = FakeWorkerProcess()
+        let supervisor = WorkerSupervisor(
+            paths: AppPaths(
+                rootOverride: FileManager.default.temporaryDirectory.appendingPathComponent(
+                    suite, isDirectory: true)),
+            keychain: MemorySecretStore(),
+            discovery: FixedDiscovery(),
+            process: process,
+            clientFactory: { _, _, _ in FakeWorkerClient() },
+            loginItem: FakeLoginItem(),
+            sleepActivity: FakeSleepActivity(),
+            identityProvider: EmptyIdentityProvider(),
+            defaults: defaults,
+            modelReady: true
+        )
+
+        XCTAssertEqual(supervisor.modelIdleUnloadMinutes, 15)
+        supervisor.setModelIdleUnloadMinutes(30)
+        XCTAssertEqual(supervisor.modelIdleUnloadMinutes, 30)
+        supervisor.start()
+        await Task.yield()
+        XCTAssertEqual(process.environment["ACE_NODE_IDLE_UNLOAD_SECONDS"], "1800")
+        _ = await supervisor.stop()
+    }
+
+    func testLegacySetupReceiptKeepsPreparedModelReady() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ace-supervisor-legacy-setup-" + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = AppPaths(rootOverride: root)
+        try paths.ensureDirectories()
+        try FileManager.default.createDirectory(
+            at: paths.modelCacheRoot(revision: WorkerSupervisor.modelRevision),
+            withIntermediateDirectories: true
+        )
+        let receipt: [String: Any] = [
+            "schema_version": 1,
+            "application_revision": String(repeating: "a", count: 40),
+            "completed_at_utc": "2026-08-31T17:01:05Z",
+            "model_revision": WorkerSupervisor.modelRevision,
+            "model_manifest_sha256": WorkerSupervisor.modelManifestSHA256,
+        ]
+        try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+            .write(to: paths.setupReceiptURL, options: .atomic)
+        let supervisor = WorkerSupervisor(
+            paths: paths,
+            keychain: MemorySecretStore(),
+            discovery: FixedDiscovery(),
+            process: FakeWorkerProcess(),
+            clientFactory: { _, _, _ in FakeWorkerClient() },
+            loginItem: FakeLoginItem(),
+            sleepActivity: FakeSleepActivity(),
+            identityProvider: EmptyIdentityProvider()
+        )
+
+        XCTAssertTrue(supervisor.modelIsReadyForSetup())
     }
 
     func testSupervisorRefusesToTerminateChangedProcessIdentity() async throws {

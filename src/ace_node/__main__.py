@@ -202,10 +202,14 @@ def recover_stale_process(
     """Terminate only a process whose complete receipt and live identity match."""
 
     receipt = read_worker_receipt(path)
-    if receipt is None or not receipt_matches_process(
-        receipt,
-        expected_executable_path=expected_executable_path,
-        expected_application_revision=expected_application_revision,
+    if (
+        receipt is None
+        or receipt.worker_pid == os.getpid()
+        or not receipt_matches_process(
+            receipt,
+            expected_executable_path=expected_executable_path,
+            expected_application_revision=expected_application_revision,
+        )
     ):
         return False
     try:

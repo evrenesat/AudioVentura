@@ -99,6 +99,12 @@ class NodeSettings(BaseSettings):
         validation_alias=AliasChoices("ACE_NODE_JOB_TIMEOUT_SECONDS", "job_timeout_seconds"),
         gt=0,
     )
+    idle_unload_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices("ACE_NODE_IDLE_UNLOAD_SECONDS", "idle_unload_seconds"),
+        ge=60,
+        le=14_400,
+    )
     max_output_bytes: int = Field(
         default=268_435_456,
         validation_alias=AliasChoices("ACE_NODE_MAX_OUTPUT_BYTES", "max_output_bytes"),

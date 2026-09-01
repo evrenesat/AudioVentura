@@ -91,7 +91,7 @@ public struct MenuContentView: View {
             Button("Cancel preparation") { appState.cancelPreparation() }
         } else {
             switch supervisor.menuState {
-            case .ready, .running, .runningQueued:
+            case .ready, .running, .runningQueued, .modelUnloaded:
                 Button("Stop Worker") { appState.stop() }
                 Button("Restart Worker (drain)") { appState.restart() }
                 DisclosureGroup("Advanced") {

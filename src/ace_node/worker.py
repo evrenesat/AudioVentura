@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import gc
+import importlib
 import inspect
 import json
 import logging
@@ -36,6 +38,8 @@ HEALTH_PHASES = frozenset(
         "validating_model",
         "loading_dit",
         "loading_lm",
+        "unloading_model",
+        "model_unloaded",
         "ready",
         "draining",
         "failed",
@@ -43,7 +47,14 @@ HEALTH_PHASES = frozenset(
     }
 )
 _INITIALIZATION_PHASES = frozenset(
-    {"starting", "validating_runtime", "validating_model", "loading_dit", "loading_lm"}
+    {
+        "starting",
+        "validating_runtime",
+        "validating_model",
+        "loading_dit",
+        "loading_lm",
+        "unloading_model",
+    }
 )
 
 
@@ -98,6 +109,32 @@ class AceStepNodeRuntime:
         configure_runtime(self._runtime)
         return handler({"id": node_job_id, "input": payload})
 
+    def unload(self) -> None:
+        """Drop all model owners and release accelerator caches."""
+
+        runtime = self._runtime
+        if runtime is None:
+            return
+        from runpod_worker.handler import clear_runtime
+
+        clear_runtime(runtime)
+        unload_lm = getattr(runtime.llm_handler, "unload", None)
+        if callable(unload_lm):
+            unload_lm()
+        self._runtime = None
+        del runtime
+        gc.collect()
+        try:
+            mps = importlib.import_module("torch").mps
+            mps.synchronize()
+            mps.empty_cache()
+        except (AttributeError, ImportError, RuntimeError):
+            pass
+        try:
+            importlib.import_module("mlx.core").clear_cache()
+        except (AttributeError, ImportError, RuntimeError):
+            pass
+
 
 class NodeWorker:
     """Persistent serial queue with recovery-safe durable state."""
@@ -130,6 +167,7 @@ class NodeWorker:
         self._failure_code: str | None = None
         self._running_job_id: str | None = None
         self._running_started_at: float | None = None
+        self._idle_since: float | None = None
 
     def _default_runtime_factory(self) -> AceStepNodeRuntime:
         return AceStepNodeRuntime(self.settings)
@@ -178,6 +216,7 @@ class NodeWorker:
             self._runtime = None
             self._running_job_id = None
             self._running_started_at = None
+            self._idle_since = None
             self._queued_ids.clear()
             self._payloads.clear()
             self._queue = queue.Queue()
@@ -191,12 +230,7 @@ class NodeWorker:
 
     def _initialize_in_background(self) -> None:
         try:
-            runtime = self._runtime_factory()
-            initialize = getattr(runtime, "initialize", None)
-            if callable(initialize):
-                initialized = self._call_initialize(initialize)
-                if initialized is not None:
-                    runtime = initialized
+            runtime = self._create_runtime()
         except Exception:
             LOGGER.error(
                 "stage=runtime_init error_code=runtime_initialization_failed",
@@ -214,6 +248,7 @@ class NodeWorker:
             self._runtime = runtime
             self._phase = "ready" if self._accepting else "draining"
             self._status = "ready"
+            self._idle_since = self._clock()
             self._queue_thread = threading.Thread(
                 target=self._run_queue,
                 name="ace-node-job-worker",
@@ -221,6 +256,15 @@ class NodeWorker:
             )
             self._queue_thread.start()
         LOGGER.info("stage=runtime_ready component=ace-node")
+
+    def _create_runtime(self) -> Any:
+        runtime = self._runtime_factory()
+        initialize = getattr(runtime, "initialize", None)
+        if callable(initialize):
+            initialized = self._call_initialize(initialize)
+            if initialized is not None:
+                runtime = initialized
+        return runtime
 
     def _call_initialize(self, initialize: Callable[..., Any]) -> Any:
         """Pass the phase callback to new runtimes without breaking test doubles."""
@@ -245,15 +289,18 @@ class NodeWorker:
         with self._lock:
             if self._stop_event.is_set() or self._phase in {"failed", "stopping"}:
                 return
-            self._phase = phase
             if phase == "ready":
+                self._phase = "ready" if self._accepting else "draining"
                 self._status = "ready"
             elif phase == "draining":
+                self._phase = phase
                 self._status = "ready"
             elif phase == "failed":
+                self._phase = phase
                 self._status = "failed"
                 self._accepting = False
             else:
+                self._phase = phase
                 self._status = "initializing"
 
     def stop(self) -> None:
@@ -275,6 +322,7 @@ class NodeWorker:
             self._runtime = None
             self._running_job_id = None
             self._running_started_at = None
+            self._idle_since = None
             self._queued_ids.clear()
 
     def wait_ready(self, timeout: float = 10.0) -> str:
@@ -295,7 +343,7 @@ class NodeWorker:
             queue_depth = len(self._queued_ids)
         if phase in _INITIALIZATION_PHASES:
             status = "initializing"
-        elif phase in {"ready", "draining"}:
+        elif phase in {"ready", "draining", "model_unloaded"}:
             status = "ready"
         elif phase == "failed":
             status = "failed"
@@ -331,7 +379,7 @@ class NodeWorker:
 
         with self._lock:
             self._accepting = False
-            if self._phase in _INITIALIZATION_PHASES | {"ready"}:
+            if self._phase in _INITIALIZATION_PHASES | {"ready", "model_unloaded"}:
                 self._phase = "draining"
                 self._status = "ready"
             return {
@@ -342,7 +390,7 @@ class NodeWorker:
 
     def submit(self, payload: Mapping[str, Any]) -> tuple[NodeJob, bool]:
         with self._lock:
-            if self._status != "ready" or self._phase != "ready":
+            if self._status != "ready" or self._phase not in {"ready", "model_unloaded"}:
                 raise RuntimeError("node runtime is not ready")
             if not self._accepting:
                 raise RuntimeError("node runtime is draining")
@@ -363,6 +411,9 @@ class NodeWorker:
                 self._payloads[job.job_id] = copy.deepcopy(dict(raw_input))
                 self._queued_ids.add(job.job_id)
                 self._queue.put_nowait(job.job_id)
+                if self._phase == "model_unloaded":
+                    self._phase = "starting"
+                    self._status = "initializing"
         return job, created
 
     def get(self, job_id: str) -> NodeJob | None:
@@ -391,23 +442,26 @@ class NodeWorker:
             try:
                 job_id = self._queue.get(timeout=0.1)
             except queue.Empty:
+                self._unload_if_idle()
                 continue
             if job_id is None:
                 self._queue.task_done()
                 break
-            with self._lock:
-                self._queued_ids.discard(job_id)
             try:
                 self._execute_one(job_id)
             finally:
                 self._queue.task_done()
 
     def _execute_one(self, job_id: str) -> None:
+        if not self._ensure_runtime(job_id):
+            return
         if not self.database.set_running(job_id):
             with self._lock:
                 self._payloads.pop(job_id, None)
+                self._queued_ids.discard(job_id)
             return
         with self._lock:
+            self._queued_ids.discard(job_id)
             payload = self._payloads.get(job_id)
             runtime = self._runtime
             self._running_job_id = job_id
@@ -417,6 +471,7 @@ class NodeWorker:
             with self._lock:
                 self._running_job_id = None
                 self._running_started_at = None
+                self._idle_since = self._clock()
             return
         started = self._clock()
         try:
@@ -445,6 +500,74 @@ class NodeWorker:
                 self._payloads.pop(job_id, None)
                 self._running_job_id = None
                 self._running_started_at = None
+                self._idle_since = self._clock()
+
+    def _ensure_runtime(self, job_id: str) -> bool:
+        with self._lock:
+            if self._runtime is not None:
+                return True
+        try:
+            runtime = self._create_runtime()
+        except Exception:
+            LOGGER.error(
+                "stage=runtime_reload error_code=runtime_reload_failed",
+                extra={"component": "ace-node"},
+            )
+            self.database.fail(job_id, "runtime_reload_failed")
+            with self._lock:
+                self._payloads.pop(job_id, None)
+                self._queued_ids.discard(job_id)
+                self._failure_code = "runtime_reload_failed"
+                self._phase = "failed"
+                self._accepting = False
+                self._status = "failed"
+            return False
+        with self._lock:
+            if self._stop_event.is_set():
+                return False
+            self._runtime = runtime
+            self._phase = "ready" if self._accepting else "draining"
+            self._status = "ready"
+        LOGGER.info("stage=runtime_reloaded component=ace-node")
+        return True
+
+    def _unload_if_idle(self) -> None:
+        with self._lock:
+            idle_since = self._idle_since
+            if (
+                self._runtime is None
+                or idle_since is None
+                or self._phase != "ready"
+                or not self._accepting
+                or self._running_job_id is not None
+                or self._queued_ids
+                or self._clock() - idle_since < self.settings.idle_unload_seconds
+            ):
+                return
+            runtime = self._runtime
+            self._phase = "unloading_model"
+            self._status = "initializing"
+        try:
+            unload = getattr(runtime, "unload", None)
+            if callable(unload):
+                unload()
+        except Exception:
+            LOGGER.error(
+                "stage=runtime_unload error_code=runtime_unload_failed",
+                extra={"component": "ace-node"},
+            )
+            with self._lock:
+                self._failure_code = "runtime_unload_failed"
+                self._phase = "failed"
+                self._accepting = False
+                self._status = "failed"
+            return
+        with self._lock:
+            self._runtime = None
+            self._idle_since = None
+            self._phase = "model_unloaded"
+            self._status = "ready"
+        LOGGER.info("stage=runtime_unloaded component=ace-node")
 
     def _invoke(self, runtime: Any, payload: Mapping[str, Any], job_id: str) -> Mapping[str, Any]:
         if self._executor is not None:
