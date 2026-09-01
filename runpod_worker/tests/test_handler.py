@@ -699,3 +699,13 @@ def test_invalid_generated_wav_is_rejected_without_upload(case: str) -> None:
         handler_module.handler(_payload())
 
     assert transfer_client.uploaded_path is None
+
+
+def test_clear_runtime_is_identity_safe() -> None:
+    first = object()
+    second = object()
+    handler_module.configure_runtime(first)  # type: ignore[arg-type]
+    handler_module.clear_runtime(second)  # type: ignore[arg-type]
+    assert handler_module._RUNTIME is first
+    handler_module.clear_runtime(first)  # type: ignore[arg-type]
+    assert handler_module._RUNTIME is None

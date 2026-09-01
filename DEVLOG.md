@@ -1,5 +1,16 @@
 # Development Log
 
+## 2026-09-01 (native model idle unload)
+
+- Added a configurable 1-240 minute idle timeout to the macOS Settings window,
+  defaulting to 15 minutes and applied by the existing drain-safe restart.
+- Kept the node HTTP process available while the queue manager releases model
+  owners and accelerator caches, then reloads the pinned runtime for the next
+  accepted job.
+- Added focused Python lifecycle and Swift settings/health-state coverage.
+- Preserved compatibility with the validated setup receipt written by the
+  previously installed native app, avoiding a redundant model download.
+
 ## 2026-08-31 (native macOS ACE Node implementation baseline)
 
 - Created the clean Mac implementation checkout at

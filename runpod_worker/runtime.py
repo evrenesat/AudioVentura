@@ -42,6 +42,18 @@ REQUIRED_MODEL_DIRECTORIES = (
     f"checkpoints/{DIT_MODEL}",
     f"checkpoints/{VAE_MODEL}",
 )
+UPSTREAM_MAIN_MODEL_COMPONENTS = (
+    "acestep-v15-turbo",
+    VAE_MODEL,
+    EMBEDDING_MODEL,
+    LM_MODEL,
+)
+PINNED_MAIN_MODEL_COMPONENTS = (
+    DIT_MODEL,
+    VAE_MODEL,
+    EMBEDDING_MODEL,
+    LM_MODEL,
+)
 _IMAGE_DIGEST_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}@)?sha256:[0-9a-f]{64}$")
 _MODEL_REPO_PART_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$")
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -485,6 +497,7 @@ def initialize_runtime(
         progress_callback("validating_model")
     paths = resolve_checkpoint_paths(cache_root)
     os.environ["ACESTEP_CHECKPOINTS_DIR"] = str(paths.root)
+    _configure_pinned_main_model_components()
 
     try:
         handler_module = importlib.import_module("acestep.handler")
@@ -554,6 +567,16 @@ def initialize_runtime(
     if progress_callback is not None:
         progress_callback("ready")
     return runtime
+
+
+def _configure_pinned_main_model_components() -> None:
+    """Prevent upstream from downloading its unused default DiT."""
+
+    downloader: Any = importlib.import_module("acestep.model_downloader")
+    actual = tuple(getattr(downloader, "MAIN_MODEL_COMPONENTS", ()))
+    if actual != UPSTREAM_MAIN_MODEL_COMPONENTS:
+        raise WorkerInitializationError("pinned ACE-Step model component contract changed")
+    downloader.MAIN_MODEL_COMPONENTS = list(PINNED_MAIN_MODEL_COMPONENTS)
 
 
 def _validate_model_manifest(snapshot: Path, model_cache_root: Path, expected_sha256: str) -> None:

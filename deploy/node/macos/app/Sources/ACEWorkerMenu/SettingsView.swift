@@ -3,10 +3,13 @@ import SwiftUI
 public struct SettingsView: View {
     @ObservedObject public var appState: AppState
     @ObservedObject private var supervisor: WorkerSupervisor
+    @State private var modelIdleUnloadMinutes: Int
 
     public init(appState: AppState) {
         self.appState = appState
         _supervisor = ObservedObject(wrappedValue: appState.supervisor)
+        _modelIdleUnloadMinutes = State(
+            initialValue: appState.supervisor.modelIdleUnloadMinutes)
     }
 
     public var body: some View {
@@ -21,6 +24,16 @@ public struct SettingsView: View {
             Text("The worker starts only after the pinned model and Tailscale checks pass.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Stepper(value: $modelIdleUnloadMinutes, in: 1...240) {
+                Text("Unload model after \(modelIdleUnloadMinutes) minutes idle")
+            }
+            Button("Apply Idle Timeout") {
+                supervisor.setModelIdleUnloadMinutes(modelIdleUnloadMinutes)
+            }
+            .disabled(modelIdleUnloadMinutes == supervisor.modelIdleUnloadMinutes)
+            Text("Applying waits for active work, then restarts the worker.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let error = supervisor.lastErrorCode {
                 Text("Last safe status: \(error)")
                     .font(.caption)
@@ -28,7 +41,7 @@ public struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 430, height: 180)
+        .frame(width: 430, height: 260)
         .navigationTitle("Settings")
     }
 }

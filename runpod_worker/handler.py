@@ -82,6 +82,14 @@ def configure_runtime(runtime: WorkerRuntime) -> None:
     _RUNTIME = runtime
 
 
+def clear_runtime(runtime: WorkerRuntime) -> None:
+    """Release the installed runtime without clearing a newer replacement."""
+
+    global _RUNTIME
+    if _RUNTIME is runtime:
+        _RUNTIME = None
+
+
 def handler(event: Mapping[str, Any]) -> dict[str, Any]:
     """Validate, generate, upload, and return bounded metadata only."""
 

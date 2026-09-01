@@ -13,9 +13,12 @@ from runpod_worker.transfer_client import TransferError
 APP = "11111111-1111-4111-8111-111111111111"
 
 
-def _settings(tmp_path: Path) -> NodeSettings:
+def _settings(tmp_path: Path, **kwargs: Any) -> NodeSettings:
     return NodeSettings(
-        data_root=tmp_path, token="node-secret", runtime_receipt="sha256:" + "a" * 64
+        data_root=tmp_path,
+        token="node-secret",
+        runtime_receipt="sha256:" + "a" * 64,
+        **kwargs,
     )
 
 
@@ -184,4 +187,72 @@ def test_health_exposes_monotonic_running_elapsed_and_drain_state(tmp_path: Path
             break
         time.sleep(0.01)
     assert worker.health()["running"] is False
+    worker.stop()
+
+
+def test_idle_runtime_unloads_and_reloads_for_next_job(tmp_path: Path) -> None:
+    now = [0.0]
+    unloaded = threading.Event()
+    runtimes: list[_Runtime] = []
+
+    class UnloadableRuntime(_Runtime):
+        def unload(self) -> None:
+            unloaded.set()
+
+    def factory() -> UnloadableRuntime:
+        runtime = UnloadableRuntime()
+        runtimes.append(runtime)
+        return runtime
+
+    worker = NodeWorker(
+        _settings(tmp_path, idle_unload_seconds=60),
+        runtime_factory=factory,
+        clock=lambda: now[0],
+    )
+    worker.start()
+    assert worker.wait_ready() == "ready"
+    now[0] = 61
+    assert unloaded.wait(1)
+    assert worker.health()["phase"] == "model_unloaded"
+    assert worker.health()["accepting"] is True
+
+    job, _ = worker.submit(_payload("22222222-2222-4222-8222-222222222222"))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if worker.get(job.job_id).state == "succeeded":  # type: ignore[union-attr]
+            break
+        time.sleep(0.01)
+    assert worker.get(job.job_id).state == "succeeded"  # type: ignore[union-attr]
+    assert len(runtimes) == 2
+    assert runtimes[1].calls == [job.job_id]
+    worker.stop()
+
+
+def test_idle_runtime_does_not_unload_during_a_job(tmp_path: Path) -> None:
+    now = [0.0]
+    entered = threading.Event()
+    release = threading.Event()
+    unloaded = threading.Event()
+
+    class SlowUnloadableRuntime(_Runtime):
+        def execute(self, payload: dict[str, Any], job_id: str) -> dict[str, Any]:
+            entered.set()
+            release.wait(2)
+            return super().execute(payload, job_id)
+
+        def unload(self) -> None:
+            unloaded.set()
+
+    worker = NodeWorker(
+        _settings(tmp_path, idle_unload_seconds=60),
+        runtime_factory=SlowUnloadableRuntime,
+        clock=lambda: now[0],
+    )
+    worker.start()
+    assert worker.wait_ready() == "ready"
+    worker.submit(_payload("22222222-2222-4222-8222-222222222222"))
+    assert entered.wait(1)
+    now[0] = 600
+    assert not unloaded.wait(0.2)
+    release.set()
     worker.stop()

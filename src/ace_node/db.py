@@ -38,6 +38,7 @@ _SAFE_ERROR_CODES = frozenset(
         "worker_restarted",
         "worker_timeout",
         "worker_failed",
+        "runtime_reload_failed",
         "upload_failed",
     }
 )

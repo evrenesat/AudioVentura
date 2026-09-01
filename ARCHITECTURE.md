@@ -228,6 +228,10 @@ separate `deploy/node/` uv project and lock, while the controller root lock
 remains provider-neutral. See [the ACE Node runbook](docs/ACE-NODE.md) for
 host preparation and the hardware acceptance gate.
 
+The node queue manager releases its process-global model runtime after the
+configured idle interval and recreates it before the next accepted job. The
+HTTP process and durable queue remain available while model memory is unloaded.
+
 On macOS, `deploy/node/macos/app/` is a SwiftUI `MenuBarExtra` supervisor for
 the same Python `python -m ace_node` child. It owns process identity, bounded
 health polling, supervisor-only drain/restart, Keychain tokens, fixed-path
@@ -237,7 +241,8 @@ and drain metadata; prompts, lyrics, audio bytes, transfer capabilities, and
 model tensors remain outside the app boundary. The app bundle contains the
 arm64 executable, locked runtime receipts, and release manifest, while models
 live below the user's private Application Support directory and preparation
-cache.
+cache. Settings persist the idle model-unload interval and apply it through a
+drain-safe worker restart.
 
 ## Job model
 

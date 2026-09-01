@@ -66,6 +66,7 @@ final class WorkerModelsTests: XCTestCase {
             (.validatingModel, .starting),
             (.loadingDit, .starting),
             (.loadingLm, .starting),
+            (.unloadingModel, .starting),
         ]
         for (phase, expected) in initialization {
             let health = try WorkerHealth(
@@ -90,6 +91,16 @@ final class WorkerModelsTests: XCTestCase {
             accelerator: "mps"
         )
         XCTAssertEqual(ready.menuState, .ready)
+        let unloaded = try WorkerHealth(
+            status: .ready,
+            phase: .modelUnloaded,
+            queueDepth: 0,
+            running: false,
+            runningElapsedSeconds: nil,
+            accepting: true,
+            accelerator: "mps"
+        )
+        XCTAssertEqual(unloaded.menuState, .modelUnloaded)
         let draining = try WorkerHealth(
             status: .ready,
             phase: .draining,

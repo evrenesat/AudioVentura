@@ -78,6 +78,8 @@ public enum WorkerPhase: String, Codable, CaseIterable, Sendable {
     case validatingModel = "validating_model"
     case loadingDit = "loading_dit"
     case loadingLm = "loading_lm"
+    case unloadingModel = "unloading_model"
+    case modelUnloaded = "model_unloaded"
     case ready
     case draining
     case failed
@@ -92,6 +94,7 @@ public enum MenuState: String, CaseIterable, Sendable {
     case ready
     case running
     case runningQueued
+    case modelUnloaded
     case draining
     case tailscaleOffline
     case failed
@@ -105,6 +108,8 @@ public enum MenuState: String, CaseIterable, Sendable {
             "ACE ↓"
         case .verifying, .starting:
             "ACE ..."
+        case .modelUnloaded:
+            "ACE idle"
         case .ready:
             "ACE ✓"
         case .running:
@@ -136,6 +141,8 @@ public enum MenuState: String, CaseIterable, Sendable {
             "Running"
         case .runningQueued:
             "Running with queued work"
+        case .modelUnloaded:
+            "Model unloaded; loads on next job"
         case .draining:
             "Restart after queue drains"
         case .tailscaleOffline:
@@ -255,8 +262,11 @@ public struct WorkerHealth: Codable, Equatable, Sendable {
 
     public var menuState: MenuState {
         switch phase {
-        case .starting, .validatingRuntime, .validatingModel, .loadingDit, .loadingLm:
+        case .starting, .validatingRuntime, .validatingModel, .loadingDit, .loadingLm,
+            .unloadingModel:
             .starting
+        case .modelUnloaded:
+            .modelUnloaded
         case .ready:
             if running && queueDepth > 0 {
                 .runningQueued
@@ -314,12 +324,14 @@ public struct WorkerHealth: Codable, Equatable, Sendable {
             throw WorkerModelError.healthContractMismatch
         }
         if status == .initializing {
-            guard phase != .ready, phase != .draining, phase != .failed, phase != .stopping else {
+            guard phase != .ready, phase != .modelUnloaded, phase != .draining,
+                phase != .failed, phase != .stopping
+            else {
                 throw WorkerModelError.healthContractMismatch
             }
         }
         if status == .ready {
-            guard phase == .ready || phase == .draining else {
+            guard phase == .ready || phase == .modelUnloaded || phase == .draining else {
                 throw WorkerModelError.healthContractMismatch
             }
         }
