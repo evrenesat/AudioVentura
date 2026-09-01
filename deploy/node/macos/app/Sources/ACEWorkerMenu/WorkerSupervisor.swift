@@ -58,9 +58,11 @@ public final class SystemWorkerProcess: WorkerProcessManaging {
         try outputHandle?.seekToEnd()
         process.standardOutput = outputHandle
         process.standardError = outputHandle
+        let launchIdentity = ObjectIdentifier(process)
         process.terminationHandler = { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.terminationHandler?()
+                guard let self, ObjectIdentifier(self.process) == launchIdentity else { return }
+                self.terminationHandler?()
             }
         }
         try process.run()

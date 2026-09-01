@@ -89,6 +89,37 @@ final class SupervisorTests: XCTestCase {
         _ = await supervisor.stop()
     }
 
+    func testSystemProcessIgnoresStaleTerminationAfterRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ace-system-process-" + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let process = SystemWorkerProcess(logURL: root.appendingPathComponent("worker.log"))
+        var terminationCount = 0
+        process.terminationHandler = { terminationCount += 1 }
+
+        try process.launch(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["0.02"],
+            environment: [:],
+            workingDirectory: nil
+        )
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertFalse(process.isRunning)
+
+        try process.launch(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["5"],
+            environment: [:],
+            workingDirectory: nil
+        )
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        XCTAssertTrue(process.isRunning)
+        XCTAssertEqual(terminationCount, 0)
+        process.terminate()
+    }
+
     func testLegacySetupReceiptKeepsPreparedModelReady() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "ace-supervisor-legacy-setup-" + UUID().uuidString, isDirectory: true)
