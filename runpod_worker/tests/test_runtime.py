@@ -175,12 +175,8 @@ def _cached_bundle(
 ) -> tuple[Path, dict[str, object]]:
     model_root = tmp_path / "models--evrenesat--audioventura-ace-step-v0.1.8"
     snapshot = model_root / "snapshots" / TEST_MODEL_REVISION
-    file_specs = [
-        (directory, "model.safetensors") for directory in REQUIRED_MODEL_DIRECTORIES
-    ]
-    file_specs.extend(
-        ("checkpoints/vae", f"part-{index:02d}.safetensors") for index in range(25)
-    )
+    file_specs = [(directory, "model.safetensors") for directory in REQUIRED_MODEL_DIRECTORIES]
+    file_specs.extend(("checkpoints/vae", f"part-{index:02d}.safetensors") for index in range(25))
     sizes = [1] * (len(file_specs) - 1) + [MODEL_BUNDLE_TOTAL_BYTES - len(file_specs) + 1]
     files: list[dict[str, object]] = []
     for (directory, filename), size in zip(file_specs, sizes, strict=True):
