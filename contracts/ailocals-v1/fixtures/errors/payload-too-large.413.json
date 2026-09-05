@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "payload_too_large",
+    "message": "a body or part exceeded its bound"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "protocol_version": "ailocals.v1",
+  "capability_id": "tts.chatterbox.v3",
+  "wait_seconds": 25
+}

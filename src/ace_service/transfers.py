@@ -20,6 +20,7 @@ from ace_service.artifact_store import materialize_async_stream
 from ace_service.config import ServiceSettings
 from ace_service.db import SessionFactory, initialize_database_for_settings
 from ace_service.models import (
+    AilocalsJob,
     AssetTransferCapability,
     AssetTransferDirection,
     AssetTransferPurpose,
@@ -148,6 +149,7 @@ def create_transfer_app(
                 TransferDirection.SOURCE_DOWNLOAD,
                 consume=False,
             )
+            _ensure_ailocals_authority(session, capability)
             candidate = _capability_path(settings.paths.incoming, capability)
             _validate_file(
                 candidate,
@@ -174,6 +176,7 @@ def create_transfer_app(
                 TransferDirection.OUTPUT_UPLOAD,
                 consume=True,
             )
+            _ensure_ailocals_authority(session, capability)
             final_path = _capability_path(settings.paths.outputs, capability)
             _validate_target_path(final_path, settings.paths.outputs, capability)
             max_bytes = min(capability.max_bytes, settings.transfer_max_output_bytes)
@@ -292,6 +295,32 @@ def _active_capability(
     if consume and capability.status is TransferStatus.CONSUMED:
         return capability
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="capability not found")
+
+
+def _ensure_ailocals_authority(session: Session, capability: TransferCapability) -> None:
+    """Reject new-path transfers whose owning submission is no longer active.
+
+    Legacy capabilities carry no ailocals linkage and keep their old
+    behavior. A linked capability is valid only while its ailocals job row
+    still names the same submission nonce and is leased or running without a
+    cancellation request.
+    """
+
+    job_row_id = capability.ailocals_job_id
+    if job_row_id is None:
+        return
+    row = session.get(AilocalsJob, job_row_id)
+    if (
+        row is None
+        or capability.submission_nonce is None
+        or row.submission_nonce != capability.submission_nonce
+        or row.state not in {"leased", "running"}
+        or row.cancel_requested
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="capability authority ended",
+        )
 
 
 def _asset_capability_for_route(
@@ -700,6 +729,7 @@ def _finalize_output(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="capability not found"
             )
+        _ensure_ailocals_authority(session, capability)
         existing_output = get_output_by_path(
             session, job_id=capability.job_id, relative_path=capability.expected_relative_path
         )

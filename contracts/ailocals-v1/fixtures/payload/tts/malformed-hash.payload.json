@@ -1,0 +1,28 @@
+{
+  "render_id": "01J000000000000000000000EF",
+  "request_hash": "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+  "speech_unit_id": "01J000000000000000000000GH",
+  "language": "nl",
+  "unit_kind": "sentence",
+  "spoken_text": "Amsterdam/Rotterdam testzin — mét diakrieten.",
+  "context_pronunciation_key": "nl-demo-sleutel",
+  "profile": {
+    "engine": "chatterbox",
+    "model_revision": "chatterbox-mlx-demo-1",
+    "language": "nl",
+    "voice_identifier": "chatterbox-default",
+    "reference_audio_hash": "2a22b2da9822671537a8b7c0b77a8d0e8132412e666952d0584bae8726edc74b",
+    "speed_milli": 1000,
+    "pitch_cents": 0,
+    "mapping_version": "v1",
+    "mime_type": "audio/mp4",
+    "codec": "aac-lc",
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "active": true
+  },
+  "limits": {
+    "max_bytes": 4000000,
+    "max_duration_ms": 120000
+  }
+}

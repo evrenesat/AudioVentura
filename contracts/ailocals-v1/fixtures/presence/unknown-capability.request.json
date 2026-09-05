@@ -1,0 +1,12 @@
+{
+  "protocol_version": "ailocals.v1",
+  "capabilities": [
+    {
+      "id": "tts.apple-speech.v2",
+      "state": "ready",
+      "accepting": true,
+      "active_jobs": 0,
+      "reason": null
+    }
+  ]
+}

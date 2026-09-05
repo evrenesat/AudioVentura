@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "internal_error",
+    "message": "service is temporarily unavailable"
+  }
+}

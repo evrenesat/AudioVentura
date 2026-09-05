@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "application_job_id": "3f2a9c1e-8b4d-4e2a-9c6f-1a2b3c4d5e6f",
+  "variation_index": 1,
+  "submission_nonce": "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "input": {
+    "schema_version": 2,
+    "job_id": "3f2a9c1e-8b4d-4e2a-9c6f-1a2b3c4d5e6f",
+    "submission_nonce": "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "variation_index": 1,
+    "task_type": "original",
+    "profile_id": "fast-beta-v1",
+    "resolved_parameters": {
+      "caption": "warm analog synth demo loop",
+      "lyrics": "",
+      "seed": 424242,
+      "duration_mode": "custom",
+      "duration": 30.0
+    },
+    "generation": {
+      "prompt": "warm analog synth demo loop",
+      "lyrics": "",
+      "instrumental": true,
+      "vocal_language": null,
+      "output_format": "mp3",
+      "audio_cover_strength": 0.0,
+      "cover_noise_strength": 0.0,
+      "prompt_mode": "direct",
+      "duration_mode": "custom",
+      "duration_seconds": 30.0,
+      "duration": 30.0,
+      "seed": 424242
+    },
+    "source": null,
+    "result_upload": {
+      "url": "https://transfer.invalid/output/demo-put-0001",
+      "max_bytes": 268435456
+    },
+    "source_duration_seconds": 12.5
+  },
+  "source": null,
+  "result_upload": {
+    "url": "https://transfer.invalid/output/demo-put-0001",
+    "max_bytes": 268435456
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "protocol_version": "speech-worker.v1",
+  "operation": "list_models",
+  "request_id": "req-01HXDEMO000000000000000002",
+  "limits": {
+    "max_completion_bytes": 2097152
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "schema_version": 2,
+  "application_job_id": "3f2a9c1e-8b4d-4e2a-9c6f-1a2b3c4d5e6f",
+  "variation_index": 2,
+  "submission_nonce": "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  "input": {
+    "schema_version": 2,
+    "job_id": "3f2a9c1e-8b4d-4e2a-9c6f-1a2b3c4d5e6f",
+    "submission_nonce": "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "variation_index": 2,
+    "task_type": "cover",
+    "profile_id": "quality-v1",
+    "resolved_parameters": {
+      "caption": "bright cover demo caption",
+      "lyrics": "",
+      "seed": 7,
+      "source_duration_seconds": 21.5,
+      "target_duration_seconds": 21.5,
+      "duration": 21.5,
+      "duration_mode": "source"
+    },
+    "source_duration_seconds": 21.5,
+    "resolved_target_duration_seconds": 21.5,
+    "ace_duration_seconds": 21.5,
+    "cover_staging": {
+      "source_format": "mp3",
+      "staging_revision": "v1"
+    },
+    "generation": {
+      "prompt": "bright cover demo caption",
+      "lyrics": "",
+      "instrumental": true,
+      "vocal_language": null,
+      "output_format": "flac",
+      "audio_cover_strength": 0.6,
+      "cover_noise_strength": 0.25,
+      "prompt_mode": "direct",
+      "duration_mode": "source",
+      "duration_seconds": 21.5,
+      "duration": 21.5,
+      "seed": 7,
+      "target_style": "dreamy ambient",
+      "remix_guidance": "keep the original tempo"
+    },
+    "source": {
+      "url": "https://transfer.invalid/source/demo-get-0001",
+      "sha256": "c226783d57da4f11d4dc5a4b3050247568df38ce62cf09b583205ec546424f00",
+      "bytes": 48000,
+      "format": "mp3"
+    },
+    "result_upload": {
+      "url": "https://transfer.invalid/output/demo-put-0001",
+      "max_bytes": 268435456
+    }
+  },
+  "source": {
+    "url": "https://transfer.invalid/source/demo-get-0001",
+    "sha256": "c226783d57da4f11d4dc5a4b3050247568df38ce62cf09b583205ec546424f00",
+    "bytes": 48000,
+    "format": "mp3"
+  },
+  "result_upload": {
+    "url": "https://transfer.invalid/output/demo-put-0001",
+    "max_bytes": 268435456
+  }
+}

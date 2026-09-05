@@ -234,3 +234,11 @@ controlled restart. Confirm the runtime receipt, model manifest identity,
 serial execution, pending cancellation, and `worker_restarted` recovery. Keep
 the node disabled in beta and production until an actual healthy host passes
 that gate and the owner tests the beta controller.
+
+## Relationship to the ailocals universal worker
+
+The ailocals backend (`ailocals/ace-step-v15-xl-turbo`) is an independent
+worker path that leases ACE jobs to a separately enrolled Mac client. It does
+not change the direct ACE Node deployment, launcher, tokens, or runtime
+receipts documented here; both paths can coexist, and persisted jobs keep
+their original backend identity.

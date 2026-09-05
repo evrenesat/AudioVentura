@@ -1,0 +1,891 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ailocals.local/contracts/ailocals-v1/schema.json",
+  "title": "ailocals.v1 wire schema",
+  "description": "Envelope, capability, operation, payload, and result schemas for the ailocals universal worker protocol. Workload payload field semantics are owned by each product's existing validators; this schema expresses the shared transport envelope and the documented bounds.",
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "const": "ailocals.v1"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "leaseToken": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "workerToken": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "capabilityId": {
+      "type": "string",
+      "enum": [
+        "music.ace-step.v1",
+        "tts.apple-speech.v1",
+        "tts.chatterbox.v3",
+        "llm.openai-relay.v1"
+      ]
+    },
+    "capabilityCategory": {
+      "type": "string",
+      "enum": ["music", "tts", "llm"]
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["beta", "production", "development"]
+    },
+    "serviceKind": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{1,64}$"
+    },
+    "presenceState": {
+      "type": "string",
+      "enum": ["ready", "busy", "paused", "setup_required", "error"]
+    },
+    "presenceReason": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "slot_busy",
+        "memory_pressure",
+        "insufficient_memory",
+        "storage_unavailable",
+        "local_service_unreachable",
+        "setup_missing",
+        "user_paused"
+      ]
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "unauthorized",
+        "enrollment_invalid",
+        "protocol_unsupported",
+        "invalid_request",
+        "unsupported_capability",
+        "worker_busy",
+        "client_already_enrolled",
+        "lease_lost",
+        "result_conflict",
+        "payload_too_large",
+        "rate_limited",
+        "internal_error"
+      ]
+    },
+    "failureCode": {
+      "type": "string",
+      "enum": [
+        "canceled",
+        "interrupted",
+        "resource_exhausted",
+        "invalid_payload",
+        "setup_required",
+        "execution_failed",
+        "relay_unreachable",
+        "relay_auth",
+        "relay_invalid_response",
+        "relay_model_unknown"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "error"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"$ref": "#/$defs/errorCode"},
+            "message": {"type": "string", "minLength": 1, "maxLength": 256}
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "poll_max_seconds",
+        "lease_seconds",
+        "heartbeat_seconds",
+        "presence_seconds",
+        "control_max_bytes",
+        "payload_max_bytes",
+        "result_max_bytes"
+      ],
+      "properties": {
+        "poll_max_seconds": {"type": "integer", "const": 25},
+        "lease_seconds": {"type": "integer", "const": 90},
+        "heartbeat_seconds": {"type": "integer", "const": 30},
+        "presence_seconds": {"type": "integer", "const": 20},
+        "control_max_bytes": {"type": "integer", "const": 262144},
+        "payload_max_bytes": {"type": "integer", "const": 2097152},
+        "result_max_bytes": {"type": "integer", "const": 2097152}
+      }
+    },
+    "aceParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker_schema",
+        "model_bundle_revision",
+        "manifest_sha256",
+        "accelerator",
+        "formats"
+      ],
+      "properties": {
+        "worker_schema": {"type": "integer", "const": 2},
+        "model_bundle_revision": {"type": "string", "minLength": 1, "maxLength": 128},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "accelerator": {"type": "string", "const": "mps"},
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["mp3", "flac", "wav"]}
+        }
+      }
+    },
+    "ttsParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "languages", "unit_kinds", "max_bytes", "max_duration_ms"],
+      "properties": {
+        "engine": {"type": "string", "enum": ["avspeech", "chatterbox"]},
+        "languages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "unit_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {"type": "string", "enum": ["word", "phrase", "sentence", "*"]}
+        },
+        "max_bytes": {"type": "integer", "minimum": 0},
+        "max_duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "relayParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_completion_bytes", "operations"],
+      "properties": {
+        "max_completion_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2097152,
+          "const": 2097152
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["chat_completion", "list_models"]}
+        }
+      }
+    },
+    "capabilityEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "parameters"],
+      "properties": {
+        "id": {"$ref": "#/$defs/capabilityId"},
+        "category": {"$ref": "#/$defs/capabilityCategory"},
+        "parameters": {
+          "oneOf": [
+            {"$ref": "#/$defs/aceParameters"},
+            {"$ref": "#/$defs/ttsParameters"},
+            {"$ref": "#/$defs/relayParameters"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"id": {"const": "music.ace-step.v1"}}},
+          "then": {"properties": {"category": {"const": "music"}, "parameters": {"$ref": "#/$defs/aceParameters"}}}
+        },
+        {
+          "if": {"properties": {"id": {"const": "tts.apple-speech.v1"}}},
+          "then": {"properties": {"category": {"const": "tts"}, "parameters": {"allOf": [{"$ref": "#/$defs/ttsParameters"}, {"properties": {"engine": {"const": "avspeech"}}}]}}}
+        },
+        {
+          "if": {"properties": {"id": {"const": "tts.chatterbox.v3"}}},
+          "then": {"properties": {"category": {"const": "tts"}, "parameters": {"allOf": [{"$ref": "#/$defs/ttsParameters"}, {"properties": {"engine": {"const": "chatterbox"}}}]}}}
+        },
+        {
+          "if": {"properties": {"id": {"const": "llm.openai-relay.v1"}}},
+          "then": {"properties": {"category": {"const": "llm"}, "parameters": {"$ref": "#/$defs/relayParameters"}}}
+        }
+      ]
+    },
+    "infoResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "service_kind",
+        "environment",
+        "supported_capabilities",
+        "limits"
+      ],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "service_kind": {"$ref": "#/$defs/serviceKind"},
+        "environment": {"$ref": "#/$defs/environment"},
+        "supported_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/capabilityId"}
+        },
+        "limits": {"$ref": "#/$defs/limits"}
+      }
+    },
+    "enrollRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "worker_name", "software_version", "capabilities"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "worker_name": {"type": "string", "minLength": 1, "maxLength": 120},
+        "software_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[ !-~]+$"
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/capabilityEntry"}
+        }
+      }
+    },
+    "enrollResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "worker_id", "worker_token", "environment"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "worker_id": {"$ref": "#/$defs/identifier"},
+        "worker_token": {"$ref": "#/$defs/workerToken"},
+        "environment": {"$ref": "#/$defs/environment"}
+      }
+    },
+    "presenceCapabilityState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state", "accepting", "active_jobs", "reason"],
+      "properties": {
+        "id": {"$ref": "#/$defs/capabilityId"},
+        "state": {"$ref": "#/$defs/presenceState"},
+        "accepting": {"type": "boolean"},
+        "active_jobs": {"type": "integer", "minimum": 0, "maximum": 1},
+        "reason": {"$ref": "#/$defs/presenceReason"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"enum": ["paused", "setup_required", "error"]}}},
+          "then": {"properties": {"accepting": {"const": false}}}
+        }
+      ]
+    },
+    "presenceRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "capabilities"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "capabilities": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/presenceCapabilityState"}
+        }
+      }
+    },
+    "presenceResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "server_time"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "server_time": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "leaseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "capability_id", "wait_seconds"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "capability_id": {"$ref": "#/$defs/capabilityId"},
+        "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 25}
+      }
+    },
+    "leaseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "job_id",
+        "attempt",
+        "lease_token",
+        "lease_expires_at",
+        "deadline_at",
+        "capability_id",
+        "payload_encoding",
+        "payload_base64",
+        "payload_sha256"
+      ],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "job_id": {"$ref": "#/$defs/identifier"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "lease_token": {"$ref": "#/$defs/leaseToken"},
+        "lease_expires_at": {"$ref": "#/$defs/timestamp"},
+        "deadline_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timestamp"}]},
+        "capability_id": {"$ref": "#/$defs/capabilityId"},
+        "payload_encoding": {"type": "string", "const": "base64"},
+        "payload_base64": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+          "minLength": 4,
+          "maxLength": 4194304
+        },
+        "payload_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "heartbeatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "attempt", "progress_percent"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "progress_percent": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "heartbeatResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "lease_expires_at", "cancel_requested"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "lease_expires_at": {"$ref": "#/$defs/timestamp"},
+        "cancel_requested": {"type": "boolean"}
+      }
+    },
+    "failRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "attempt", "code", "retryable"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "code": {"$ref": "#/$defs/failureCode"},
+        "retryable": {"type": "boolean"}
+      }
+    },
+    "acceptedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "accepted"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "accepted": {"type": "boolean", "const": true}
+      }
+    },
+    "completeMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "attempt", "result_sha256"],
+      "properties": {
+        "protocol_version": {"$ref": "#/$defs/protocolVersion"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "result_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "aceGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt",
+        "lyrics",
+        "instrumental",
+        "vocal_language",
+        "output_format",
+        "audio_cover_strength",
+        "cover_noise_strength"
+      ],
+      "properties": {
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "lyrics": {"type": "string", "maxLength": 4095},
+        "instrumental": {"type": "boolean"},
+        "vocal_language": {"type": ["string", "null"], "maxLength": 32},
+        "duration": {"type": ["number", "null"]},
+        "bpm": {"type": ["integer", "null"], "minimum": 1},
+        "key_scale": {"type": ["string", "null"], "maxLength": 32},
+        "time_signature": {"type": ["integer", "null"], "minimum": 1},
+        "seed": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647},
+        "output_format": {"type": "string", "enum": ["mp3", "flac", "wav"]},
+        "audio_cover_strength": {"type": "number", "minimum": 0, "maximum": 1},
+        "cover_noise_strength": {"type": "number", "minimum": 0, "maximum": 1},
+        "prompt_mode": {"type": ["string", "null"], "enum": ["direct", "enhance", "auto-compose", null]},
+        "duration_mode": {"type": ["string", "null"], "enum": ["custom", "source", null]},
+        "duration_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "target_style": {"type": ["string", "null"], "maxLength": 511},
+        "remix_guidance": {"type": ["string", "null"], "maxLength": 511}
+      }
+    },
+    "transferSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "sha256", "bytes", "format"],
+      "properties": {
+        "url": {"type": "string", "format": "uri", "maxLength": 2048},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "format": {"type": "string", "minLength": 1, "maxLength": 16}
+      }
+    },
+    "transferResultUpload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "max_bytes"],
+      "properties": {
+        "url": {"type": "string", "format": "uri", "maxLength": 2048},
+        "max_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "boundedParameters": {
+      "type": "object",
+      "maxProperties": 64,
+      "properties": {},
+      "additionalProperties": {
+        "type": ["string", "number", "integer", "boolean", "null"],
+        "maxLength": 16384
+      }
+    },
+    "aceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "job_id",
+        "submission_nonce",
+        "variation_index",
+        "task_type",
+        "profile_id",
+        "resolved_parameters",
+        "generation",
+        "source",
+        "result_upload"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 2},
+        "job_id": {"type": "string", "format": "uuid"},
+        "submission_nonce": {"type": "string", "format": "uuid"},
+        "variation_index": {"type": "integer", "minimum": 1, "maximum": 4},
+        "task_type": {"type": "string", "enum": ["original", "cover"]},
+        "profile_id": {"type": "string", "enum": ["fast-beta-v1", "quality-v1"]},
+        "resolved_parameters": {"$ref": "#/$defs/boundedParameters"},
+        "source_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "resolved_target_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "ace_duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "cover_staging": {"$ref": "#/$defs/boundedParameters"},
+        "generation": {"$ref": "#/$defs/aceGeneration"},
+        "source": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/transferSource"}]},
+        "result_upload": {"$ref": "#/$defs/transferResultUpload"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"task_type": {"const": "cover"}}},
+          "then": {
+            "required": [
+              "source_duration_seconds",
+              "resolved_target_duration_seconds",
+              "ace_duration_seconds",
+              "cover_staging"
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"task_type": {"const": "original"}}},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["source_duration_seconds"]},
+                {"required": ["resolved_target_duration_seconds"]},
+                {"required": ["ace_duration_seconds"]},
+                {"required": ["cover_staging"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "acePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "application_job_id",
+        "variation_index",
+        "submission_nonce",
+        "input",
+        "source",
+        "result_upload"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 2},
+        "application_job_id": {"type": "string", "format": "uuid"},
+        "variation_index": {"type": "integer", "minimum": 1, "maximum": 4},
+        "submission_nonce": {"type": "string", "format": "uuid"},
+        "input": {"$ref": "#/$defs/aceInput"},
+        "source": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/transferSource"}]},
+        "result_upload": {"$ref": "#/$defs/transferResultUpload"}
+      }
+    },
+    "ttsProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "model_revision",
+        "language",
+        "voice_identifier",
+        "reference_audio_hash",
+        "speed_milli",
+        "pitch_cents",
+        "mapping_version",
+        "mime_type",
+        "codec",
+        "sample_rate_hz",
+        "channels",
+        "active"
+      ],
+      "properties": {
+        "id": {"type": "string"},
+        "engine": {"type": "string", "enum": ["avspeech", "chatterbox"]},
+        "model_revision": {"type": "string", "minLength": 1},
+        "language": {"type": "string", "minLength": 2},
+        "voice_identifier": {"type": "string", "minLength": 1},
+        "reference_audio_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "speed_milli": {"type": "integer", "minimum": 1},
+        "pitch_cents": {"type": "integer"},
+        "mapping_version": {"type": "string", "minLength": 1},
+        "mime_type": {"type": "string", "const": "audio/mp4"},
+        "codec": {"type": "string", "const": "aac-lc"},
+        "sample_rate_hz": {"type": "integer", "const": 24000},
+        "channels": {"type": "integer", "const": 1},
+        "active": {"type": "boolean"},
+        "created_at": {"type": "string"},
+        "updated_at": {"type": "string"}
+      }
+    },
+    "ttsLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_bytes", "max_duration_ms"],
+      "properties": {
+        "max_bytes": {"type": "integer", "minimum": 1},
+        "max_duration_ms": {"type": "integer", "minimum": 1}
+      }
+    },
+    "ttsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "render_id",
+        "request_hash",
+        "speech_unit_id",
+        "language",
+        "unit_kind",
+        "spoken_text",
+        "context_pronunciation_key",
+        "profile",
+        "limits"
+      ],
+      "properties": {
+        "render_id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
+        "request_hash": {"$ref": "#/$defs/sha256"},
+        "speech_unit_id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
+        "language": {"type": "string", "minLength": 2, "maxLength": 8},
+        "unit_kind": {"type": "string", "enum": ["word", "phrase", "sentence"]},
+        "spoken_text": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "context_pronunciation_key": {"type": ["string", "null"]},
+        "profile": {"$ref": "#/$defs/ttsProfile"},
+        "limits": {"$ref": "#/$defs/ttsLimits"}
+      }
+    },
+    "relayChatCompletionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "operation",
+        "request_id",
+        "model",
+        "messages",
+        "response_format",
+        "options",
+        "limits"
+      ],
+      "properties": {
+        "protocol_version": {"type": "string", "const": "speech-worker.v1"},
+        "operation": {"type": "string", "const": "chat_completion"},
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "content"],
+            "properties": {
+              "role": {"type": "string", "enum": ["user", "assistant"]},
+              "content": {"type": "string", "minLength": 1, "maxLength": 1048576}
+            }
+          }
+        },
+        "response_format": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "json_schema"],
+          "properties": {
+            "type": {"type": "string", "const": "json_schema"},
+            "json_schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "strict", "schema"],
+              "properties": {
+                "name": {"type": "string", "const": "doublangu_stage_artifact"},
+                "strict": {"type": "boolean", "const": true},
+                "schema": {"type": "object"}
+              }
+            }
+          }
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["temperature_milli", "max_output_tokens"],
+          "properties": {
+            "temperature_milli": {"type": "integer", "minimum": 0, "maximum": 2000},
+            "max_output_tokens": {"type": "integer", "minimum": 1024, "maximum": 65536}
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_completion_bytes"],
+          "properties": {
+            "max_completion_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2097152
+            }
+          }
+        }
+      }
+    },
+    "relayListModelsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "operation", "request_id", "limits"],
+      "properties": {
+        "protocol_version": {"type": "string", "const": "speech-worker.v1"},
+        "operation": {"type": "string", "const": "list_models"},
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_completion_bytes"],
+          "properties": {
+            "max_completion_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2097152
+            }
+          }
+        }
+      }
+    },
+    "relayPayload": {
+      "oneOf": [
+        {"$ref": "#/$defs/relayChatCompletionPayload"},
+        {"$ref": "#/$defs/relayListModelsPayload"}
+      ]
+    },
+    "metadataString": {
+      "type": "string",
+      "maxLength": 16384,
+      "not": {"pattern": "/transfer/v1/"}
+    },
+    "aceResult": {
+      "type": "object",
+      "required": ["schema_version"],
+      "maxProperties": 128,
+      "properties": {
+        "schema_version": {"type": "integer", "const": 2}
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {"$ref": "#/$defs/metadataString"},
+          {"type": ["number", "integer", "boolean", "null"]},
+          {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "oneOf": [
+                {"$ref": "#/$defs/metadataString"},
+                {"type": ["number", "integer", "boolean", "null"]}
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "maxProperties": 128,
+            "additionalProperties": {
+              "oneOf": [
+                {"$ref": "#/$defs/metadataString"},
+                {"type": ["number", "integer", "boolean", "null"]}
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ttsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact"],
+      "properties": {
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_hash",
+            "sha256",
+            "size_bytes",
+            "mime_type",
+            "codec",
+            "sample_rate_hz",
+            "channels",
+            "duration_ms"
+          ],
+          "properties": {
+            "request_hash": {"$ref": "#/$defs/sha256"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "mime_type": {"type": "string", "const": "audio/mp4"},
+            "codec": {"type": "string", "const": "aac-lc"},
+            "sample_rate_hz": {"type": "integer", "const": 24000},
+            "channels": {"type": "integer", "const": 1},
+            "duration_ms": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "relayChatResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "content",
+        "reported_model",
+        "provider_request_id",
+        "finish_reason",
+        "usage",
+        "timing"
+      ],
+      "properties": {
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "content": {"type": "string", "maxLength": 1048576},
+        "reported_model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "provider_request_id": {"type": "string", "maxLength": 256},
+        "finish_reason": {"type": "string", "minLength": 1, "maxLength": 64},
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+          "properties": {
+            "prompt_tokens": {"type": "integer", "minimum": 0},
+            "completion_tokens": {"type": "integer", "minimum": 0},
+            "total_tokens": {"type": "integer", "minimum": 0}
+          }
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "model_load_duration": {"type": "number", "minimum": 0},
+            "time_to_first_token": {"type": "number", "minimum": 0},
+            "prompt_eval_duration": {"type": "number", "minimum": 0},
+            "generation_duration": {"type": "number", "minimum": 0},
+            "total_time": {"type": "number", "minimum": 0}
+          }
+        }
+      }
+    },
+    "relayModelsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "models"],
+      "properties": {
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "models": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/infoResponse"},
+    {"$ref": "#/$defs/enrollRequest"},
+    {"$ref": "#/$defs/enrollResponse"},
+    {"$ref": "#/$defs/presenceRequest"},
+    {"$ref": "#/$defs/presenceResponse"},
+    {"$ref": "#/$defs/leaseRequest"},
+    {"$ref": "#/$defs/leaseResponse"},
+    {"$ref": "#/$defs/heartbeatRequest"},
+    {"$ref": "#/$defs/heartbeatResponse"},
+    {"$ref": "#/$defs/failRequest"},
+    {"$ref": "#/$defs/acceptedResponse"},
+    {"$ref": "#/$defs/completeMetadata"},
+    {"$ref": "#/$defs/error"},
+    {"$ref": "#/$defs/acePayload"},
+    {"$ref": "#/$defs/ttsPayload"},
+    {"$ref": "#/$defs/relayPayload"},
+    {"$ref": "#/$defs/ttsResult"},
+    {"$ref": "#/$defs/relayChatResult"},
+    {"$ref": "#/$defs/relayModelsResult"}
+  ]
+}

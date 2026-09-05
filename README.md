@@ -45,6 +45,13 @@ receive YouTube, SSH, SFTP, home-network, or controller credentials.
   disabled by default and supports exactly one Linux x86_64/NVIDIA CUDA host
   or one Apple Silicon arm64/MPS+MLX host. See [the ACE Node runbook](docs/ACE-NODE.md)
   before supplying a private node URL and token.
+- `ailocals/ace-step-v15-xl-turbo` is an opt-in universal-worker backend. A
+  single enrolled ailocals Mac client leases queued submissions through the
+  outbound `api/ailocals/v1` worker API; jobs keep existing provider
+  semantics, one inference attempt, and transfer-based audio delivery. Enable
+  with `AILOCALS_ENABLED=1` plus the backend ID in `INFERENCE_ENABLED_BACKENDS`,
+  then manage enrollment tokens under Local workers. The shared wire contract
+  is vendored at `contracts/ailocals-v1/`.
 - A ready source is published as one canonical stereo 48 kHz 192 kbps MP3
   before remix submission and is added to its project playlist exactly once.
   Completed MP3 variations are published after output verification. FLAC/WAV

@@ -1,0 +1,12 @@
+{
+  "artifact": {
+    "request_hash": "d9d6aac418a4aca04bb49687b5e078190f6f59931fb1d5a878ec9f38f9eb5d08",
+    "sha256": "e9947fd819f279ec59e38651889395cb80604143d0f3d3737a1ba4def83fd75f",
+    "size_bytes": 44,
+    "mime_type": "audio/mp4",
+    "codec": "mp3",
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "duration_ms": 480
+  }
+}

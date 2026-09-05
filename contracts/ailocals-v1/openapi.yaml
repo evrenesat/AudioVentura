@@ -1,0 +1,324 @@
+openapi: 3.1.1
+info:
+  title: ailocals worker API
+  version: ailocals.v1
+  summary: Outbound HTTPS worker leasing for ailocals
+  description: |
+    Transport description of the ailocals.v1 universal worker protocol. The
+    normative prose is PROTOCOL.md next to this file; exact byte-level rules
+    and bounds live in schema.json. All routes are appended to a connection's
+    configured HTTPS base URL while preserving any path prefix; only a
+    trailing slash is normalized. Remote endpoints must be HTTPS with no
+    userinfo, query, fragment, or redirects. Loopback HTTP is allowed only for
+    explicit development fixture connections.
+externalDocs:
+  url: https://ailocals.local/contracts/ailocals-v1/PROTOCOL.md
+servers:
+  - url: https://worker.example.invalid/api/ailocals/v1
+security: []
+tags:
+  - name: discovery
+  - name: enrollment
+  - name: presence
+  - name: leasing
+paths:
+  /info:
+    get:
+      tags: [discovery]
+      operationId: getInfo
+      summary: Unauthenticated capability and limits description
+      responses:
+        "200":
+          description: Service description; at most 32 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/infoResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /enroll:
+    post:
+      tags: [enrollment]
+      operationId: enroll
+      summary: Exchange a one-time enrollment token for a worker credential
+      security:
+        - enrollmentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "schema.json#/$defs/enrollRequest"
+      responses:
+        "201":
+          description: Enrolled; the worker token is shown exactly once.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/enrollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Already enrolled in this environment.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/error"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /presence:
+    post:
+      tags: [presence]
+      operationId: postPresence
+      summary: Full replacement snapshot of enrolled capability states
+      security:
+        - workerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "schema.json#/$defs/presenceRequest"
+      responses:
+        "200":
+          description: Snapshot accepted; does not renew leases.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/presenceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /lease:
+    post:
+      tags: [leasing]
+      operationId: postLease
+      summary: Claim at most one job for one capability
+      description: |
+        The worker must hold a local execution slot before calling. wait_seconds
+        0-25 performs one claim attempt immediately and then waits bounded by
+        the value. The server never holds a database transaction through the
+        wait. A second active lease for the same worker/capability is 409.
+      security:
+        - workerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "schema.json#/$defs/leaseRequest"
+      responses:
+        "200":
+          description: A leased job with a base64-encoded workload payload.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/leaseResponse"
+        "204":
+          description: No work available for the requested capability.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Worker already holds an active lease for this capability.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/error"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /jobs/{job_id}/heartbeat:
+    post:
+      tags: [leasing]
+      operationId: postHeartbeat
+      summary: Renew the lease and read the cancellation flag
+      security:
+        - workerToken: []
+        - leaseToken: []
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "schema.json#/$defs/heartbeatRequest"
+      responses:
+        "200":
+          description: Lease renewed to now + lease_seconds unless a product deadline applies.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/heartbeatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Expired or replaced attempt; never resurrected.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/error"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /jobs/{job_id}/complete:
+    post:
+      tags: [leasing]
+      operationId: postComplete
+      summary: Publish result metadata and optional artifact
+      description: |
+        Multipart parts: metadata (JSON completeMetadata, at most 8 KiB),
+        result (application/json, at most result_max_bytes), and for TTS
+        exactly one artifact part (audio/mp4, filename audio.m4a) bounded by
+        the lease. ACE and relay forbid artifact parts. Identical accepted
+        retries return 200 even after the lease deadline.
+      security:
+        - workerToken: []
+        - leaseToken: []
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [metadata, result]
+              properties:
+                metadata:
+                  type: string
+                  contentMediaType: application/json
+                  contentSchema:
+                    $ref: "schema.json#/$defs/completeMetadata"
+                result:
+                  type: string
+                  contentMediaType: application/json
+                artifact:
+                  type: string
+                  format: binary
+                  contentMediaType: audio/mp4
+      responses:
+        "200":
+          description: Result accepted and durably published.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/acceptedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Lease lost, or a different result for an accepted attempt.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/error"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /jobs/{job_id}/fail:
+    post:
+      tags: [leasing]
+      operationId: postFail
+      summary: Report a terminal execution failure
+      security:
+        - workerToken: []
+        - leaseToken: []
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "schema.json#/$defs/failRequest"
+      responses:
+        "200":
+          description: Failure acknowledged; retryable is advice only.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/acceptedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Unknown or expired attempt; success cannot be overwritten.
+          content:
+            application/json:
+              schema:
+                $ref: "schema.json#/$defs/error"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+components:
+  parameters:
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      description: Opaque job identifier; ASCII letters, digits, underscore, hyphen.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,128}$"
+  securitySchemes:
+    workerToken:
+      type: apiKey
+      in: header
+      name: X-Ailocals-Worker-Token
+      description: Hashed server-side; random 32-byte base64url.
+    enrollmentToken:
+      type: apiKey
+      in: header
+      name: X-Ailocals-Enrollment-Token
+      description: Single use, expires after 30 minutes.
+    leaseToken:
+      type: apiKey
+      in: header
+      name: X-Ailocals-Lease-Token
+      description: Per-attempt lease credential returned with the lease.
+  responses:
+    BadRequest:
+      description: Malformed request, unsupported protocol, or unadvertised capability.
+      content:
+        application/json:
+          schema:
+            $ref: "schema.json#/$defs/error"
+    Unauthorized:
+      description: Missing, invalid, or revoked credential.
+      content:
+        application/json:
+          schema:
+            $ref: "schema.json#/$defs/error"
+    PayloadTooLarge:
+      description: A body or part exceeded its bound.
+      content:
+        application/json:
+          schema:
+            $ref: "schema.json#/$defs/error"
+    RateLimited:
+      description: Too many requests; honor bounded Retry-After.
+      content:
+        application/json:
+          schema:
+            $ref: "schema.json#/$defs/error"
+    ServiceUnavailable:
+      description: Temporary server unavailability.
+      content:
+        application/json:
+          schema:
+            $ref: "schema.json#/$defs/error"

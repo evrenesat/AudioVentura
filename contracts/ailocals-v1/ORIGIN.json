@@ -1,0 +1,21 @@
+{
+  "protocol_version": "ailocals.v1",
+  "contract_family": "ailocals",
+  "frozen_utc": "2026-09-05T00:00:00.000Z",
+  "description": "ailocals.v1 shared wire contract. Consumers vendor this directory byte-for-byte and record the frozen contract commit in their own ORIGIN.json.",
+  "source_baselines": {
+    "audioventura": {
+      "repository": "https://github.com/evrenesat/AudioVentura.git",
+      "commit": "5275dbb43ca878e93a4fad463c4c6c7bd32e4a01",
+      "imported_for": "ACE-Step submission envelope, worker result metadata rules, transfer capability semantics",
+      "license": "GPL-3.0-only; verbatim copy preserved at licenses/audioventura-LICENSE.txt"
+    },
+    "doublangu": {
+      "repository": "https://github.com/evrenesat/doublangu.git",
+      "commit": "5b27e39a466ec32450db67c118564e3d398216f8",
+      "imported_for": "speech worker capability/lease/artifact fields, llm.relay.v1 payload and result shapes",
+      "license": "No LICENSE file present at the baseline commit. Redistribution permission is not established; this repository therefore stays private until the owner records direction."
+    }
+  },
+  "publication": "Private by default. Public publication requires explicit owner approval; see THIRD_PARTY_NOTICES.md."
+}

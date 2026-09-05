@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "input": {
+    "caption": "warm analog synth demo loop",
+    "lyrics": ""
+  },
+  "effective": {
+    "seed": 424242,
+    "duration_seconds": 30.0
+  },
+  "audio": {
+    "sha256": "6d0f0f6626e255d1e12e12df71f092187cd23eb80b9ba5a0a02194b58f7f4227",
+    "bytes": 1048576,
+    "format": "mp3"
+  },
+  "model": {
+    "revision": "ace-step-v15-xl-turbo",
+    "manifest_sha256": "efccac4a21e72426ec12400754604cc64bd82908ea5f9083abc865b86ce4d841"
+  },
+  "timing": {
+    "queued_ms": 12,
+    "generate_ms": 45210
+  }
+}

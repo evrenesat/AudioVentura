@@ -1,0 +1,12 @@
+{
+  "protocol_version": "ailocals.v1",
+  "capabilities": [
+    {
+      "id": "music.ace-step.v1",
+      "state": "ready",
+      "accepting": true,
+      "active_jobs": 0,
+      "reason": "weather"
+    }
+  ]
+}

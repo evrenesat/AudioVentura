@@ -1,0 +1,23 @@
+{
+  "protocol_version": "ailocals.v1",
+  "worker_name": "Evren MacBook Pro",
+  "software_version": "0.1.0",
+  "capabilities": [
+    {
+      "id": "music.ace-step.v1",
+      "category": "music",
+      "parameters": {
+        "engine": "avspeech",
+        "languages": [
+          "nl-NL"
+        ],
+        "unit_kinds": [
+          "word",
+          "phrase"
+        ],
+        "max_bytes": 2000000,
+        "max_duration_ms": 30000
+      }
+    }
+  ]
+}

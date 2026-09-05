@@ -1,0 +1,22 @@
+{
+  "protocol_version": "ailocals.v1",
+  "worker_name": "Evren MacBook Pro",
+  "software_version": "0.1.0",
+  "capabilities": [
+    {
+      "id": "tts.chatterbox.v3",
+      "category": "tts",
+      "parameters": {
+        "engine": "avspeech",
+        "languages": [
+          "nl"
+        ],
+        "unit_kinds": [
+          "sentence"
+        ],
+        "max_bytes": 4000000,
+        "max_duration_ms": 120000
+      }
+    }
+  ]
+}

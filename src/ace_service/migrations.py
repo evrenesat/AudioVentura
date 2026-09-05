@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 PROJECT_TITLE_MAX_LENGTH = 160
 
 _STATE_EXACT_EXPECTED = "exact_expected"
@@ -840,6 +840,97 @@ def _cp12_ddl(connection: sqlite3.Connection) -> None:
         )
 
 
+def _cp13_ddl(connection: sqlite3.Connection) -> None:
+    """Add the universal ailocals worker, enrollment, and queue tables.
+
+    Additive only. The queue rows hold bounded safe identity and state; no
+    creative payload, transfer URL, or audio byte is ever stored here. Two
+    nullable columns on transfer_capabilities fence worker-issued upload and
+    download capabilities to the active ailocals submission attempt.
+    """
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ailocals_enrollment ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "token_hash VARCHAR(64) NOT NULL UNIQUE, "
+        "created_at DATETIME NOT NULL, "
+        "expires_at DATETIME NOT NULL, "
+        "used_at DATETIME)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ailocals_worker ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "token_hash VARCHAR(64) NOT NULL UNIQUE, "
+        "name VARCHAR(120) NOT NULL, "
+        "software_version VARCHAR(64) NOT NULL, "
+        "capabilities_json JSON NOT NULL, "
+        "presence_json JSON NOT NULL DEFAULT '{}', "
+        "last_seen_at DATETIME, "
+        "revoked_at DATETIME, "
+        "created_at DATETIME NOT NULL, "
+        "updated_at DATETIME NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ailocals_job ("
+        "id VARCHAR(36) PRIMARY KEY, "
+        "application_job_id VARCHAR(36) NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, "
+        "variation_index INTEGER NOT NULL, "
+        "submission_nonce VARCHAR(128) NOT NULL, "
+        "backend_id VARCHAR(256) NOT NULL, "
+        "request_identity_sha256 VARCHAR(64) NOT NULL, "
+        "state VARCHAR(16) NOT NULL DEFAULT 'queued', "
+        "worker_id VARCHAR(36) REFERENCES ailocals_worker(id) ON DELETE SET NULL, "
+        "attempt INTEGER NOT NULL DEFAULT 0, "
+        "lease_token_hash VARCHAR(64), "
+        "lease_expires_at DATETIME, "
+        "queue_deadline_at DATETIME NOT NULL, "
+        "execution_timeout_ms INTEGER NOT NULL, "
+        "deadline_at DATETIME, "
+        "cancel_requested BOOLEAN NOT NULL DEFAULT 0, "
+        "result_json JSON, "
+        "result_sha256 VARCHAR(64), "
+        "error_code VARCHAR(64), "
+        "created_at DATETIME NOT NULL, "
+        "updated_at DATETIME NOT NULL, "
+        "CHECK (state IN ('queued', 'leased', 'running', 'succeeded', 'failed', 'canceled')), "
+        "CHECK (attempt >= 0), "
+        "CHECK (execution_timeout_ms > 0), "
+        "CHECK (cancel_requested IN (0, 1)))"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_ailocals_worker_active "
+        "ON ailocals_worker (COALESCE(revoked_at, 'active'))"
+    )
+    for statement in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_ailocals_job_submission "
+        "ON ailocals_job (application_job_id, variation_index, submission_nonce)",
+        "CREATE INDEX IF NOT EXISTS ix_ailocals_job_state_created "
+        "ON ailocals_job (state, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_ailocals_job_worker_state "
+        "ON ailocals_job (worker_id, state)",
+        "CREATE INDEX IF NOT EXISTS ix_ailocals_job_application "
+        "ON ailocals_job (application_job_id)",
+    ):
+        connection.execute(statement)
+    transfer_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(transfer_capabilities)")
+    }
+    if "ailocals_job_id" not in transfer_columns:
+        connection.execute(
+            "ALTER TABLE transfer_capabilities ADD COLUMN ailocals_job_id VARCHAR(36) "
+            "REFERENCES ailocals_job(id) ON DELETE CASCADE"
+        )
+    if "submission_nonce" not in transfer_columns:
+        connection.execute(
+            "ALTER TABLE transfer_capabilities ADD COLUMN submission_nonce VARCHAR(128)"
+        )
+    if "ailocals_job_id" not in transfer_columns:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_transfer_capabilities_ailocals_job "
+            "ON transfer_capabilities (ailocals_job_id)"
+        )
+
+
 def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     """Fail closed unless every current product object and column is present."""
 
@@ -865,6 +956,9 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
         "playlists",
         "playlist_entries",
         "project_deletion_audits",
+        "ailocals_enrollment",
+        "ailocals_worker",
+        "ailocals_job",
     }
     tables = {
         str(row[0])
@@ -1124,6 +1218,17 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
             "claim_expires_at",
             "fencing_token",
         },
+        "ailocals_worker": {"token_hash", "capabilities_json", "presence_json"},
+        "ailocals_job": {
+            "application_job_id",
+            "submission_nonce",
+            "request_identity_sha256",
+            "state",
+            "queue_deadline_at",
+            "execution_timeout_ms",
+            "cancel_requested",
+        },
+        "transfer_capabilities": {"ailocals_job_id", "submission_nonce"},
     }
     for table_name, required in required_new_columns.items():
         actual = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table_name})")}
@@ -1220,6 +1325,11 @@ def _validate_migrated_schema(connection: sqlite3.Connection) -> None:
     }
     if "ux_media_items_source_asset_id" not in source_indexes:
         raise MigrationError("migrated schema is missing source media uniqueness")
+    ailocals_job_indexes = {
+        str(row[1]) for row in connection.execute("PRAGMA index_list(ailocals_job)").fetchall()
+    }
+    if "ux_ailocals_job_submission" not in ailocals_job_indexes:
+        raise MigrationError("migrated schema is missing the ailocals submission index")
 
 
 def _create_schema_version_table(connection: sqlite3.Connection) -> None:
@@ -1296,7 +1406,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             "pre-upgrade backup before retrying"
         )
     if state == _STATE_UNKNOWN_NEWER or (
-        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9, 10, 11}
+        state == _STATE_OLDER_VERSION and report["version"] not in {4, 5, 6, 7, 8, 9, 10, 11, 12}
     ):
         raise MigrationError(
             f"refusing to upgrade: database records schema version {report['version']} "
@@ -1353,6 +1463,7 @@ def _upgrade_locked(path: Path) -> dict[str, Any]:
             }:
                 _cp11_ddl(connection)
             _cp12_ddl(connection)
+            _cp13_ddl(connection)
             _validate_migrated_schema(connection)
             connection.execute(
                 "UPDATE schema_version SET version = ?, status = 'ready', completed_at = ? "

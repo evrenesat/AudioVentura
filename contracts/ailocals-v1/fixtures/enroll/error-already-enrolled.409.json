@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "client_already_enrolled",
+    "message": "a non-revoked worker is already enrolled in this environment"
+  }
+}
