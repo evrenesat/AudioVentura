@@ -146,7 +146,7 @@ paths:
       summary: Renew the lease and read the cancellation flag
       security:
         - workerToken: []
-        - leaseToken: []
+          leaseToken: []
       parameters:
         - $ref: "#/components/parameters/JobId"
       requestBody:
@@ -187,7 +187,7 @@ paths:
         retries return 200 even after the lease deadline.
       security:
         - workerToken: []
-        - leaseToken: []
+          leaseToken: []
       parameters:
         - $ref: "#/components/parameters/JobId"
       requestBody:
@@ -237,7 +237,7 @@ paths:
       summary: Report a terminal execution failure
       security:
         - workerToken: []
-        - leaseToken: []
+          leaseToken: []
       parameters:
         - $ref: "#/components/parameters/JobId"
       requestBody:

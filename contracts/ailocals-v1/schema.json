@@ -430,15 +430,7 @@
     "aceGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "prompt",
-        "lyrics",
-        "instrumental",
-        "vocal_language",
-        "output_format",
-        "audio_cover_strength",
-        "cover_noise_strength"
-      ],
+      "required": ["prompt"],
       "properties": {
         "prompt": {"type": "string", "minLength": 1, "maxLength": 4000},
         "lyrics": {"type": "string", "maxLength": 4095},
@@ -446,14 +438,14 @@
         "vocal_language": {"type": ["string", "null"], "maxLength": 32},
         "duration": {"type": ["number", "null"]},
         "bpm": {"type": ["integer", "null"], "minimum": 1},
-        "key_scale": {"type": ["string", "null"], "maxLength": 32},
+        "key_scale": {"type": ["string", "null"], "maxLength": 64},
         "time_signature": {"type": ["integer", "null"], "minimum": 1},
         "seed": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647},
         "output_format": {"type": "string", "enum": ["mp3", "flac", "wav"]},
         "audio_cover_strength": {"type": "number", "minimum": 0, "maximum": 1},
         "cover_noise_strength": {"type": "number", "minimum": 0, "maximum": 1},
         "prompt_mode": {"type": ["string", "null"], "enum": ["direct", "enhance", "auto-compose", null]},
-        "duration_mode": {"type": ["string", "null"], "enum": ["custom", "source", null]},
+        "duration_mode": {"type": ["string", "null"], "enum": ["auto", "custom", "source", null]},
         "duration_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "target_style": {"type": ["string", "null"], "maxLength": 511},
         "remix_guidance": {"type": ["string", "null"], "maxLength": 511}
@@ -592,7 +584,7 @@
         "model_revision": {"type": "string", "minLength": 1},
         "language": {"type": "string", "minLength": 2},
         "voice_identifier": {"type": "string", "minLength": 1},
-        "reference_audio_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "reference_audio_hash": {"type": ["string", "null"]},
         "speed_milli": {"type": "integer", "minimum": 1},
         "pitch_cents": {"type": "integer"},
         "mapping_version": {"type": "string", "minLength": 1},
@@ -632,9 +624,9 @@
         "render_id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
         "request_hash": {"$ref": "#/$defs/sha256"},
         "speech_unit_id": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"},
-        "language": {"type": "string", "minLength": 2, "maxLength": 8},
+        "language": {"type": "string", "minLength": 2},
         "unit_kind": {"type": "string", "enum": ["word", "phrase", "sentence"]},
-        "spoken_text": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "spoken_text": {"type": "string", "minLength": 1},
         "context_pronunciation_key": {"type": ["string", "null"]},
         "profile": {"$ref": "#/$defs/ttsProfile"},
         "limits": {"$ref": "#/$defs/ttsLimits"}
@@ -746,6 +738,23 @@
       "maxLength": 16384,
       "not": {"pattern": "/transfer/v1/"}
     },
+    "metadataValue": {
+      "description": "Bounded result metadata value. Width is capped per level; the authoritative AudioVentura validator owns depth and encoded-size limits.",
+      "oneOf": [
+        {"$ref": "#/$defs/metadataString"},
+        {"type": ["number", "integer", "boolean", "null"]},
+        {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/metadataValue"}
+        },
+        {
+          "type": "object",
+          "maxProperties": 128,
+          "additionalProperties": {"$ref": "#/$defs/metadataValue"}
+        }
+      ]
+    },
     "aceResult": {
       "type": "object",
       "required": ["schema_version"],
@@ -753,32 +762,7 @@
       "properties": {
         "schema_version": {"type": "integer", "const": 2}
       },
-      "additionalProperties": {
-        "oneOf": [
-          {"$ref": "#/$defs/metadataString"},
-          {"type": ["number", "integer", "boolean", "null"]},
-          {
-            "type": "array",
-            "maxItems": 128,
-            "items": {
-              "oneOf": [
-                {"$ref": "#/$defs/metadataString"},
-                {"type": ["number", "integer", "boolean", "null"]}
-              ]
-            }
-          },
-          {
-            "type": "object",
-            "maxProperties": 128,
-            "additionalProperties": {
-              "oneOf": [
-                {"$ref": "#/$defs/metadataString"},
-                {"type": ["number", "integer", "boolean", "null"]}
-              ]
-            }
-          }
-        ]
-      }
+      "additionalProperties": {"$ref": "#/$defs/metadataValue"}
     },
     "ttsResult": {
       "type": "object",
@@ -828,7 +812,7 @@
         "content": {"type": "string", "maxLength": 1048576},
         "reported_model": {"type": "string", "minLength": 1, "maxLength": 256},
         "provider_request_id": {"type": "string", "maxLength": 256},
-        "finish_reason": {"type": "string", "minLength": 1, "maxLength": 64},
+        "finish_reason": {"type": "string", "enum": ["stop", ""]},
         "usage": {
           "type": "object",
           "additionalProperties": false,

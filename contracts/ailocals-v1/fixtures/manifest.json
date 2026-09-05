@@ -1734,6 +1734,51 @@
       "expected_error_code": "invalid_request",
       "schema_ref": "#/$defs/relayChatResult",
       "workload": "relay"
+    },
+    {
+      "id": "payload-ace-auto-original-ok",
+      "operation": "payload",
+      "direction": "payload",
+      "valid": true,
+      "files": [
+        {
+          "path": "payload/ace/auto-original.payload.json",
+          "sha256": "6bae984e7a5cc18c49a1bdeb25ca4396f3bceba8eb5e2eba86bb93ee8a741eb8",
+          "bytes": 1150
+        }
+      ],
+      "schema_ref": "#/$defs/acePayload",
+      "workload": "ace"
+    },
+    {
+      "id": "result-relay-empty-finish-ok",
+      "operation": "result",
+      "direction": "payload",
+      "valid": true,
+      "files": [
+        {
+          "path": "result/relay/chat-result-empty-finish.json",
+          "sha256": "331f1e10e7a65b2df5bdf95d0fe304f44e6c9cdfedbe582a16b2f5ce56953f80",
+          "bytes": 343
+        }
+      ],
+      "schema_ref": "#/$defs/relayChatResult",
+      "workload": "relay"
+    },
+    {
+      "id": "result-ace-deep-metadata-ok",
+      "operation": "result",
+      "direction": "payload",
+      "valid": true,
+      "files": [
+        {
+          "path": "result/ace/deep-metadata.result.json",
+          "sha256": "66b1c29bc39767c60dca5b539eee2dadafa3846ac0e7a851c8514b5d7bdc26a2",
+          "bytes": 972
+        }
+      ],
+      "schema_ref": "#/$defs/aceResult",
+      "workload": "ace"
     }
   ]
 }
