@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -1175,6 +1176,13 @@ class TransferCapability(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    # Universal-worker fencing: set only for ailocals-issued capabilities so
+    # late or superseded worker uploads can be rejected at the transfer
+    # boundary. Legacy rows leave both columns NULL and keep old behavior.
+    ailocals_job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ailocals_job.id", ondelete="CASCADE"), index=True
+    )
+    submission_nonce: Mapped[str | None] = mapped_column(String(128))
 
     job: Mapped[Job] = relationship(back_populates="transfers")
 
@@ -1255,6 +1263,83 @@ class AssetTransferCapability(Base):
         "MediaDerivativeTask",
         back_populates="transfer_capabilities",
         foreign_keys=[derivative_task_id],
+    )
+
+
+class AilocalsEnrollment(Base):
+    """One-time universal-worker enrollment token (30 minutes, single use)."""
+
+    __tablename__ = "ailocals_enrollment"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class AilocalsWorker(Base):
+    """One non-revoked universal Mac client enrollment per environment."""
+
+    __tablename__ = "ailocals_worker"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    software_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Owner-selected capability subset persisted at enrollment; discovery and
+    # server demand never widen it.
+    capabilities_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    presence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    __table_args__ = (
+        # At most one non-revoked universal-client enrollment per environment.
+        Index(
+            "ux_ailocals_worker_active",
+            text("COALESCE(revoked_at, 'active')"),
+            unique=True,
+        ),
+    )
+
+
+class AilocalsJob(Base):
+    """Durable universal-worker queue row for one ACE submission attempt."""
+
+    __tablename__ = "ailocals_job"
+    __table_args__ = (
+        UniqueConstraint("application_job_id", "variation_index", "submission_nonce"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    application_job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    variation_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    submission_nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    backend_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    request_identity_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
+    worker_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("ailocals_worker.id", ondelete="SET NULL")
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    queue_deadline_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    execution_timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    deadline_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    result_sha256: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
     )
 
 

@@ -259,6 +259,9 @@ class TestUpgrade:
             "source_assets",
             "media_derivative_tasks",
             "asset_transfer_capabilities",
+            "ailocals_enrollment",
+            "ailocals_worker",
+            "ailocals_job",
         }
         assert _tables(legacy_database_path) == expected_tables
         assert {
@@ -1100,3 +1103,106 @@ class TestBackupAndLegacyReads:
         assert "billing_observations" not in _tables(legacy_database_path)
         assert _integrity_ok(legacy_database_path)
         assert migration_status(str(legacy_database_path))["state"] == "unversioned_legacy"
+
+
+def _prepare_v12_database(path: Path) -> None:
+    """Apply the production-shaped v12 DDL and ready marker."""
+
+    import ace_service.migrations as migrations_module
+
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        migrations_module._create_schema_version_table(connection)
+        migrations_module._cp4_ddl(connection)
+        migrations_module._cp5_ddl(connection)
+        migrations_module._cp6_ddl(connection)
+        migrations_module._cp7_ddl(connection)
+        migrations_module._cp8_ddl(connection)
+        migrations_module._cp9_ddl(connection)
+        migrations_module._cp10_ddl(connection)
+        migrations_module._cp11_ddl(connection)
+        migrations_module._cp12_ddl(connection)
+        connection.execute(
+            "INSERT INTO schema_version "
+            "(singleton, version, status, started_at, completed_at) "
+            "VALUES (1, 12, 'ready', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+class TestV12ToV13Upgrade:
+    def test_v12_to_v13_adds_universal_worker_tables_and_preserves_data(
+        self, legacy_database_path: Path
+    ) -> None:
+        _prepare_v12_database(legacy_database_path)
+        project_id = "223e4567-e89b-12d3-a456-426614174802"
+        job_id = "323e4567-e89b-12d3-a456-426614174803"
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            connection.execute(
+                "INSERT INTO projects (id, job_type, title, created_at, updated_at) "
+                "VALUES (?, 'original', 'Universal worker project', ?, ?)",
+                (project_id, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO jobs (id, project_id, job_type, status, output_format, "
+                "variation_count, created_at, updated_at) VALUES "
+                "(?, ?, 'original', 'queued', 'mp3', 1, ?, ?)",
+                (job_id, project_id, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        assert migration_status(str(legacy_database_path))["state"] == "older_version"
+        result = migration_upgrade(str(legacy_database_path))
+        assert result["changed"] is True
+        assert migration_status(str(legacy_database_path))["state"] == "exact_expected"
+
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            assert {"ailocals_enrollment", "ailocals_worker", "ailocals_job"} <= _tables(
+                legacy_database_path
+            )
+            assert "ux_ailocals_job_submission" in _indexes(legacy_database_path, "ailocals_job")
+            transfer_columns = _columns(legacy_database_path, "transfer_capabilities")
+            assert {"ailocals_job_id", "submission_nonce"} <= transfer_columns
+            assert connection.execute("SELECT COUNT(*) FROM ailocals_job").fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT id, status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone() == (job_id, "queued")
+            assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        finally:
+            connection.close()
+
+        second = migration_upgrade(str(legacy_database_path))
+        assert second["changed"] is False
+        assert _schema_version_row(legacy_database_path) == (CURRENT_SCHEMA_VERSION, "ready")
+
+    def test_v12_to_v13_failure_rolls_back_tables_and_marks_failed(
+        self, legacy_database_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ace_service.migrations as migrations_module
+
+        _prepare_v12_database(legacy_database_path)
+
+        def injected_failure(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "CREATE TABLE ailocals_worker (id VARCHAR(36) PRIMARY KEY, "
+                "token_hash VARCHAR(64) NOT NULL UNIQUE)"
+            )
+            raise sqlite3.OperationalError("injected v13 migration failure")
+
+        monkeypatch.setattr(migrations_module, "_cp13_ddl", injected_failure)
+        with pytest.raises(MigrationError, match="rolled back"):
+            migration_upgrade(str(legacy_database_path))
+        assert "ailocals_worker" not in _tables(legacy_database_path)
+        assert _schema_version_row(legacy_database_path) == (
+            CURRENT_SCHEMA_VERSION,
+            "migration_failed",
+        )
+        with pytest.raises(MigrationError, match="durably incomplete"):
+            migration_upgrade(str(legacy_database_path))

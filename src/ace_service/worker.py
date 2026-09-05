@@ -40,6 +40,7 @@ from ace_service.models import (
     VariationAttempt,
     utc_now,
 )
+from ace_service.providers.ailocals import AilocalsProvider
 from ace_service.providers.base import (
     BackendId,
     BackendOperation,
@@ -555,7 +556,23 @@ class ControllerWorker:
             )
             payload = dict(self.payload_builder(job, attempt))
             fal_source: dict[str, Any] | None = None
-            if not isinstance(provider, FalProvider):
+            if isinstance(provider, AilocalsProvider):
+                # Universal worker: no transfer capability is issued while
+                # waiting for a Mac. URLs are minted at lease time from the
+                # same immutable job/attempt snapshot.
+                payload["result_upload"] = {"max_bytes": self.settings.transfer_max_output_bytes}
+                if job.job_type is JobType.COVER:
+                    if not job.source_sha256 or not job.source_byte_size:
+                        raise CoverSourceError(
+                            "prepared_source_invalid",
+                            "cover source metadata is incomplete",
+                        )
+                    payload["source"] = {
+                        "sha256": job.source_sha256,
+                        "bytes": job.source_byte_size,
+                        "format": "mp3",
+                    }
+            elif not isinstance(provider, FalProvider):
                 output_path = self._output_relative_path(job, attempt.variation_index)
                 output_issued = issue_transfer_url(
                     session,

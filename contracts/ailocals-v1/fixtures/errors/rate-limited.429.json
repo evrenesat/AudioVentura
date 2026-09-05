@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "rate_limited",
+    "message": "too many requests"
+  }
+}

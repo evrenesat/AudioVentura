@@ -1,0 +1,38 @@
+{
+  "protocol_version": "ailocals.v1",
+  "worker_name": "Evren MacBook Pro",
+  "software_version": "0.1.0",
+  "capabilities": [
+    {
+      "id": "tts.apple-speech.v1",
+      "category": "tts",
+      "parameters": {
+        "engine": "avspeech",
+        "languages": [
+          "nl-NL"
+        ],
+        "unit_kinds": [
+          "word",
+          "phrase"
+        ],
+        "max_bytes": 2000000,
+        "max_duration_ms": 30000
+      }
+    },
+    {
+      "id": "tts.chatterbox.v3",
+      "category": "tts",
+      "parameters": {
+        "engine": "chatterbox",
+        "languages": [
+          "nl"
+        ],
+        "unit_kinds": [
+          "sentence"
+        ],
+        "max_bytes": 4000000,
+        "max_duration_ms": 120000
+      }
+    }
+  ]
+}

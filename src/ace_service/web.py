@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from sqlalchemy import or_, select, text
 
+from ace_service.ailocals.protocol import AilocalsError
 from ace_service.auth import (
     attach_csrf_cookie,
     csrf_token,
@@ -947,6 +948,8 @@ def register_web_routes(app: FastAPI) -> None:
                     "jobs": _route_path(request, "jobs"),
                     "offline": _route_path(request, "offline"),
                     "offline_shell": _route_path(request, "offline_shell"),
+                    "local_workers": _route_path(request, "local_workers"),
+                    "local_workers_enroll": _route_path(request, "local_workers_enroll"),
                     "manifest": _route_path(request, "manifest"),
                     "app_css": _route_path(request, "static", path="app.css"),
                     "status_js": _route_path(request, "static", path="status.js"),
@@ -1165,6 +1168,101 @@ def register_web_routes(app: FastAPI) -> None:
             session.commit()
         return RedirectResponse(
             _route_path(request, "dashboard"), status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    @app.get("/local-workers", dependencies=[Depends(authenticated)], name="local_workers")
+    async def local_workers(
+        request: Request,
+        enrollment_token: str | None = None,
+    ) -> Response:
+        service = getattr(app.state, "ailocals_service", None)
+        settings: ServiceSettings = app.state.settings
+        root_path = request.scope.get("root_path") or ""
+        server_url = str(request.base_url).rstrip("/") + root_path
+        worker_views: list[dict[str, Any]] = []
+        if service is not None:
+            for worker in service.list_workers():
+                presence_states = {
+                    str(entry.get("id")): str(entry.get("state"))
+                    for entry in (
+                        worker.presence_json.get("capabilities", [])
+                        if isinstance(worker.presence_json, dict)
+                        else []
+                    )
+                    if isinstance(entry, dict)
+                }
+                worker_views.append(
+                    {
+                        "id": worker.id,
+                        "name": worker.name,
+                        "software_version": worker.software_version,
+                        "capabilities": ", ".join(
+                            str(entry.get("id"))
+                            for entry in worker.capabilities_json
+                            if isinstance(entry, dict)
+                        ),
+                        "presence": ", ".join(
+                            f"{capability}={state}" for capability, state in presence_states.items()
+                        )
+                        or "no presence yet",
+                        "last_seen_at": (
+                            worker.last_seen_at.strftime("%Y-%m-%d %H:%M:%SZ")
+                            if worker.last_seen_at is not None
+                            else "never"
+                        ),
+                        "revoked": worker.revoked_at is not None,
+                        "revoke_url": _route_path(
+                            request, "local_workers_revoke", worker_id=worker.id
+                        ),
+                    }
+                )
+        return render(
+            request,
+            "local_workers.html",
+            {
+                "workers": worker_views,
+                "ailocals_enabled": service is not None,
+                "ailocals_environment": settings.ailocals_environment,
+                "server_url": server_url,
+                "enrollment_token": enrollment_token,
+            },
+        )
+
+    @app.post(
+        "/local-workers/enrollments",
+        dependencies=[Depends(authenticated)],
+        name="local_workers_enroll",
+    )
+    async def create_local_worker_enrollment(request: Request) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        service = getattr(app.state, "ailocals_service", None)
+        if service is None:
+            return RedirectResponse(
+                _route_path(request, "local_workers"), status_code=status.HTTP_303_SEE_OTHER
+            )
+        token, _expires_at = service.create_enrollment()
+        return RedirectResponse(
+            _route_path(request, "local_workers") + "?enrollment_token=" + quote(token, safe=""),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    @app.post(
+        "/local-workers/workers/{worker_id}/revoke",
+        dependencies=[Depends(authenticated)],
+        name="local_workers_revoke",
+    )
+    async def revoke_local_worker(request: Request, worker_id: str) -> Response:
+        fields = await parse_form(request)
+        require_csrf(request, fields)
+        service = getattr(app.state, "ailocals_service", None)
+        if service is not None:
+            try:
+                service.revoke(worker_id)
+            except AilocalsError:
+                pass
+        return RedirectResponse(
+            _route_path(request, "local_workers"), status_code=status.HTTP_303_SEE_OTHER
         )
 
     @app.get("/", dependencies=[Depends(authenticated)], name="dashboard")

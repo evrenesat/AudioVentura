@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "enrollment_invalid",
+    "message": "enrollment token is invalid or expired"
+  }
+}

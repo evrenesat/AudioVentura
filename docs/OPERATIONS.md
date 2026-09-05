@@ -630,3 +630,15 @@ only after proving no controller/provider work remains. Keep the controller and
 watchdog running for idempotent cost-reducing retries. Never submit a replacement
 generation to diagnose a release problem. Restore both providers to confirmed
 zero before handoff.
+
+## Universal ailocals worker backend
+
+Set `AILOCALS_ENABLED=1` and add `ailocals/ace-step-v15-xl-turbo` to
+`INFERENCE_ENABLED_BACKENDS`, then set `AILOCALS_ENVIRONMENT` to the deployed
+environment (beta, production, or development). Migration 13 adds the
+ailocals enrollment, worker, and queue tables; apply it through the normal
+migration path with the usual database backup first. Enrollment tokens and
+worker revocation are managed in the web UI under Local workers. Legacy ACE
+Node and cloud providers stay configured and unchanged; disabling the
+ailocals backend is a configuration-only rollback for new jobs, while
+in-flight ailocals jobs resolve through existing lease-expiry reconciliation.

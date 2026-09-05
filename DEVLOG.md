@@ -1,5 +1,39 @@
 # Development Log
 
+## 2026-09-05 (ailocals universal worker backend, Plan 01)
+
+- Implemented the ailocals.v1 controller facade on `codex/ailocals-av-backend`
+  (base 5275dbb43ca878e93a4fad463c4c6c7bd32e4a01): migration 13 adds
+  `ailocals_enrollment`, `ailocals_worker`, and `ailocals_job` plus transfer
+  capability fencing columns; `src/ace_service/ailocals/` owns the strict
+  protocol boundary, durable service, and HTTP routes;
+  `providers/ailocals.py` adapts the same durable rows to the provider
+  contract so submit is idempotent across controller restarts and one ACE
+  inference attempt is never duplicated.
+- Claim-time lease issuance reconstructs the worker payload from the stored
+  job/attempt snapshot and mints fresh transfer capabilities with
+  ailocals/nonce linkage; `transfers._ensure_ailocals_authority` rejects late
+  or superseded source downloads and output uploads before publication.
+- Owner web section "Local workers" issues single-use 30-minute enrollment
+  tokens, shows the exact server URL and environment, lists workers with
+  presence and capabilities, and revokes workers (immediately terminal for
+  their owned leases).
+- Baseline recorded before edits: focused suites (node provider/worker/
+  transfers/migrations/node app/db) 91 passed; full suite had 96 pre-existing
+  failures confined to tests/test_quality_campaign.py and
+  tests/test_quality_eval.py (missing campaign fixture manifests in a fresh
+  checkout; unchanged by this work). Focused verification after edits:
+  139 passed across ailocals and regression suites; ruff check/format and
+  mypy src clean.
+- The exact frozen `contracts/ailocals-v1/` artifact is vendored from the
+  ailocals repository at frozen commit `e4f1cc9` (fix/ailocals-v1-contract:
+  align wire schema with authoritative validators); see
+  `contracts/ailocals-v1/ORIGIN.json` for source baselines and per-file
+  hashes. The frozen contract verification (`uv sync --frozen`,
+  `check-contract.py`, schema tests, ruff, mypy) was re-run green against
+  that exact revision before vendoring.
+
+
 ## 2026-08-31 (native macOS ACE Node implementation baseline)
 
 - Created the clean Mac implementation checkout at
