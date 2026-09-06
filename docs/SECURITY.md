@@ -265,3 +265,19 @@ Before deployment or public source publication:
 6. verify the configured image and model revisions are immutable;
 7. run the full tests and static checks;
 8. run one bounded live transfer/inference acceptance when deployment changed.
+
+## Universal ailocals worker routes
+
+- `GET api/ailocals/v1/info` is the only unauthenticated ailocals route and
+  returns capability names and limits only: no workers, owner data,
+  addresses, revisions, keys, or model inventory.
+- Every other ailocals route authenticates with dedicated
+  `X-Ailocals-Worker-Token` / `X-Ailocals-Enrollment-Token` /
+  `X-Ailocals-Lease-Token` headers. Credentials are random 32-byte base64url
+  values stored hashed; worker tokens appear only once in the enrollment
+  response.
+- Enrollment tokens are single-use, expire after 30 minutes, and are created
+  and revoked only through owner-authenticated web routes. At most one
+  non-revoked universal worker exists per deployment.
+- Error messages are bounded and safe: no prompts, audio, URLs, internal
+  exceptions, or tokens. Lease payloads never enter logs.

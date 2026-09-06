@@ -1,0 +1,53 @@
+{
+  "protocol_version": "speech-worker.v1",
+  "operation": "chat_completion",
+  "request_id": "req-01HXDEMO000000000000000001",
+  "model": "qwen3.5-2b-instruct",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Geef een korte samenvatting in het Nederlands."
+    },
+    {
+      "role": "assistant",
+      "content": "OK."
+    },
+    {
+      "role": "user",
+      "content": "Noem twee zinnen."
+    }
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "doublangu_stage_artifact",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "sentences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title",
+          "sentences"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "options": {
+    "temperature_milli": 700,
+    "max_output_tokens": 2048
+  },
+  "limits": {
+    "max_completion_bytes": 2097152
+  }
+}

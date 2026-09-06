@@ -1,0 +1,23 @@
+--ailocals-fixture-boundary
+Content-Disposition: form-data; name="metadata"
+Content-Type: application/json
+
+{
+  "protocol_version": "ailocals.v1",
+  "attempt": 1,
+  "result_sha256": "81158ed506a49687823b64787625dde1d4a96c90ef8ab8d7784ecece3618a5c8"
+}
+
+--ailocals-fixture-boundary
+Content-Disposition: form-data; name="result"
+Content-Type: application/json
+
+{
+  "request_id": "req-01HXDEMO000000000000000002",
+  "models": [
+    "qwen3.5-2b-instruct-Q4_K_M",
+    "test-model-b"
+  ]
+}
+
+--ailocals-fixture-boundary--

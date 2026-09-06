@@ -9,9 +9,13 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
+from ace_service.ailocals.protocol import AilocalsError, error_envelope
+from ace_service.ailocals.routes import router as ailocals_router
+from ace_service.ailocals.service import AilocalsWorkerService
 from ace_service.capacity.controller import CapacityController
 from ace_service.capacity.registry import build_capacity_registry
 from ace_service.cleanup import cleanup_controller, cleanup_loop_interval
@@ -27,6 +31,7 @@ from ace_service.db import (
 from ace_service.home_ingest import HomeIngestClient
 from ace_service.models import Job, JobStatus
 from ace_service.notifications import NotificationDispatcher
+from ace_service.providers.ailocals import AilocalsProvider
 from ace_service.providers.base import BackendOperation, ProviderName
 from ace_service.providers.fal import FalProvider, FalQueueTransport
 from ace_service.providers.fal_catalog import load_catalog
@@ -161,6 +166,7 @@ def create_app(
         session_factory = create_session_factory(engine)
 
     resolved_runpod = runpod_client
+    ailocals_service: AilocalsWorkerService | None = None
     if provider_registry is None:
         providers: list[Any] = []
         enabled = set(resolved_settings.enabled_backend_ids)
@@ -245,6 +251,12 @@ def create_app(
                     pool_timeout=resolved_settings.ace_node_pool_timeout_seconds,
                 )
             )
+        if "ailocals/ace-step-v15-xl-turbo" in configured:
+            resolved_settings.validate_ailocals_runtime()
+            ailocals_service = AilocalsWorkerService(
+                cast(SessionFactory, session_factory), resolved_settings
+            )
+            providers.append(AilocalsProvider(ailocals_service))
         configured_provider_names = {provider.capabilities.name for provider in providers}
         legacy_default: ProviderName | None = ProviderName(resolved_settings.inference_provider)
         if legacy_default not in configured_provider_names:
@@ -282,6 +294,10 @@ def create_app(
         resolved_worker.capacity_controller = capacity_controller
     if hasattr(resolved_worker, "capacity_registry"):
         resolved_worker.capacity_registry = capacity_registry
+    if ailocals_service is not None:
+        builder = getattr(resolved_worker, "payload_builder", None)
+        if builder is not None:
+            ailocals_service.payload_builder = builder
 
     app = FastAPI(
         title="ACE Service",
@@ -305,5 +321,16 @@ def create_app(
     app.state.worker = resolved_worker
     app.state.source_coordinator = resolved_source_coordinator
     app.state.cleanup_task = None
+    app.state.ailocals_service = ailocals_service
+    if ailocals_service is not None:
+        app.include_router(ailocals_router)
+
+    @app.exception_handler(AilocalsError)
+    async def ailocals_error_handler(request: Request, exc: AilocalsError) -> JSONResponse:
+        del request
+        return JSONResponse(
+            status_code=exc.http_status, content=error_envelope(exc.code, exc.message)
+        )
+
     register_web_routes(app)
     return app

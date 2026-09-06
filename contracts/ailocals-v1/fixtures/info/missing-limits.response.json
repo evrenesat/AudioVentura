@@ -1,0 +1,8 @@
+{
+  "protocol_version": "ailocals.v1",
+  "service_kind": "audioventura",
+  "environment": "production",
+  "supported_capabilities": [
+    "music.ace-step.v1"
+  ]
+}

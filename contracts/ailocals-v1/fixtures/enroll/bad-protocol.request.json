@@ -1,0 +1,22 @@
+{
+  "protocol_version": "0.9",
+  "worker_name": "Evren MacBook Pro",
+  "software_version": "0.1.0",
+  "capabilities": [
+    {
+      "id": "music.ace-step.v1",
+      "category": "music",
+      "parameters": {
+        "worker_schema": 2,
+        "model_bundle_revision": "ace-step-v15-xl-turbo-2026-08",
+        "manifest_sha256": "efccac4a21e72426ec12400754604cc64bd82908ea5f9083abc865b86ce4d841",
+        "accelerator": "mps",
+        "formats": [
+          "mp3",
+          "flac",
+          "wav"
+        ]
+      }
+    }
+  ]
+}

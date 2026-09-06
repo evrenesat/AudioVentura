@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "application_job_id": "7c1d0e5a-2b3f-4a68-9d0e-5f6a7b8c9d0e",
+  "variation_index": 2,
+  "submission_nonce": "8d2e1f6b-3c4a-5b79-ae1f-6a7b8c9d0e1f",
+  "input": {
+    "schema_version": 2,
+    "job_id": "7c1d0e5a-2b3f-4a68-9d0e-5f6a7b8c9d0e",
+    "submission_nonce": "8d2e1f6b-3c4a-5b79-ae1f-6a7b8c9d0e1f",
+    "variation_index": 2,
+    "task_type": "original",
+    "profile_id": "fast-beta-v1",
+    "resolved_parameters": {
+      "caption": "short fixture caption for auto duration",
+      "lyrics": "",
+      "seed": null,
+      "duration_mode": "auto",
+      "duration": -1.0
+    },
+    "generation": {
+      "prompt": "short fixture caption for auto duration",
+      "vocal_language": "en",
+      "prompt_mode": "direct",
+      "duration_mode": "auto",
+      "duration": -1.0,
+      "duration_seconds": null,
+      "output_format": "mp3"
+    },
+    "source": null,
+    "result_upload": {
+      "url": "https://transfer.invalid/output/demo-put-0002",
+      "max_bytes": 268435456
+    }
+  },
+  "source": null,
+  "result_upload": {
+    "url": "https://transfer.invalid/output/demo-put-0002",
+    "max_bytes": 268435456
+  }
+}

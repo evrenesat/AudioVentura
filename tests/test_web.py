@@ -1828,6 +1828,7 @@ def test_beta_root_path_keeps_complete_browser_contract_under_prefix(settings) -
                 ("/beta/library", "Library"),
                 ("/beta/playlists", "Playlists"),
                 ("/beta/projects", "Projects"),
+                ("/beta/local-workers", "Local workers"),
                 ("/beta/offline", "Offline"),
             ]
             assert dashboard.text.count('data-app-nav href="/beta/create"') == 1

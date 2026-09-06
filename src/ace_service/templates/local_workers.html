@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Local workers · ACE Service{% endblock %}
+{% block content %}
+<section class="section-heading">
+  <div><p class="eyebrow">Settings</p><h1>Local workers</h1></div>
+</section>
+<p class="muted">One universal Mac client can run ACE-Step jobs locally. Enrollment
+tokens are single-use and expire after 30 minutes. The exact environment for
+this deployment is <strong>{{ ailocals_environment }}</strong>.</p>
+{% if not ailocals_enabled %}
+<div class="empty"><p>The universal worker backend is disabled.</p>
+<p class="muted">Set AILOCALS_ENABLED=1 and include ailocals/ace-step-v15-xl-turbo in
+INFERENCE_ENABLED_BACKENDS to enable it.</p></div>
+{% else %}
+<section>
+  <h2>Connect a Mac</h2>
+  <p class="muted">In the ailocals app, add a connection with this exact server URL,
+  choose the services to share, then paste a one-time enrollment token.</p>
+  <form method="post" action="{{ urls.local_workers_enroll }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="button" type="submit">Create enrollment token</button>
+  </form>
+  {% if enrollment_token %}
+  <div class="project-list" style="margin-top: 1rem;">
+    <div class="project-card">
+      <h2>One-time enrollment token</h2>
+      <p><label for="enrollment-token-value">Copy this token now; it is shown once and expires in 30 minutes.</label></p>
+      <input id="enrollment-token-value" readonly value="{{ enrollment_token }}" style="width: 100%;">
+    </div>
+  </div>
+  {% endif %}
+  <div class="project-list" style="margin-top: 1rem;">
+    <div class="project-card">
+      <h2>Server URL</h2>
+      <p><label for="server-url-value">Enter this URL in the ailocals app connection form.</label></p>
+      <input id="server-url-value" readonly value="{{ server_url }}" style="width: 100%;">
+    </div>
+  </div>
+</section>
+<section>
+  <h2>Enrolled workers</h2>
+  {% if workers %}
+  <div class="project-list">
+    {% for worker in workers %}
+    <div class="project-card">
+      <div class="job-card-top"><span class="tag">{{ "Revoked" if worker.revoked else "Active" }}</span></div>
+      <h2>{{ worker.name }}</h2>
+      <p class="muted">Software {{ worker.software_version }} · Last seen {{ worker.last_seen_at }}</p>
+      <p class="muted">Services: {{ worker.capabilities }}</p>
+      <p class="muted">Presence: {{ worker.presence }}</p>
+      {% if not worker.revoked %}
+      <form method="post" action="{{ worker.revoke_url }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="button secondary" type="submit">Revoke worker</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty"><p>No local workers enrolled yet.</p></div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

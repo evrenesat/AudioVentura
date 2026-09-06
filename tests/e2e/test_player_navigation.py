@@ -26,6 +26,7 @@ def test_online_navigation_exposes_prefixed_creation_links(
         "Library",
         "Playlists",
         "Projects",
+        "Local workers",
         "Offline",
     ]
     assert nav.evaluate_all("nodes => nodes.map(node => node.getAttribute('href'))") == [
@@ -35,6 +36,7 @@ def test_online_navigation_exposes_prefixed_creation_links(
         "/beta/library",
         "/beta/playlists",
         "/beta/projects",
+        "/beta/local-workers",
         "/beta/offline",
     ]
     e2e_page.get_by_role("link", name="Create original", exact=True).click()

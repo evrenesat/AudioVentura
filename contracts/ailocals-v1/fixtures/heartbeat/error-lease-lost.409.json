@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "lease_lost",
+    "message": "attempt is expired or replaced"
+  }
+}

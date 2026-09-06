@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "worker_busy",
+    "message": "worker already holds an active lease for this capability"
+  }
+}

@@ -436,6 +436,18 @@ safe copy, an event key, and a same-origin path. The authenticated worker route
 is emitted under the configured root path and never receives provider or job
 secrets.
 
+### Universal ailocals worker backend
+
+`src/ace_service/ailocals/` implements the controller side of the shared
+`ailocals.v1` protocol. One enrolled Mac client enrolls with an owner-issued
+token, advertises presence, and leases queued submissions via outbound HTTPS;
+`AilocalsJob` rows are the durable queue, and the provider adapter reads the
+same rows, so controller restarts never re-enqueue or rerender. Transfer
+capabilities are minted only at claim time, carry ailocals/nonce linkage, and
+are fenced at the transfer boundary against cancellation and superseded
+attempts. The wire contract is the vendored frozen `contracts/ailocals-v1/`
+artifact; legacy node/cloud providers keep their existing behavior.
+
 ## Durable provider ownership
 
 The controller stores the provider name and external job ID on each job and

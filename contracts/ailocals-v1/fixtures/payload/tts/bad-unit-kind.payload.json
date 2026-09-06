@@ -1,0 +1,28 @@
+{
+  "render_id": "01J000000000000000000000AB",
+  "request_hash": "d9d6aac418a4aca04bb49687b5e078190f6f59931fb1d5a878ec9f38f9eb5d08",
+  "speech_unit_id": "01J000000000000000000000CD",
+  "language": "nl",
+  "unit_kind": "paragraph",
+  "spoken_text": "voorbeeld",
+  "context_pronunciation_key": null,
+  "profile": {
+    "engine": "avspeech",
+    "model_revision": "xander-2024-01",
+    "language": "nl-NL",
+    "voice_identifier": "com.apple.voice.enhanced.nl-NL.Xander",
+    "reference_audio_hash": null,
+    "speed_milli": 1000,
+    "pitch_cents": 0,
+    "mapping_version": "v1",
+    "mime_type": "audio/mp4",
+    "codec": "aac-lc",
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "active": true
+  },
+  "limits": {
+    "max_bytes": 2000000,
+    "max_duration_ms": 30000
+  }
+}

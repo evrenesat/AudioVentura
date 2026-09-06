@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "result_conflict",
+    "message": "a different result was already accepted for this attempt"
+  }
+}

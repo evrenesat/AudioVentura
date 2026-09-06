@@ -610,6 +610,15 @@ class ServiceSettings(BaseSettings):
         le=60,
     )
 
+    ailocals_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("AILOCALS_ENABLED", "ailocals_enabled"),
+    )
+    ailocals_environment: str = Field(
+        default="development",
+        validation_alias=AliasChoices("AILOCALS_ENVIRONMENT", "ailocals_environment"),
+    )
+
     @field_validator("eligible_gpu_ids")
     @classmethod
     def validate_eligible_gpu_ids(cls, value: list[str]) -> list[str]:
@@ -629,6 +638,13 @@ class ServiceSettings(BaseSettings):
         if normalized not in {"runpod", "salad", "mock", "node"}:
             raise ValueError("inference provider must be runpod, salad, mock, or node")
         return normalized
+
+    @field_validator("ailocals_environment")
+    @classmethod
+    def validate_ailocals_environment(cls, value: str) -> str:
+        if value not in {"beta", "production", "development"}:
+            raise ValueError("ailocals_environment must be beta, production, or development")
+        return value
 
     @field_validator("inference_enabled_backends")
     @classmethod
@@ -908,6 +924,9 @@ class ServiceSettings(BaseSettings):
         if any(item.startswith("node/") for item in enabled):
             self.validate_node_runtime()
 
+        if any(item == "ailocals/ace-step-v15-xl-turbo" for item in enabled):
+            self.validate_ailocals_runtime()
+
         if any(item.startswith("fal/") for item in enabled):
             if self.fal_key is None or self.fal_key.lower() in _PLACEHOLDERS:
                 raise ValueError("fal_key is required when a Fal backend is enabled")
@@ -989,6 +1008,12 @@ class ServiceSettings(BaseSettings):
         ):
             raise ValueError("mock_token is required when a mock backend is enabled")
         self.mock_base_url = self.validate_mock_base_url(self.mock_base_url)
+
+    def validate_ailocals_runtime(self) -> None:
+        """Require the explicit universal-worker toggle when its backend is enabled."""
+
+        if not self.ailocals_enabled:
+            raise ValueError("ailocals_enabled is required when the ailocals backend is enabled")
 
     def validate_node_runtime(self) -> None:
         """Require private node credentials only when the backend is enabled."""

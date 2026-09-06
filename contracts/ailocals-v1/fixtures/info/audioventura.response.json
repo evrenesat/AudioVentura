@@ -1,0 +1,17 @@
+{
+  "protocol_version": "ailocals.v1",
+  "service_kind": "audioventura",
+  "environment": "production",
+  "supported_capabilities": [
+    "music.ace-step.v1"
+  ],
+  "limits": {
+    "poll_max_seconds": 25,
+    "lease_seconds": 90,
+    "heartbeat_seconds": 30,
+    "presence_seconds": 20,
+    "control_max_bytes": 262144,
+    "payload_max_bytes": 2097152,
+    "result_max_bytes": 2097152
+  }
+}

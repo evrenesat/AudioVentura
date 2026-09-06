@@ -1,0 +1,7 @@
+{
+  "protocol_version": "ailocals.v1",
+  "error": {
+    "code": "unauthorized",
+    "message": "worker credential is missing or invalid"
+  }
+}
