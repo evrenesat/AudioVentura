@@ -577,6 +577,7 @@ def _backend_choices(
                 "salad/ace-step-v15-xl-turbo": "Salad · ACE-Step 1.5 XL Turbo",
                 "mock/midi-sequential": "Mock · Sequential MIDI → MP3",
                 "node/ace-step-v15-xl-turbo": "ACE Node · ACE-Step 1.5 XL Turbo",
+                "ailocals/ace-step-v15-xl-turbo": "Local Mac (ailocals) · ACE-Step 1.5 XL Turbo",
             }.get(backend_id, backend_id)
             actual_operation = (
                 capabilities.operation.value
