@@ -463,7 +463,7 @@ def _cp8_ddl(connection: sqlite3.Connection) -> None:
     for table_name in ("jobs", "variation_attempts", "outputs"):
         unknown = connection.execute(
             f"SELECT COUNT(*) FROM {table_name} WHERE inference_provider IS NOT NULL "
-            "AND inference_provider NOT IN ('runpod', 'salad', 'fal', 'mock')"
+            "AND inference_provider NOT IN ('runpod', 'salad', 'fal', 'mock', 'node')"
         ).fetchone()
         if unknown is None or int(unknown[0]) != 0:
             raise MigrationError(f"backend migration found unsupported provider in {table_name}")
@@ -474,14 +474,16 @@ def _cp8_ddl(connection: sqlite3.Connection) -> None:
     connection.execute(
         "UPDATE jobs SET inference_backend = CASE inference_provider "
         "WHEN 'runpod' THEN 'runpod/ace-step-v15-xl-turbo' "
-        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' END "
+        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' "
+        "WHEN 'node' THEN 'node/ace-step-v15-xl-turbo' END "
         "WHERE inference_backend IS NULL"
     )
     connection.execute(
         "UPDATE jobs SET backend_snapshot_json = json_object("
         "'backend_id', inference_backend, 'provider', inference_provider, "
         "'label', CASE inference_provider WHEN 'runpod' THEN 'Runpod · ACE-Step 1.5 XL Turbo' "
-        "WHEN 'salad' THEN 'Salad · ACE-Step 1.5 XL Turbo' END, "
+        "WHEN 'salad' THEN 'Salad · ACE-Step 1.5 XL Turbo' "
+        "WHEN 'node' THEN 'ACE Node · ACE-Step 1.5 XL Turbo' END, "
         "'catalog_revision', 'builtin-v1') WHERE backend_snapshot_json IS NULL"
     )
     connection.execute(
@@ -492,7 +494,8 @@ def _cp8_ddl(connection: sqlite3.Connection) -> None:
     connection.execute(
         "UPDATE variation_attempts SET inference_backend = CASE inference_provider "
         "WHEN 'runpod' THEN 'runpod/ace-step-v15-xl-turbo' "
-        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' END "
+        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' "
+        "WHEN 'node' THEN 'node/ace-step-v15-xl-turbo' END "
         "WHERE inference_backend IS NULL"
     )
     connection.execute(
@@ -502,7 +505,8 @@ def _cp8_ddl(connection: sqlite3.Connection) -> None:
     connection.execute(
         "UPDATE outputs SET inference_backend = CASE inference_provider "
         "WHEN 'runpod' THEN 'runpod/ace-step-v15-xl-turbo' "
-        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' END "
+        "WHEN 'salad' THEN 'salad/ace-step-v15-xl-turbo' "
+        "WHEN 'node' THEN 'node/ace-step-v15-xl-turbo' END "
         "WHERE inference_backend IS NULL AND inference_provider IS NOT NULL"
     )
 

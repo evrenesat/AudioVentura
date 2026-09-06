@@ -1182,6 +1182,64 @@ class TestV12ToV13Upgrade:
         assert second["changed"] is False
         assert _schema_version_row(legacy_database_path) == (CURRENT_SCHEMA_VERSION, "ready")
 
+    def test_v12_to_v13_accepts_node_provider_jobs_from_native_beta(
+        self, legacy_database_path: Path
+    ) -> None:
+        """Checkpoint 8 revalidation must accept node jobs written by the native beta."""
+
+        project_id = "423e4567-e89b-12d3-a456-426614174804"
+        job_id = "523e4567-e89b-12d3-a456-426614174805"
+        _prepare_v12_database(legacy_database_path)
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            connection.execute(
+                "INSERT INTO projects (id, job_type, title, created_at, updated_at) "
+                "VALUES (?, 'cover', 'Native node beta project', ?, ?)",
+                (project_id, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO jobs (id, project_id, job_type, status, output_format, "
+                "variation_count, inference_provider, created_at, updated_at) VALUES "
+                "(?, ?, 'cover', 'completed', 'mp3', 1, 'node', ?, ?)",
+                (job_id, project_id, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO variation_attempts "
+                "(job_id, variation_index, status, inference_provider, provider_job_id, "
+                "created_at, updated_at) VALUES "
+                "(?, 1, 'completed', 'node', 'node-1', ?, ?)",
+                (job_id, "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO outputs "
+                "(job_id, variation_index, result_index, inference_provider, provider_job_id, "
+                "relative_path, mime_type, byte_size, sha256, created_at) VALUES "
+                "(?, 1, 0, 'node', 'node-1', 'result.mp3', 'audio/mpeg', 1, ?, ?)",
+                (job_id, "b" * 64, "2026-09-02T00:00:00Z"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = migration_upgrade(str(legacy_database_path))
+        assert result["changed"] is True
+        assert migration_status(str(legacy_database_path))["state"] == "exact_expected"
+
+        connection = sqlite3.connect(str(legacy_database_path))
+        try:
+            assert connection.execute(
+                "SELECT inference_provider, inference_backend FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone() == ("node", "node/ace-step-v15-xl-turbo")
+            assert connection.execute(
+                "SELECT inference_backend FROM variation_attempts"
+            ).fetchone() == ("node/ace-step-v15-xl-turbo",)
+            assert connection.execute("SELECT inference_backend FROM outputs").fetchone() == (
+                "node/ace-step-v15-xl-turbo",
+            )
+        finally:
+            connection.close()
+
     def test_v12_to_v13_failure_rolls_back_tables_and_marks_failed(
         self, legacy_database_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
